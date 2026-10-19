@@ -1,0 +1,25 @@
+﻿{
+    "source":  "tea",
+    "date":  "2026-10-15",
+    "room_id":  "855053",
+    "round_index":  15,
+    "round_uid":  "855053-2026-10-15-r15",
+    "frames":  [
+                   "2026-10-15/855053/r15/frame_01.png",
+                   "2026-10-15/855053/r15/frame_02.png",
+                   "2026-10-15/855053/r15/frame_03.png"
+               ],
+    "capture_timestamps":  [
+                               1792132543.1842692,
+                               1792132545.5244305,
+                               1792132547.941092
+                           ],
+    "status":  "captured",
+    "user_account":  "晓红",
+    "harvested_at":  "2026-10-16T14:35:49+08:00",
+    "safety":  {
+                   "spent_房卡":  false,
+                   "clicked_开始游戏":  false,
+                   "joined_table":  false
+               }
+}

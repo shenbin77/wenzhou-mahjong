@@ -1,0 +1,22 @@
+2026-10-15 21:01:20 CST
+resume start; have=19
+2026-10-15 21:28:11 CST START assemble douyin_.git.tar
+-rw-r--r-- 1 box box 7.1G Oct 15 21:28 /workspace/majiang-data/incoming/chunks/assembled/douyin_.git.tar
+2026-10-15 21:28:23 CST DONE assemble douyin_.git.tar size=7524448256
+2026-10-15 21:51:14 CST RESUME extract remaining complete archives
+2026-10-15 21:51:22 CST extract-complete-groups DONE
+2026-10-15 21:59:47 CST PARTIAL stop; missing=['douyin_rest_009.part006', 'douyin_rest_009.part007', 'douyin_rest_009.part008', 'douyin_rest_009.part009']
+2026-10-15 22:02:20 CST GOT rest_009 parts 006-009; assembling
+-rw-r--r-- 1 box box 95M Oct 15 21:45 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part000
+-rw-r--r-- 1 box box 95M Oct 15 21:45 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part001
+-rw-r--r-- 1 box box 95M Oct 15 21:46 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part002
+-rw-r--r-- 1 box box 95M Oct 15 21:46 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part003
+-rw-r--r-- 1 box box 95M Oct 15 21:47 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part004
+-rw-r--r-- 1 box box 95M Oct 15 21:47 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part005
+-rw-r--r-- 1 box box 95M Oct 15 22:01 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part006
+-rw-r--r-- 1 box box 95M Oct 15 22:01 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part007
+-rw-r--r-- 1 box box 95M Oct 15 22:01 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part008
+-rw-r--r-- 1 box box 63M Oct 15 22:02 /workspace/majiang-data/incoming/chunks/parts/douyin_rest_009.part009
+-rw-r--r-- 1 box box 918M Oct 15 22:02 /workspace/majiang-data/incoming/chunks/assembled/douyin_rest_009.tar
+2026-10-15 22:02:27 CST all parts present; need cleared
+2026-10-15 22:02:48 CST COMPLETE files=24801 dirs=1133 bytes=11626550270 pct=100

@@ -1,0 +1,25 @@
+﻿{
+    "source":  "tea",
+    "date":  "2026-10-15",
+    "room_id":  "569283",
+    "round_index":  15,
+    "round_uid":  "569283-2026-10-15-r15",
+    "frames":  [
+                   "2026-10-15/569283/r15/frame_01.png",
+                   "2026-10-15/569283/r15/frame_02.png",
+                   "2026-10-15/569283/r15/frame_03.png"
+               ],
+    "capture_timestamps":  [
+                               1792133903.8804214,
+                               1792133906.3311784,
+                               1792133908.7836144
+                           ],
+    "status":  "captured",
+    "user_account":  "jingjing",
+    "harvested_at":  "2026-10-16T14:58:30+08:00",
+    "safety":  {
+                   "spent_cards":  false,
+                   "clicked_start":  false,
+                   "joined_table":  false
+               }
+}

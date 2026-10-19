@@ -1,0 +1,16 @@
+{
+  "player_count": 4,
+  "discarder": 1,
+  "claimants": [
+    3,
+    0
+  ],
+  "expect_winner": 3,
+  "note": "from seat1, CCW order is 2,3,0 → 3 wins",
+  "player_count_2p": 2,
+  "discarder_2p": 0,
+  "claimants_2p": [
+    1
+  ],
+  "expect_winner_2p": 1
+}

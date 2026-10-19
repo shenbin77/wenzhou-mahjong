@@ -1,0 +1,16 @@
+{
+  "source": "raw_01.png",
+  "source_sha256": "49bb518090a7e33de6e7923032898d04b7071f70b1ebe093545bc71c79155659",
+  "frame_size": [
+    1600,
+    900
+  ],
+  "crops_xyxy": {
+    "daily_task_title.png": [
+      220,
+      40,
+      585,
+      135
+    ]
+  }
+}

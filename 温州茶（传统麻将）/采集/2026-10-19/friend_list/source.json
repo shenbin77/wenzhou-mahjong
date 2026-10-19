@@ -1,0 +1,22 @@
+{
+  "source": "raw_01.png",
+  "source_sha256": "c2cb5bc1b5f058c6011cbd5c0820b0adf14cd666237236b1197a9fe605d23ee1",
+  "frame_size": [
+    1600,
+    900
+  ],
+  "crops_xyxy": {
+    "friend_list_title.png": [
+      4,
+      35,
+      155,
+      105
+    ],
+    "friend_list_collapse.png": [
+      467,
+      403,
+      529,
+      492
+    ]
+  }
+}

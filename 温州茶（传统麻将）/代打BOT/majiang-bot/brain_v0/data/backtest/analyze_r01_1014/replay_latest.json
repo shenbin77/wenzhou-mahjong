@@ -1,0 +1,487 @@
+{
+  "stats": {
+    "generated_at": "2026-10-15 20:29:36 CST",
+    "dry_run": false,
+    "input_note": "explicit:/workspace/majiang-data/replay_harvest/2026-10-14/r01",
+    "n_frames": 5,
+    "n_ok": 5,
+    "n_with_tiles": 3,
+    "n_complete": 3,
+    "n_gameplay": 3,
+    "n_hand14": 0,
+    "n_hand13": 3,
+    "n_rounds_estimated": 1,
+    "recognition_complete_rate": 1.0,
+    "recognition_complete_rate_note": null,
+    "hongzhong_dist_gameplay": {
+      "1": 3
+    },
+    "starting_hongzhong_dist": {
+      "1": 1
+    },
+    "starting_shanten_avg": 2.0,
+    "starting_shanten_note": null,
+    "n_settled_rounds": 0,
+    "n_wins_by_score_sign": 0,
+    "win_rate": null,
+    "win_rate_note": "无法从结算帧/settle OCR 推出胜率：本批无可靠 settle_score",
+    "hu_rate_note": "无法从结算帧/settle OCR 推出胜率：本批无可靠 settle_score",
+    "elapsed_sec": 0.21,
+    "template_dir": "/workspace/majiang-bot/pc_bot/templates_hongzhong_v2"
+  },
+  "rounds": [
+    {
+      "start_frame": "frame_02.png",
+      "frames": [
+        "frame_02.png",
+        "frame_03.png",
+        "frame_04.png"
+      ],
+      "hands": [
+        {
+          "name": "frame_02.png",
+          "concealed": [
+            55,
+            1,
+            2,
+            3,
+            6,
+            47,
+            49,
+            22,
+            22,
+            24,
+            25,
+            25,
+            29
+          ],
+          "shanten": 2,
+          "hongzhong": 1,
+          "is_hand14": false
+        },
+        {
+          "name": "frame_03.png",
+          "concealed": [
+            55,
+            1,
+            2,
+            3,
+            6,
+            47,
+            49,
+            22,
+            22,
+            24,
+            25,
+            25,
+            29
+          ],
+          "shanten": 2,
+          "hongzhong": 1,
+          "is_hand14": false
+        },
+        {
+          "name": "frame_04.png",
+          "concealed": [
+            55,
+            1,
+            2,
+            3,
+            6,
+            47,
+            49,
+            22,
+            22,
+            24,
+            25,
+            25,
+            29
+          ],
+          "shanten": 2,
+          "hongzhong": 1,
+          "is_hand14": false
+        }
+      ],
+      "starting_hand": [
+        55,
+        1,
+        2,
+        3,
+        6,
+        47,
+        49,
+        22,
+        22,
+        24,
+        25,
+        25,
+        29
+      ],
+      "starting_shanten": 2,
+      "starting_hongzhong": 1,
+      "settle_score": null,
+      "settle_frame": null
+    }
+  ],
+  "frames": [
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r01/frame_01.png",
+      "name": "frame_01.png",
+      "rel": "frame_01.png",
+      "mtime": "2026-10-15 20:08:50 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 1,
+        "round_uid": "302805-2026-10-14-r01",
+        "replay_code": "72321415",
+        "frames": [
+          "2026-10-14/r01/frame_01.png",
+          "2026-10-14/r01/frame_02.png",
+          "2026-10-14/r01/frame_03.png",
+          "2026-10-14/r01/frame_04.png"
+        ],
+        "capture_timestamps": [
+          1792066130.4138184,
+          1792066130.4138184,
+          1792066130.4178183,
+          1792066130.4178183
+        ],
+        "status": "captured",
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        900
+      ],
+      "ok": true,
+      "concealed": [],
+      "concealed_names": [],
+      "melds": [],
+      "n_boxes": 0,
+      "n_accepted": 0,
+      "complete": false,
+      "gameplay": false,
+      "is_hand13": false,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 0,
+      "shanten": null,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    },
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r01/frame_02.png",
+      "name": "frame_02.png",
+      "rel": "frame_02.png",
+      "mtime": "2026-10-15 20:08:50 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 1,
+        "round_uid": "302805-2026-10-14-r01",
+        "replay_code": "72321415",
+        "frames": [
+          "2026-10-14/r01/frame_01.png",
+          "2026-10-14/r01/frame_02.png",
+          "2026-10-14/r01/frame_03.png",
+          "2026-10-14/r01/frame_04.png"
+        ],
+        "capture_timestamps": [
+          1792066130.4138184,
+          1792066130.4138184,
+          1792066130.4178183,
+          1792066130.4178183
+        ],
+        "status": "captured",
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        900
+      ],
+      "ok": true,
+      "concealed": [
+        55,
+        1,
+        2,
+        3,
+        6,
+        47,
+        49,
+        22,
+        22,
+        24,
+        25,
+        25,
+        29
+      ],
+      "concealed_names": [
+        "红中(财神)",
+        "1万",
+        "2万",
+        "3万",
+        "6万",
+        "7条",
+        "9条",
+        "2筒",
+        "2筒",
+        "4筒",
+        "5筒",
+        "5筒",
+        "9筒"
+      ],
+      "melds": [],
+      "n_boxes": 13,
+      "n_accepted": 13,
+      "complete": true,
+      "gameplay": true,
+      "is_hand13": true,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 1,
+      "shanten": 2,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    },
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r01/frame_03.png",
+      "name": "frame_03.png",
+      "rel": "frame_03.png",
+      "mtime": "2026-10-15 20:08:50 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 1,
+        "round_uid": "302805-2026-10-14-r01",
+        "replay_code": "72321415",
+        "frames": [
+          "2026-10-14/r01/frame_01.png",
+          "2026-10-14/r01/frame_02.png",
+          "2026-10-14/r01/frame_03.png",
+          "2026-10-14/r01/frame_04.png"
+        ],
+        "capture_timestamps": [
+          1792066130.4138184,
+          1792066130.4138184,
+          1792066130.4178183,
+          1792066130.4178183
+        ],
+        "status": "captured",
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        900
+      ],
+      "ok": true,
+      "concealed": [
+        55,
+        1,
+        2,
+        3,
+        6,
+        47,
+        49,
+        22,
+        22,
+        24,
+        25,
+        25,
+        29
+      ],
+      "concealed_names": [
+        "红中(财神)",
+        "1万",
+        "2万",
+        "3万",
+        "6万",
+        "7条",
+        "9条",
+        "2筒",
+        "2筒",
+        "4筒",
+        "5筒",
+        "5筒",
+        "9筒"
+      ],
+      "melds": [],
+      "n_boxes": 13,
+      "n_accepted": 13,
+      "complete": true,
+      "gameplay": true,
+      "is_hand13": true,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 1,
+      "shanten": 2,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    },
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r01/frame_04.png",
+      "name": "frame_04.png",
+      "rel": "frame_04.png",
+      "mtime": "2026-10-15 20:08:50 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 1,
+        "round_uid": "302805-2026-10-14-r01",
+        "replay_code": "72321415",
+        "frames": [
+          "2026-10-14/r01/frame_01.png",
+          "2026-10-14/r01/frame_02.png",
+          "2026-10-14/r01/frame_03.png",
+          "2026-10-14/r01/frame_04.png"
+        ],
+        "capture_timestamps": [
+          1792066130.4138184,
+          1792066130.4138184,
+          1792066130.4178183,
+          1792066130.4178183
+        ],
+        "status": "captured",
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        900
+      ],
+      "ok": true,
+      "concealed": [
+        55,
+        1,
+        2,
+        3,
+        6,
+        47,
+        49,
+        22,
+        22,
+        24,
+        25,
+        25,
+        29
+      ],
+      "concealed_names": [
+        "红中(财神)",
+        "1万",
+        "2万",
+        "3万",
+        "6万",
+        "7条",
+        "9条",
+        "2筒",
+        "2筒",
+        "4筒",
+        "5筒",
+        "5筒",
+        "9筒"
+      ],
+      "melds": [],
+      "n_boxes": 13,
+      "n_accepted": 13,
+      "complete": true,
+      "gameplay": true,
+      "is_hand13": true,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 1,
+      "shanten": 2,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    },
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r01/detail_row.png",
+      "name": "detail_row.png",
+      "rel": "detail_row.png",
+      "mtime": "2026-10-15 20:15:43 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 1,
+        "round_uid": "302805-2026-10-14-r01",
+        "replay_code": "72321415",
+        "frames": [
+          "2026-10-14/r01/frame_01.png",
+          "2026-10-14/r01/frame_02.png",
+          "2026-10-14/r01/frame_03.png",
+          "2026-10-14/r01/frame_04.png"
+        ],
+        "capture_timestamps": [
+          1792066130.4138184,
+          1792066130.4138184,
+          1792066130.4178183,
+          1792066130.4178183
+        ],
+        "status": "captured",
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        80
+      ],
+      "ok": true,
+      "concealed": [],
+      "concealed_names": [],
+      "melds": [],
+      "n_boxes": 0,
+      "n_accepted": 0,
+      "complete": false,
+      "gameplay": false,
+      "is_hand13": false,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 0,
+      "shanten": null,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    }
+  ]
+}

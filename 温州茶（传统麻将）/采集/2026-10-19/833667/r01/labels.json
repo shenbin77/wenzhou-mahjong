@@ -1,0 +1,54 @@
+{
+  "status": "manual_visual_review_of_bottom_hand",
+  "source_video": "room833667_round1_ec9baee3.mp4",
+  "tile_id_convention": "tile_vision.py: 1-9=万,21-29=筒,41-49=条,64=北,67=白",
+  "frames": {
+    "frame_15s.png": {
+      "second": 15,
+      "expected_ids": [
+        1,
+        2,
+        3,
+        3,
+        67,
+        8,
+        42,
+        46,
+        47,
+        48,
+        22,
+        22,
+        25,
+        29,
+        64,
+        64,
+        47
+      ],
+      "visual_note": "17张亮牌；第5张为白板，右侧分离的最后一张为7条",
+      "sha256": "f7baf2697e0b8eb9a38e081614cb5f262ff5b3460c73bec23ffde668c1b3fae9"
+    },
+    "frame_20s.png": {
+      "second": 20,
+      "expected_ids": [
+        1,
+        2,
+        3,
+        3,
+        67,
+        8,
+        42,
+        46,
+        47,
+        47,
+        48,
+        22,
+        22,
+        25,
+        64,
+        64
+      ],
+      "visual_note": "16张亮牌；与15秒画面同一局，不能作为独立局面",
+      "sha256": "ac457c4bc4ec9c7c19d87d512f0adabf5746b40bdae65d3b6299581069217a3e"
+    }
+  }
+}

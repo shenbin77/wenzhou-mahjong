@@ -1,0 +1,15 @@
+[11:45:01] harvest_tea.py 启动
+[11:45:01] serial=emulator-5556 dry_run=False date=2026-10-16 from_zhanji=True
+[11:45:01] 模板加载: btn_bisai.png 319x244 阈值=0.90 (比赛按钮)
+[11:45:01] 模板加载: btn_enter.png 246x117 阈值=0.90 (进入按钮)
+[11:45:01] 模板加载: btn_zhanji.png 145x121 阈值=0.90 (战绩按钮)
+[11:45:01] 模板加载: btn_chakan_huifang.png 368x72 阈值=0.90 (查看回放)
+[11:45:01] 模板加载: btn_close_x.png 86x73 阈值=0.85 (弹窗X)
+[11:45:01] 模板加载: btn_date.png 240x84 阈值=0.85 (日期下拉框)
+[11:45:01] 模板加载: btn_refresh.png 83x69 阈值=0.85 (刷新按钮)
+[11:45:01] 模板加载: btn_date_1016_item.png 120x23 阈值=0.80 (下拉列表中的2026-10-16)
+[11:45:01] adb devices:
+List of devices attached
+emulator-5554	offline
+emulator-5556	device
+[11:45:01] === 选择日期: 2026-10-16 (OCR) ===

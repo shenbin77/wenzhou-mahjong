@@ -1,0 +1,22 @@
+{
+  "source": "raw_01.png",
+  "source_sha256": "5359d9817e4361ede07e04bf40e71b9ca49a6f51339ff35817ceb6d1b7e99cb6",
+  "frame_size": [
+    1600,
+    900
+  ],
+  "crops_xyxy": {
+    "promo_discount_title.png": [
+      403,
+      126,
+      1003,
+      260
+    ],
+    "promo_discount_close.png": [
+      1322,
+      102,
+      1390,
+      167
+    ]
+  }
+}

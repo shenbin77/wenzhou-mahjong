@@ -1,0 +1,13 @@
+{
+  "template": "btn_bisai.png",
+  "template_source": "../../templates/ui/overlays/lobby_main.png",
+  "template_source_sha256": "e1405905318df3d2537abfb0a9fd33f6efdfb2566a80f6e66bde73020395b731",
+  "crop_xyxy": [
+    255,
+    484,
+    495,
+    679
+  ],
+  "validation_frame": "raw_01.png",
+  "validation_sha256": "66017e5bae3b23a1497e24c5b1191cbe0b7315f3df9ea142e6aa5735e8279728"
+}

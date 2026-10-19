@@ -1,0 +1,29 @@
+{
+  "variant": "wenzhou_tea",
+  "user_account": "晓红",
+  "source_note": "4p tea tables enable 三背 + 跟风; same base options as 2p screenshots",
+  "player_count": 4,
+  "rounds": 16,
+  "base_progression": [
+    2,
+    4,
+    6,
+    8
+  ],
+  "allow_continue_table": true,
+  "split_cost": true,
+  "gang_scores": true,
+  "gangshanghua_double": true,
+  "no_zhong_fa": true,
+  "banqing": true,
+  "qingyise_unordered": true,
+  "enable_sanbei": true,
+  "enable_genfeng": true,
+  "expected_banner": "进阶(2468) / 杠算分 / 杠上开花双翻 / 无中发 / 半清 / 清一色(无序) / 4人",
+  "sample_streak_bases": {
+    "1": 2,
+    "2": 4,
+    "3": 6,
+    "4": 8
+  }
+}

@@ -1,0 +1,33 @@
+﻿{
+    "room_id":  "010478",
+    "capture_timestamps":  [
+                               1792129363.3205962,
+                               1792129366.8081825,
+                               1792129370.2753718
+                           ],
+    "user_account":  "晓红",
+    "source":  "tea",
+    "safety":  {
+                   "spent_房卡":  false,
+                   "clicked_开始游戏":  false,
+                   "joined_table":  false
+               },
+    "game_type":  "温州麻将",
+    "frames":  [
+                   "2026-10-12/010478/r11/frame_01.png",
+                   "2026-10-12/010478/r11/frame_02.png",
+                   "2026-10-12/010478/r11/frame_03.png"
+               ],
+    "round_index":  11,
+    "round_uid":  "010478-2026-10-12-r11",
+    "session_start":  "23:16",
+    "status":  "captured",
+    "date":  "2026-10-12",
+    "players":  [
+                    "徐小平",
+                    "微笑",
+                    "茗妍",
+                    "晓红"
+                ],
+    "harvested_at":  "2026-10-16T13:42:52+08:00"
+}

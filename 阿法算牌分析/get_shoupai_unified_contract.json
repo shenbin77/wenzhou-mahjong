@@ -1,0 +1,136 @@
+{
+  "source": "阿法算牌\\runtime\\scripts\\get_shoupai_unified.pyc",
+  "sha256": "22e22a2ead544da02d6fc79d41f9ee4dc4ac41149430695de4be47524e806eb8",
+  "python_magic": "a70d0d0a",
+  "analysis": {
+    "name": "<module>",
+    "first_line": 1,
+    "args": [],
+    "names": [
+      "mahjong_runtime.unified_runner",
+      "main",
+      "__name__",
+      "SystemExit"
+    ],
+    "constants": [
+      0,
+      "('main',)",
+      "__main__",
+      null
+    ],
+    "instructions": [
+      {
+        "offset": 0,
+        "op": "RESUME",
+        "arg": 0
+      },
+      {
+        "offset": 2,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 4,
+        "op": "LOAD_CONST",
+        "arg": "('main',)"
+      },
+      {
+        "offset": 6,
+        "op": "IMPORT_NAME",
+        "arg": "mahjong_runtime.unified_runner"
+      },
+      {
+        "offset": 8,
+        "op": "IMPORT_FROM",
+        "arg": "main"
+      },
+      {
+        "offset": 10,
+        "op": "STORE_NAME",
+        "arg": "main"
+      },
+      {
+        "offset": 12,
+        "op": "POP_TOP",
+        "arg": null
+      },
+      {
+        "offset": 14,
+        "op": "LOAD_NAME",
+        "arg": "__name__"
+      },
+      {
+        "offset": 16,
+        "op": "LOAD_CONST",
+        "arg": "__main__"
+      },
+      {
+        "offset": 18,
+        "op": "COMPARE_OP",
+        "arg": "=="
+      },
+      {
+        "offset": 24,
+        "op": "POP_JUMP_FORWARD_IF_FALSE",
+        "arg": 64
+      },
+      {
+        "offset": 26,
+        "op": "PUSH_NULL",
+        "arg": null
+      },
+      {
+        "offset": 28,
+        "op": "LOAD_NAME",
+        "arg": "SystemExit"
+      },
+      {
+        "offset": 30,
+        "op": "PUSH_NULL",
+        "arg": null
+      },
+      {
+        "offset": 32,
+        "op": "LOAD_NAME",
+        "arg": "main"
+      },
+      {
+        "offset": 34,
+        "op": "PRECALL",
+        "arg": 0
+      },
+      {
+        "offset": 38,
+        "op": "CALL",
+        "arg": 0
+      },
+      {
+        "offset": 48,
+        "op": "PRECALL",
+        "arg": 1
+      },
+      {
+        "offset": 52,
+        "op": "CALL",
+        "arg": 1
+      },
+      {
+        "offset": 62,
+        "op": "RAISE_VARARGS",
+        "arg": 1
+      },
+      {
+        "offset": 64,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 66,
+        "op": "RETURN_VALUE",
+        "arg": null
+      }
+    ],
+    "children": []
+  },
+  "limit": "Static bytecode inventory; no target code was executed."
+}

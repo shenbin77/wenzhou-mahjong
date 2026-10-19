@@ -1,0 +1,91 @@
+2026-10-18 14:37:07 INFO  (LoggingInitialization) Using log config file: jar:file:/mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Framework/Generic/lib/Generic.jar!/generic.log4j.xml  
+2026-10-18 14:37:07 INFO  (LoggingInitialization) Using log file: /mnt/d/温州麻将/阿法算牌分析/ghidra_linux.log  
+2026-10-18 14:37:10 DEBUG (GhidraObjectInputFilter) Including serial input filter: FileSystem/data/client.rmi.serial.filter  
+2026-10-18 14:37:10 INFO  (Preferences) Loading user preferences: /root/.config/ghidra/ghidra_12.1.4_PUBLIC/preferences  
+2026-10-18 14:37:10 INFO  (ClassSearcher) Searching for classes...  
+2026-10-18 14:37:12 INFO  (ClassSearcher) Class search complete (1747 ms)  
+2026-10-18 14:37:13 INFO  (DefaultSSLContextInitializer) Initializing SSL Context  
+2026-10-18 14:37:13 INFO  (SecureRandomFactory) Initializing Random Number Generator...  
+2026-10-18 14:37:13 INFO  (SecureRandomFactory) Random Number Generator initialization complete: NativePRNGNonBlocking  
+2026-10-18 14:37:13 INFO  (DefaultTrustManagerFactory) Trust manager disabled, cacerts have not been set  
+2026-10-18 14:37:13 INFO  (FileCacheMaintenanceDaemon) Starting cache cleanup: /var/tmp/root-ghidra/fscache2  
+2026-10-18 14:37:13 INFO  (FileCacheMaintenanceDaemon) Finished cache cleanup, estimated storage used: 0  
+2026-10-18 14:37:15 INFO  (AnalyzeHeadless) Headless startup complete (24559 ms)  
+2026-10-18 14:37:15 INFO  (ClassSearcher) Class searcher loaded 59 extension points (20 false positives)  
+2026-10-18 14:37:16 INFO  (HeadlessAnalyzer) HEADLESS Script Paths:
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/SystemEmulation/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/FileFormats/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Processors/JVM/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/GnuDemangler/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/PyGhidra/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Processors/PIC/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Processors/Atmel/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Debug/Debugger/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/Decompiler/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/BytePatterns/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/Base/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/WildcardAssembler/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/MicrosoftCodeAnalyzer/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/FunctionID/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/PDB/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Debug/Debugger-rmi-trace/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/VersionTracking/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Processors/8051/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/SwiftDemangler/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Processors/DATA/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/BSim/ghidra_scripts
+    /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/DecompilerDependent/ghidra_scripts  
+2026-10-18 14:37:16 INFO  (HeadlessAnalyzer) HEADLESS: execution starts  
+2026-10-18 14:37:16 INFO  (HeadlessAnalyzer) Creating project: /root/rea-ghidra/afa  
+2026-10-18 14:37:16 DEBUG (DefaultProjectManager) No tools found; Installing default tools  
+2026-10-18 14:37:16 DEBUG (DefaultProjectManager) 	no recent project directories found  
+2026-10-18 14:37:16 INFO  (DefaultProject) Creating project: /root/rea-ghidra/afa  
+2026-10-18 14:37:16 INFO  (HeadlessAnalyzer) REPORT: Processing input files:   
+2026-10-18 14:37:16 INFO  (HeadlessAnalyzer)      project: /root/rea-ghidra/afa  
+2026-10-18 14:37:16 INFO  (HeadlessAnalyzer) IMPORTING: file:///mnt/d/%E6%B8%A9%E5%B7%9E%E9%BA%BB%E5%B0%86/%E9%98%BF%E6%B3%95%E7%AE%97%E7%89%8C/data/app.so  
+2026-10-18 14:37:39 INFO  (ProgramLoader) Using Loader: Executable and Linking Format (ELF)  
+2026-10-18 14:37:39 INFO  (ProgramLoader) Using Language/Compiler: x86:LE:64:default:gcc  
+2026-10-18 14:37:39 INFO  (ProgramLoader) Using Library Search Path: [., /bin, /lib, /lib64, /lib/x86_64-linux-gnu, /lib/aarch64-linux-gnu, /usr/bin, /usr/lib, /usr/X11R6/bin, /usr/X11R6/lib, /usr/java/packages/lib, /usr/lib/x86_64-linux-gnu/jni, /usr/lib/x86_64-linux-gnu, /usr/lib/jni]  
+2026-10-18 14:37:40 DEBUG (ElfHeader) Elf symbol table section .dynsym linked to string table section .dynstr  
+2026-10-18 14:37:40 DEBUG (ElfProgramBuilder) Discarding 3-byte alignment/filler segment_1.4 at 0010026d  
+2026-10-18 14:37:40 DEBUG (ElfProgramBuilder) Discarding 8-byte alignment/filler segment_1.7 at 00100338  
+2026-10-18 14:37:41 INFO  (ProgramLoader) Additional info:
+Loading file:///mnt/d/%E6%B8%A9%E5%B7%9E%E9%BA%BB%E5%B0%86/%E9%98%BF%E6%B3%95%E7%AE%97%E7%89%8C/data/app.so?MD5=b545a7b1d0cb4760cd4d6238fcea0aa4...
+------------------------------------------------
+
+  
+2026-10-18 14:37:41 INFO  (HeadlessAnalyzer) IMPORTING: Loaded 0 additional files  
+2026-10-18 14:37:44 INFO  (HeadlessAnalyzer) ANALYZING all memory and code: file:///mnt/d/%E6%B8%A9%E5%B7%9E%E9%BA%BB%E5%B0%86/%E9%98%BF%E6%B3%95%E7%AE%97%E7%89%8C/data/app.so  
+2026-10-18 14:37:45 INFO  (ExternalDebugFileSectionProvider) DWARF external debug information found: ExternalDebugInfo [filename=null, crc=0, hash=0502bd35295435a52eedcdce286561f8, objectType=DEBUGINFO, extra=null]  
+2026-10-18 14:37:45 DEBUG (LocalDirDebugInfoDProvider) Finished cache cleanup of debug files in /var/tmp/root-ghidra/debuginfo-cache, deleted 0 files, 0 total bytes  
+2026-10-18 14:37:45 INFO  (DWARFAnalyzer) Unable to find DWARF information, skipping DWARF analysis  
+2026-10-18 14:37:50 INFO  (PackedDatabaseCache) Packed database cache: /var/tmp/root-ghidra/packed-db-cache  
+2026-10-18 14:37:50 DEBUG (PackedDatabaseCache) Caching packed database: /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/Base/data/typeinfo/generic/generic_clib_64.gdt  
+2026-10-18 14:37:50 DEBUG (PackedDatabase) Unpacking database /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/Base/data/typeinfo/generic/generic_clib_64.gdt -> /var/tmp/root-ghidra/packed-db-cache/pdbE0BA47EF/db.1.gbf  
+2026-10-18 14:37:51 DEBUG (PackedDatabaseCache) Cache update completed: /mnt/d/DevTools/ghidra12/ghidra_12.1.4_PUBLIC/Ghidra/Features/Base/data/typeinfo/generic/generic_clib_64.gdt  
+2026-10-18 14:37:51 INFO  (ApplyDataArchiveAnalyzer) Applied data type archive: generic_clib_64  
+2026-10-18 14:37:56 INFO  (AutoAnalysisManager) -----------------------------------------------------
+    ASCII Strings                              3.789 secs
+    Apply Data Archives                        0.658 secs
+    Create Address Tables                      0.002 secs
+    Create Function                            0.000 secs
+    DWARF                                      0.029 secs
+    Data Reference                             0.009 secs
+    Demangler GNU                              0.112 secs
+    Disassemble Entry Points                   0.002 secs
+    Embedded Media                             0.053 secs
+    External Entry References                  0.000 secs
+    Function ID                                2.343 secs
+    Function Start Pre Search                  0.162 secs
+    Function Start Search                      2.870 secs
+    Function Start Search After Data           1.573 secs
+    GCC Exception Handlers                     0.175 secs
+    Non-Returning Functions - Known            0.062 secs
+-----------------------------------------------------
+     Total Time   11 secs
+-----------------------------------------------------
+  
+2026-10-18 14:37:56 INFO  (HeadlessAnalyzer) REPORT: Analysis succeeded for file: file:///mnt/d/%E6%B8%A9%E5%B7%9E%E9%BA%BB%E5%B0%86/%E9%98%BF%E6%B3%95%E7%AE%97%E7%89%8C/data/app.so  
+2026-10-18 14:37:57 INFO  (LocalFileSystem) /app.so: file created (root)  
+2026-10-18 14:37:57 INFO  (HeadlessAnalyzer) REPORT: Save succeeded for: /app.so (afa:/app.so)  
+2026-10-18 14:37:57 INFO  (HeadlessAnalyzer) REPORT: Import succeeded  

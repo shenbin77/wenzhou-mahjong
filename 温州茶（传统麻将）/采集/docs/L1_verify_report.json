@@ -1,0 +1,36 @@
+{
+  "rooms": [
+    {
+      "room": "018368",
+      "settle_frames": 4
+    },
+    {
+      "room": "207547",
+      "settle_frames": 12
+    },
+    {
+      "room": "323028",
+      "settle_frames": 10
+    }
+  ],
+  "tile_recognition": {
+    "total_tiles": 0,
+    "recognized": 0,
+    "unknown": 0
+  },
+  "ocr": {
+    "frames": 0,
+    "scores_read": 0
+  },
+  "engine": {
+    "calls": 0,
+    "success": 0,
+    "errors": []
+  },
+  "notes": [
+    "牌模板: 21 个 (期望21)",
+    "Grok茶引擎导入失败: No module named 'engine'",
+    "tile_vision: 导入成功, TARGET_IDS=[1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 25, 26, 27, 28, 29, 41, 42, 43, 44, 45, 46, 47, 48, 49, 61, 62, 63, 64, 67]",
+    "结算数字模板: 13 个文件"
+  ]
+}

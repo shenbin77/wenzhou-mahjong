@@ -1,0 +1,50 @@
+{
+  "engine": {
+    "soft": {
+      "deltas": {
+        "0": 6,
+        "1": -2,
+        "2": -2,
+        "3": -2
+      },
+      "kind": "ruan",
+      "mult": 1,
+      "base": 2
+    },
+    "hard": {
+      "deltas": {
+        "0": 0,
+        "1": 4,
+        "2": -4,
+        "3": 0
+      },
+      "kind": "ruan",
+      "mult": 1,
+      "base": 2
+    },
+    "shuangfan": {
+      "deltas": {
+        "0": 24,
+        "1": -8,
+        "2": -8,
+        "3": -8
+      },
+      "kind": "shuangfan",
+      "mult": 4
+    },
+    "base_advance": {
+      "base": 4,
+      "deltas": {
+        "0": 12,
+        "1": -4,
+        "2": -4,
+        "3": -4
+      }
+    }
+  },
+  "tile": {},
+  "notes": [
+    "引擎4项调用成功",
+    "TileVision失败: Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"
+  ]
+}

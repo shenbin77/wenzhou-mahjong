@@ -1,0 +1,132 @@
+{
+  "schema": "hand-record/v0-gold-hands",
+  "round_uid": "302805-2026-10-14-r01",
+  "frames": [
+    {
+      "name": "2026-10-14/r01/frame_02.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            55,
+            1,
+            2,
+            3,
+            6,
+            47,
+            49,
+            22,
+            22,
+            24,
+            25,
+            25,
+            29
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "底家13张清晰（原金标）；侧立座位 unknown_count=13"
+    },
+    {
+      "name": "2026-10-14/r01/frame_03.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            55,
+            1,
+            2,
+            3,
+            6,
+            47,
+            49,
+            22,
+            22,
+            24,
+            25,
+            25,
+            29
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "扩样：同局后续帧，目视与 frame_02 一致 13 张；侧立座位 unknown_count=13"
+    },
+    {
+      "name": "2026-10-14/r01/frame_04.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            55,
+            1,
+            2,
+            3,
+            6,
+            47,
+            49,
+            22,
+            22,
+            24,
+            25,
+            25,
+            29
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "扩样：同局后续帧，目视与 frame_02 一致 13 张；侧立座位 unknown_count=13"
+    }
+  ]
+}

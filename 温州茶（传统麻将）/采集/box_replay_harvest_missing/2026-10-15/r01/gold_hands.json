@@ -1,0 +1,173 @@
+{
+  "schema": "hand-record/v0-gold-hands",
+  "round_uid": "302805-2026-10-15-r01",
+  "frames": [
+    {
+      "name": "2026-10-15/r01/frame_02.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            5,
+            7,
+            8,
+            8,
+            45,
+            46,
+            47,
+            49,
+            49,
+            22,
+            24,
+            26
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "扩样：12张暗手可见（左起约缺1位，像刚打出未摸），目视确认；侧立座位 unknown_count=13"
+    },
+    {
+      "name": "2026-10-15/r01/frame_03.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            4,
+            5,
+            7,
+            8,
+            8,
+            45,
+            46,
+            47,
+            49,
+            49,
+            22,
+            24,
+            26
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "底家13张清晰（原金标）；侧立座位 unknown_count=13"
+    },
+    {
+      "name": "2026-10-15/r01/frame_04.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            4,
+            5,
+            8,
+            8,
+            45,
+            46,
+            47,
+            49,
+            49,
+            49,
+            22,
+            24,
+            26
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "底家13张清晰（原金标）；侧立座位 unknown_count=13"
+    },
+    {
+      "name": "2026-10-15/r01/frame_05.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            4,
+            5,
+            8,
+            8,
+            45,
+            46,
+            47,
+            49,
+            49,
+            49,
+            22,
+            24,
+            26
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "扩样：同局后续帧，目视与 frame_04 一致 13 张；侧立座位 unknown_count=13"
+    }
+  ]
+}

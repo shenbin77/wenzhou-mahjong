@@ -1,0 +1,561 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "brain_v0/schemas/hand_record.v0.json",
+  "title": "HandRecord v0",
+  "description": "温州红中放炮离线回测牌谱 v0。三联对齐：harvest meta（局元数据）+ decisions.jsonl（决策面）+ replay_analyze frames（帧面）。权威编码见 TARGET_IDS；actual 可由 frame_diff/manual_gold 填入。",
+  "type": "object",
+  "required": [
+    "schema",
+    "round",
+    "decisions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hand-record/v0",
+      "description": "牌谱 schema 版本标记"
+    },
+    "round": {
+      "type": "object",
+      "description": "局元数据，对齐 harvest meta.json",
+      "required": [
+        "round_uid",
+        "user_account"
+      ],
+      "properties": {
+        "round_uid": {
+          "type": "string",
+          "description": "如 346299-2026-10-15-r01"
+        },
+        "date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "YYYY-MM-DD"
+        },
+        "room_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "如 17:47"
+        },
+        "players": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "UI 列表序昵称（非座位序）；多数局可 null。座位→昵称见 seats。"
+        },
+        "round_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "replay_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "回放码，来自 harvest meta.replay_code"
+        },
+        "user_account": {
+          "type": "string",
+          "description": "本机账号，如 晓红"
+        },
+        "seat": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "bottom",
+            "right",
+            "top",
+            "left",
+            null
+          ],
+          "description": "关注座位；replay_analyze 当前基本只看 bottom"
+        },
+        "dealer_seat": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "bottom",
+            "right",
+            "top",
+            "left",
+            null
+          ],
+          "description": "庄家座位；由 seats 反查 dealer_name 得到，反查失败则为 null"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "captured",
+            "pending",
+            null
+          ]
+        },
+        "frames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "相对 harvest 根的帧路径"
+        },
+        "capture_timestamps": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "seats": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "座位→昵称。键固定 bottom/right/top/left；缺省或未知可省略键或整段 null。",
+          "properties": {
+            "bottom": {
+              "type": "string"
+            },
+            "right": {
+              "type": "string"
+            },
+            "top": {
+              "type": "string"
+            },
+            "left": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "user_seat": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "bottom",
+            "right",
+            "top",
+            "left",
+            null
+          ],
+          "description": "关注/本机玩家座位；通常 bottom"
+        },
+        "dealer_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "庄家昵称，来自 meta.dealer；再由 seats 反查 dealer_seat"
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "description": "决策点列表（可为空）",
+      "items": {
+        "$ref": "#/$defs/decision_point"
+      }
+    },
+    "frames": {
+      "type": "array",
+      "description": "可选：replay_analyze 帧摘要，用于与 decision 对齐",
+      "items": {
+        "$ref": "#/$defs/frame_snapshot"
+      }
+    },
+    "events": {
+      "type": "array",
+      "description": "v0 预留事件流（弃牌/碰/杠/胡/过/听）；无真值时可空",
+      "items": {
+        "$ref": "#/$defs/game_event"
+      }
+    },
+    "notes": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "对齐说明、actual_missing 等备注"
+    }
+  },
+  "$defs": {
+    "tile_id": {
+      "type": "integer",
+      "description": "brain_v0 目标词表 TARGET_IDS：1-9万 / 21-29筒 / 41-49条 / 55红中。落盘优先 int；输入别名 w1..w9 / t1..t9 / s1..s9(条,权威别名) / hongzhong；b1..b9 仅兼容非权威（历史条），不进权威字段。"
+    },
+    "action": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "discard",
+            "peng",
+            "gang",
+            "hu",
+            "pass",
+            "ting"
+          ]
+        },
+        "tile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/tile_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "discard/peng/gang/hu 相关牌；pass 可为 null"
+        }
+      }
+    },
+    "decision_point": {
+      "type": "object",
+      "required": [
+        "turn_no",
+        "hand",
+        "is_hand14",
+        "joker"
+      ],
+      "properties": {
+        "turn_no": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hand": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/tile_id"
+          },
+          "description": "暗手 tile_id 列表；14 张决策或 13 张听牌态"
+        },
+        "open_melds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "unknown",
+                "description": "过渡期唯一允许值；识牌确认前禁止 peng/chi/gang"
+              },
+              "tiles": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/tile_id"
+                }
+              }
+            }
+          },
+          "description": "副露过渡字段。权威计数用 open_meld_count。结构化仅允许 kind=unknown + tiles；禁止臆造 peng/chi/gang kind。无则 []。"
+        },
+        "open_meld_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "default": 0
+        },
+        "played_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "已见牌计数，key 为 tile_id 字符串（对齐 decisions.jsonl）"
+        },
+        "is_hand14": {
+          "type": "boolean"
+        },
+        "joker": {
+          "type": "integer",
+          "const": 55,
+          "description": "财神固定红中 tile_id=55"
+        },
+        "hongzhong_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "手牌内红中张数；可从 hand 推导"
+        },
+        "suggested_discard": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/tile_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "线上/日志建议出牌（decisions.jsonl）；与 actual 分离"
+        },
+        "actual_discard": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/tile_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "实际出牌真值。来源见 actual_discard_source：frame_diff=同 round_uid 时间相邻 complete+gameplay、open_meld_count 不变、concealed 多重集合恰好少 1 张且 len(prev)==len(next)+1；禁止用河牌推 actual。manual_gold 可覆盖。"
+        },
+        "actual_discard_source": {
+          "type": "string",
+          "enum": [
+            "manual_gold",
+            "frame_diff",
+            "none"
+          ],
+          "default": "none",
+          "description": "actual 来源；无真值时 none。manual_gold 优先于 frame_diff。"
+        },
+        "actual_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/action"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "实际动作（discard/peng/gang/hu/pass + tile）；无则 null，回测标 actual_missing"
+        },
+        "bot_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/action"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "回测时由 advisor 填入"
+        },
+        "shanten_before": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "shanten_after_bot": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "shanten_after_actual": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ting_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "听牌种类数（len(ting)）或与 ukeire 配套"
+        },
+        "ukeire_count_bot": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ukeire_count_actual": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "actual_missing": {
+          "type": "boolean",
+          "description": "true 表示无实际出牌/动作真值，一致率计入 N/A 分母外"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "如 decisions.jsonl / replay_analyze / manual"
+        },
+        "ts": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "frame_snapshot": {
+      "type": "object",
+      "description": "对齐 replay_analyze rounds[].hands[] / 帧面",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "concealed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/tile_id"
+          },
+          "description": "底家暗手；映射 decision.hand"
+        },
+        "melds": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "副露；映射 open_melds"
+        },
+        "shanten": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hongzhong": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "is_hand14": {
+          "type": "boolean"
+        },
+        "seats": {
+          "type": "array",
+          "description": "四家座位快照。自动导出默认只填 bottom；其余省略或仅 unknown_count。",
+          "items": {
+            "type": "object",
+            "properties": {
+              "seat": {
+                "type": "string",
+                "enum": [
+                  "bottom",
+                  "right",
+                  "top",
+                  "left"
+                ]
+              },
+              "tiles": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/tile_id"
+                }
+              },
+              "unknown_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "seat"
+            ]
+          }
+        }
+      }
+    },
+    "game_event": {
+      "type": "object",
+      "description": "新建事件流约定（v0 预留）",
+      "required": [
+        "event_type"
+      ],
+      "properties": {
+        "event_type": {
+          "type": "string",
+          "enum": [
+            "discard",
+            "peng",
+            "gang",
+            "hu",
+            "pass",
+            "ting",
+            "draw"
+          ]
+        },
+        "seat": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "bottom",
+            "right",
+            "top",
+            "left",
+            null
+          ]
+        },
+        "tile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/tile_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turn_no": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ts": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "manual_gold",
+            "frame_diff",
+            "decisions",
+            "none",
+            null
+          ]
+        }
+      }
+    }
+  }
+}

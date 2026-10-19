@@ -1,0 +1,88 @@
+{
+    "templates":  [
+                      {
+                          "file":  "w1.png",
+                          "label":  "w1"
+                      },
+                      {
+                          "file":  "w2.png",
+                          "label":  "w2"
+                      },
+                      {
+                          "file":  "w3.png",
+                          "label":  "w3"
+                      },
+                      {
+                          "file":  "w4.png",
+                          "label":  "w4"
+                      },
+                      {
+                          "file":  "w5.png",
+                          "label":  "w5"
+                      },
+                      {
+                          "file":  "w6.png",
+                          "label":  "w6"
+                      },
+                      {
+                          "file":  "w7.png",
+                          "label":  "w7"
+                      },
+                      {
+                          "file":  "w8.png",
+                          "label":  "w8"
+                      },
+                      {
+                          "file":  "w9.png",
+                          "label":  "w9"
+                      },
+                      {
+                          "file":  "t1.png",
+                          "label":  "t1"
+                      },
+                      {
+                          "file":  "t2.png",
+                          "label":  "t2"
+                      },
+                      {
+                          "file":  "t3.png",
+                          "label":  "t3"
+                      },
+                      {
+                          "file":  "t4.png",
+                          "label":  "t4"
+                      },
+                      {
+                          "file":  "t5.png",
+                          "label":  "t5"
+                      },
+                      {
+                          "file":  "t6.png",
+                          "label":  "t6"
+                      },
+                      {
+                          "file":  "b1.png",
+                          "label":  "s1"
+                      },
+                      {
+                          "file":  "b2.png",
+                          "label":  "s2"
+                      },
+                      {
+                          "file":  "b3.png",
+                          "label":  "s3"
+                      },
+                      {
+                          "file":  "f_dong.png",
+                          "label":  "dong"
+                      },
+                      {
+                          "file":  "f_xi.png",
+                          "label":  "xi"
+                      },
+                      {
+                          "file":  "f_bei.png",
+                          "label":  "bei"
+                      }
+                  ]
+}

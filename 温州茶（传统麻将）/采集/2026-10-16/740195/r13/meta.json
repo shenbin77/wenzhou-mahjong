@@ -1,0 +1,26 @@
+﻿{
+    "source":  "tea",
+    "date":  "2026-10-16",
+    "room_id":  "740195",
+    "round_index":  13,
+    "round_uid":  "740195-2026-10-16-r13",
+    "game_type":  "温州麻将",
+    "frames":  [
+                   "2026-10-16/740195/r13/frame_01.png",
+                   "2026-10-16/740195/r13/frame_02.png",
+                   "2026-10-16/740195/r13/frame_03.png"
+               ],
+    "capture_timestamps":  [
+                               1792130626.2927175,
+                               1792130628.7185068,
+                               1792130631.1454976
+                           ],
+    "status":  "captured",
+    "user_account":  "晓红",
+    "harvested_at":  "2026-10-16T14:03:54+08:00",
+    "safety":  {
+                   "spent_房卡":  false,
+                   "clicked_开始游戏":  false,
+                   "joined_table":  false
+               }
+}

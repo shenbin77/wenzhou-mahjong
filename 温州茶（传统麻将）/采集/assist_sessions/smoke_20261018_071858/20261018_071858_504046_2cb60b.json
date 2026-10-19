@@ -1,0 +1,10 @@
+{
+  "status": "abstain",
+  "reason": "须先人工确认这是温州茶 2 人局",
+  "image": "采集\\assist_sessions\\smoke_20261018_071858\\20261018_071858_504046_2cb60b.png",
+  "annotation": null,
+  "captured_at": "2026-10-18T07:18:58.505022+08:00",
+  "serial": "emulator-5556",
+  "image_sha256": "0f6f669ddfbbd7e3ac3958f1435077f6622bdce95169d40e42d7877f76f2ffed",
+  "record": "采集\\assist_sessions\\smoke_20261018_071858\\20261018_071858_504046_2cb60b.json"
+}

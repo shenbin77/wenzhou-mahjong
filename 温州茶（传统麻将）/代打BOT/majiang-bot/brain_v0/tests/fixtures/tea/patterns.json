@@ -1,0 +1,101 @@
+{
+  "caishen_id": 44,
+  "ying8dui_no_joker": {
+    "tiles": [
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      6,
+      6,
+      7,
+      7,
+      8,
+      8,
+      9
+    ],
+    "expect_tags_contain": [
+      "ying8dui"
+    ]
+  },
+  "ruan8dui": {
+    "tiles": [
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      6,
+      6,
+      7,
+      7,
+      8,
+      9,
+      44
+    ],
+    "expect_tags_contain": [
+      "ruan8dui"
+    ],
+    "note": "7 pairs + singles 8,9 + 1 joker as pair-mate → soft 8dui"
+  },
+  "banqing": {
+    "tiles": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      1,
+      1,
+      61,
+      61,
+      61,
+      62,
+      62,
+      62
+    ],
+    "expect_tags_contain": [
+      "banqing"
+    ]
+  },
+  "qingyise_unordered": {
+    "tiles": [
+      1,
+      1,
+      1,
+      2,
+      2,
+      2,
+      3,
+      3,
+      3,
+      4,
+      4,
+      4,
+      5,
+      5,
+      5,
+      6,
+      9
+    ],
+    "expect_tags_contain": [
+      "qingyise_unordered"
+    ],
+    "note": "single suit only; unordered means no standard shape required to declare"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "source": "阿法算牌\\runtime\\scripts\\mahjong_runtime\\__init__.pyc",
+  "sha256": "370ae59ba6abc9b1bbe32377728d9c41b8caaad66a1491fe27e0b7f38f06be0a",
+  "python_magic": "a70d0d0a",
+  "analysis": {
+    "name": "<module>",
+    "first_line": 1,
+    "args": [],
+    "names": [
+      "__doc__"
+    ],
+    "constants": [
+      "Mahjong runtime package for unified script dispatch.",
+      null
+    ],
+    "instructions": [
+      {
+        "offset": 0,
+        "op": "RESUME",
+        "arg": 0
+      },
+      {
+        "offset": 2,
+        "op": "LOAD_CONST",
+        "arg": "Mahjong runtime package for unified script dispatch."
+      },
+      {
+        "offset": 4,
+        "op": "STORE_NAME",
+        "arg": "__doc__"
+      },
+      {
+        "offset": 6,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 8,
+        "op": "RETURN_VALUE",
+        "arg": null
+      }
+    ],
+    "children": []
+  },
+  "limit": "Static bytecode inventory; no target code was executed."
+}

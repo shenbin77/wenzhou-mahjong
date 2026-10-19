@@ -1,0 +1,7 @@
+所在位置 D:\温州麻将\温州茶（传统麻将）\采集\harvest_continuous_v3.ps1:3 字符: 6
++ $root$root='D:\娓╁窞楹诲皢\娓╁窞鑼讹紙浼犵粺楹诲皢锛塡閲囬泦'
++      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+表达式或语句中包含意外的标记“$root='D:\娓╁窞楹诲皢\娓╁窞鑼讹紙浼犵粺楹诲皢锛塡閲囬泦'”。
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : UnexpectedToken
+ 

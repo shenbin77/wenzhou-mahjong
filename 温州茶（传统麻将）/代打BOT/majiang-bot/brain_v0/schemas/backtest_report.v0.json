@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "brain_v0/schemas/backtest_report.v0.json",
+  "title": "BacktestReport v0",
+  "description": "离线回测固定报告格式。字段顺序与必填段写死，避免每次漂。",
+  "type": "object",
+  "required": [
+    "schema",
+    "generated_at",
+    "data_sources",
+    "n_rounds",
+    "n_decision_points",
+    "n_actual_missing",
+    "agree_rate",
+    "agree_rate_display",
+    "shanten_summary",
+    "ukeire_summary",
+    "points",
+    "blockers"
+  ],
+  "properties": {
+    "schema": {
+      "const": "backtest-report/v0"
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "YYYY-MM-DD HH:MM:SS CST"
+    },
+    "data_sources": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "输入路径/说明列表"
+    },
+    "user_account": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "n_rounds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "n_decision_points": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "n_actual_missing": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "n_comparable": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "n_agree": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "n_errors": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "agree_rate": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "可比决策点一致率；无 actual 时 null"
+    },
+    "agree_rate_display": {
+      "type": "string",
+      "description": "展示用，如 N/A 或 50.00% (1/2)"
+    },
+    "agreement_rate_note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shanten_summary": {
+      "type": "object",
+      "required": [
+        "before_avg",
+        "after_bot_avg",
+        "after_actual_avg"
+      ],
+      "properties": {
+        "before_avg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "after_bot_avg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "after_actual_avg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "ukeire_summary": {
+      "type": "object",
+      "required": [
+        "bot_avg",
+        "actual_avg",
+        "ting_count_avg"
+      ],
+      "properties": {
+        "bot_avg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "actual_avg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ting_count_avg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "points": {
+      "type": "array",
+      "description": "逐点表（固定列语义）",
+      "items": {
+        "type": "object",
+        "required": [
+          "round_uid",
+          "idx",
+          "turn_no",
+          "is_hand14",
+          "bot_tile",
+          "actual_discard",
+          "actual_missing",
+          "agree",
+          "shanten_before",
+          "shanten_after_bot",
+          "ukeire_count_bot",
+          "error"
+        ]
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "卡点列表（无 hand14、无 actual、识牌未对齐等）"
+    },
+    "rounds": {
+      "type": "array",
+      "description": "分局摘要",
+      "items": {
+        "type": "object"
+      }
+    },
+    "rows_detail": {
+      "type": "array",
+      "description": "可选：evaluate_decision 完整行"
+    }
+  }
+}

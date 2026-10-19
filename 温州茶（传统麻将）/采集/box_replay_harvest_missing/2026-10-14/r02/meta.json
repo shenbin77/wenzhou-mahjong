@@ -1,0 +1,44 @@
+{
+ "date": "2026-10-14",
+ "room_id": "302805",
+ "session_start": "19:04",
+ "players": [
+  "李哥",
+  "dkl",
+  "啊泽哥",
+  "晓红"
+ ],
+ "round_index": 2,
+ "round_uid": "302805-2026-10-14-r02",
+ "replay_code": "72321963",
+ "frames": [
+  "2026-10-14/r02/frame_01.png",
+  "2026-10-14/r02/frame_02.png"
+ ],
+ "capture_timestamps": [
+  1792066167.2778182,
+  1792066167.5818183
+ ],
+ "status": "captured",
+ "seats": {
+  "bottom": "晓红",
+  "left": "李哥",
+  "top": "dkl",
+  "right": "啊泽哥"
+ },
+ "user_seat": "bottom (晓红)",
+ "dealer": "晓红",
+ "wild": "红中 (赖子)",
+ "rules": "放炮麻将:点炮胡/庄闲算分/红中赖子/可胡七对/4人",
+ "scores_before_round": {
+  "晓红": 2,
+  "李哥": -2,
+  "dkl": 0,
+  "啊泽哥": 0
+ },
+ "frames_on_windows_only": [
+  "frame_03.png",
+  "frame_04.png"
+ ],
+ "user_account": "晓红"
+}

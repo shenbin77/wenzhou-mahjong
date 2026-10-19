@@ -1,0 +1,12 @@
+{
+  "engine_import": true,
+  "engine_test": null,
+  "tile_test": {
+    "frames": 6,
+    "first_shape": null
+  },
+  "notes": [
+    "引擎失败: dealer_streak 从 1 起计",
+    "detect失败: module 'detect_tiles' has no attribute 'count_tiles'"
+  ]
+}

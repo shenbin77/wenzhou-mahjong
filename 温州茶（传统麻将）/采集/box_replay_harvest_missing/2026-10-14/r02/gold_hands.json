@@ -1,0 +1,48 @@
+{
+  "schema": "hand-record/v0-gold-hands",
+  "round_uid": "302805-2026-10-14-r02",
+  "frames": [
+    {
+      "name": "2026-10-14/r02/frame_02.png",
+      "seats": [
+        {
+          "seat": "bottom",
+          "tiles": [
+            1,
+            2,
+            4,
+            6,
+            9,
+            9,
+            42,
+            42,
+            45,
+            46,
+            27,
+            29,
+            29
+          ],
+          "unknown_count": 0
+        },
+        {
+          "seat": "right",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "top",
+          "tiles": [],
+          "unknown_count": 13
+        },
+        {
+          "seat": "left",
+          "tiles": [],
+          "unknown_count": 13
+        }
+      ],
+      "actual_discard": null,
+      "actual_discard_source": "none",
+      "notes": "底家13张清晰（原金标）；侧立座位 unknown_count=13"
+    }
+  ]
+}

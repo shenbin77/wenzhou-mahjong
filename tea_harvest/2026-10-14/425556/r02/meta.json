@@ -1,0 +1,20 @@
+﻿{
+    "source":  "tea",
+    "date":  "2026-10-14",
+    "room_id":  "425556",
+    "round_index":  2,
+    "round_uid":  "425556-2026-10-14-r02",
+    "frames":  [
+                   "2026-10-14/425556/r02/frame_01.png",
+                   "2026-10-14/425556/r02/frame_02.png",
+                   "2026-10-14/425556/r02/frame_03.png"
+               ],
+    "capture_timestamps":  [
+                               1792136804.1567688,
+                               1792136806.6363091,
+                               1792136809.0843716
+                           ],
+    "status":  "captured",
+    "user_account":  "jingjing",
+    "harvested_at":  "2026-10-16T15:46:50+08:00"
+}

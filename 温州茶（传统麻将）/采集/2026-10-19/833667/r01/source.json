@@ -1,0 +1,50 @@
+{
+  "capture_date": "2026-10-19",
+  "game_date": "2026-10-16",
+  "room": "833667",
+  "round": 1,
+  "mode": "温州麻将 2人回放",
+  "device_serial_observed": "emulator-5556",
+  "foreground_package_observed": "com.xm.zjgamecenter",
+  "route": "比赛战绩 → 2026-10-16 → 房间833667详情 → 回放选项 → 第1局回放",
+  "record_seconds_requested": 30,
+  "probe": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_type": "video",
+        "width": 1600,
+        "height": 900
+      },
+      {
+        "codec_type": "data"
+      },
+      {
+        "codec_type": "data"
+      }
+    ],
+    "format": {
+      "duration": "29.370689"
+    }
+  },
+  "files": {
+    "room833667_round1_ec9baee3.mp4": {
+      "sha256": "443334b7a4b3e819ab5601360db514cdff7ba8db3a08c0fe473b69dc3a9055d7",
+      "bytes": 7272244
+    },
+    "room833667_round1_ec9baee3_1.png": {
+      "sha256": "e8cef2af2621390bb4bc91119aab19c7d62a26e83f2886e6e93949d4ac32f15b",
+      "bytes": 840731
+    },
+    "room833667_round1_ec9baee3_2.png": {
+      "sha256": "ba9bd6506ef0f98067d045d5dbdfd3d3585890ab910e9e9f099adeb2b900fc6d",
+      "bytes": 993041
+    },
+    "room833667_round1_ec9baee3_3.png": {
+      "sha256": "e5074e9ee46d348824c6df5b57ecb823500ce6aa6aa63a8492f19b6361ed48d0",
+      "bytes": 997939
+    }
+  },
+  "limitations": "预览图有回放控制遮罩；视频只录前30秒，尚未人工逐牌标注。"
+}

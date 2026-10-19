@@ -1,0 +1,4957 @@
+{
+  "source": "阿法算牌\\runtime\\scripts\\mahjong_runtime\\unified_runner.pyc",
+  "sha256": "a88a3f4b2a94704e5731da6c9073faaeca8cf4fab39e80fa8d04acfc69adb723",
+  "python_magic": "a70d0d0a",
+  "analysis": {
+    "name": "<module>",
+    "first_line": 1,
+    "args": [],
+    "names": [
+      "json",
+      "os",
+      "importlib",
+      "runpy",
+      "sys",
+      "time",
+      "ctypes",
+      "contextlib",
+      "typing",
+      "List",
+      "Tuple",
+      "path",
+      "abspath",
+      "join",
+      "dirname",
+      "__file__",
+      "BASE_DIR",
+      "MODE_TO_SCRIPT",
+      "enable_high_dpi_awareness",
+      "str",
+      "emit_event",
+      "parse_unified_args",
+      "resolve_script_path",
+      "resolve_core_module",
+      "run_core_module",
+      "int",
+      "main",
+      "__name__",
+      "SystemExit"
+    ],
+    "constants": [
+      0,
+      null,
+      "('List', 'Tuple')",
+      "..",
+      "get_shoupai_v25_2_fast.py",
+      "get_shoupai_v25_2.py",
+      "get_shoupai_v25.py",
+      "get_shoupai.py",
+      "af_majiang3.0/get_shoupai3.py",
+      "get_shoupai3.py",
+      "('v2_5_2_fast', 'v4_1_generic_yolo', 'v2_5_2', 'v2_5', 'v2', 'v3_2', 'v3_3')",
+      "return",
+      "event",
+      "status",
+      "argv",
+      "mode",
+      "module_name",
+      "module_path",
+      "downstream_args",
+      "__main__",
+      "('return', None)"
+    ],
+    "instructions": [
+      {
+        "offset": 0,
+        "op": "RESUME",
+        "arg": 0
+      },
+      {
+        "offset": 2,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 4,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 6,
+        "op": "IMPORT_NAME",
+        "arg": "json"
+      },
+      {
+        "offset": 8,
+        "op": "STORE_NAME",
+        "arg": "json"
+      },
+      {
+        "offset": 10,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 12,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 14,
+        "op": "IMPORT_NAME",
+        "arg": "os"
+      },
+      {
+        "offset": 16,
+        "op": "STORE_NAME",
+        "arg": "os"
+      },
+      {
+        "offset": 18,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 20,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 22,
+        "op": "IMPORT_NAME",
+        "arg": "importlib"
+      },
+      {
+        "offset": 24,
+        "op": "STORE_NAME",
+        "arg": "importlib"
+      },
+      {
+        "offset": 26,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 28,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 30,
+        "op": "IMPORT_NAME",
+        "arg": "runpy"
+      },
+      {
+        "offset": 32,
+        "op": "STORE_NAME",
+        "arg": "runpy"
+      },
+      {
+        "offset": 34,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 36,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 38,
+        "op": "IMPORT_NAME",
+        "arg": "sys"
+      },
+      {
+        "offset": 40,
+        "op": "STORE_NAME",
+        "arg": "sys"
+      },
+      {
+        "offset": 42,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 44,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 46,
+        "op": "IMPORT_NAME",
+        "arg": "time"
+      },
+      {
+        "offset": 48,
+        "op": "STORE_NAME",
+        "arg": "time"
+      },
+      {
+        "offset": 50,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 52,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 54,
+        "op": "IMPORT_NAME",
+        "arg": "ctypes"
+      },
+      {
+        "offset": 56,
+        "op": "STORE_NAME",
+        "arg": "ctypes"
+      },
+      {
+        "offset": 58,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 60,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 62,
+        "op": "IMPORT_NAME",
+        "arg": "contextlib"
+      },
+      {
+        "offset": 64,
+        "op": "STORE_NAME",
+        "arg": "contextlib"
+      },
+      {
+        "offset": 66,
+        "op": "LOAD_CONST",
+        "arg": 0
+      },
+      {
+        "offset": 68,
+        "op": "LOAD_CONST",
+        "arg": "('List', 'Tuple')"
+      },
+      {
+        "offset": 70,
+        "op": "IMPORT_NAME",
+        "arg": "typing"
+      },
+      {
+        "offset": 72,
+        "op": "IMPORT_FROM",
+        "arg": "List"
+      },
+      {
+        "offset": 74,
+        "op": "STORE_NAME",
+        "arg": "List"
+      },
+      {
+        "offset": 76,
+        "op": "IMPORT_FROM",
+        "arg": "Tuple"
+      },
+      {
+        "offset": 78,
+        "op": "STORE_NAME",
+        "arg": "Tuple"
+      },
+      {
+        "offset": 80,
+        "op": "POP_TOP",
+        "arg": null
+      },
+      {
+        "offset": 82,
+        "op": "LOAD_NAME",
+        "arg": "os"
+      },
+      {
+        "offset": 84,
+        "op": "LOAD_ATTR",
+        "arg": "path"
+      },
+      {
+        "offset": 94,
+        "op": "LOAD_METHOD",
+        "arg": "abspath"
+      },
+      {
+        "offset": 116,
+        "op": "LOAD_NAME",
+        "arg": "os"
+      },
+      {
+        "offset": 118,
+        "op": "LOAD_ATTR",
+        "arg": "path"
+      },
+      {
+        "offset": 128,
+        "op": "LOAD_METHOD",
+        "arg": "join"
+      },
+      {
+        "offset": 150,
+        "op": "LOAD_NAME",
+        "arg": "os"
+      },
+      {
+        "offset": 152,
+        "op": "LOAD_ATTR",
+        "arg": "path"
+      },
+      {
+        "offset": 162,
+        "op": "LOAD_METHOD",
+        "arg": "dirname"
+      },
+      {
+        "offset": 184,
+        "op": "LOAD_NAME",
+        "arg": "__file__"
+      },
+      {
+        "offset": 186,
+        "op": "PRECALL",
+        "arg": 1
+      },
+      {
+        "offset": 190,
+        "op": "CALL",
+        "arg": 1
+      },
+      {
+        "offset": 200,
+        "op": "LOAD_CONST",
+        "arg": ".."
+      },
+      {
+        "offset": 202,
+        "op": "PRECALL",
+        "arg": 2
+      },
+      {
+        "offset": 206,
+        "op": "CALL",
+        "arg": 2
+      },
+      {
+        "offset": 216,
+        "op": "PRECALL",
+        "arg": 1
+      },
+      {
+        "offset": 220,
+        "op": "CALL",
+        "arg": 1
+      },
+      {
+        "offset": 230,
+        "op": "STORE_NAME",
+        "arg": "BASE_DIR"
+      },
+      {
+        "offset": 232,
+        "op": "LOAD_CONST",
+        "arg": "get_shoupai_v25_2_fast.py"
+      },
+      {
+        "offset": 234,
+        "op": "LOAD_CONST",
+        "arg": "get_shoupai_v25_2_fast.py"
+      },
+      {
+        "offset": 236,
+        "op": "LOAD_CONST",
+        "arg": "get_shoupai_v25_2.py"
+      },
+      {
+        "offset": 238,
+        "op": "LOAD_CONST",
+        "arg": "get_shoupai_v25.py"
+      },
+      {
+        "offset": 240,
+        "op": "LOAD_CONST",
+        "arg": "get_shoupai.py"
+      },
+      {
+        "offset": 242,
+        "op": "LOAD_CONST",
+        "arg": "af_majiang3.0/get_shoupai3.py"
+      },
+      {
+        "offset": 244,
+        "op": "LOAD_CONST",
+        "arg": "get_shoupai3.py"
+      },
+      {
+        "offset": 246,
+        "op": "BUILD_LIST",
+        "arg": 2
+      },
+      {
+        "offset": 248,
+        "op": "LOAD_CONST",
+        "arg": "af_majiang3.0/get_shoupai3.py"
+      },
+      {
+        "offset": 250,
+        "op": "LOAD_CONST",
+        "arg": "get_shoupai3.py"
+      },
+      {
+        "offset": 252,
+        "op": "BUILD_LIST",
+        "arg": 2
+      },
+      {
+        "offset": 254,
+        "op": "LOAD_CONST",
+        "arg": "('v2_5_2_fast', 'v4_1_generic_yolo', 'v2_5_2', 'v2_5', 'v2', 'v3_2', 'v3_3')"
+      },
+      {
+        "offset": 256,
+        "op": "BUILD_CONST_KEY_MAP",
+        "arg": 7
+      },
+      {
+        "offset": 258,
+        "op": "STORE_NAME",
+        "arg": "MODE_TO_SCRIPT"
+      },
+      {
+        "offset": 260,
+        "op": "LOAD_CONST",
+        "arg": "('return', None)"
+      },
+      {
+        "offset": 262,
+        "op": "LOAD_CONST",
+        "arg": "<code:enable_high_dpi_awareness>"
+      },
+      {
+        "offset": 264,
+        "op": "MAKE_FUNCTION",
+        "arg": 4
+      },
+      {
+        "offset": 266,
+        "op": "STORE_NAME",
+        "arg": "enable_high_dpi_awareness"
+      },
+      {
+        "offset": 268,
+        "op": "LOAD_CONST",
+        "arg": "event"
+      },
+      {
+        "offset": 270,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 272,
+        "op": "LOAD_CONST",
+        "arg": "status"
+      },
+      {
+        "offset": 274,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 276,
+        "op": "BUILD_TUPLE",
+        "arg": 4
+      },
+      {
+        "offset": 278,
+        "op": "LOAD_CONST",
+        "arg": "<code:emit_event>"
+      },
+      {
+        "offset": 280,
+        "op": "MAKE_FUNCTION",
+        "arg": 4
+      },
+      {
+        "offset": 282,
+        "op": "STORE_NAME",
+        "arg": "emit_event"
+      },
+      {
+        "offset": 284,
+        "op": "LOAD_CONST",
+        "arg": "argv"
+      },
+      {
+        "offset": 286,
+        "op": "LOAD_NAME",
+        "arg": "List"
+      },
+      {
+        "offset": 288,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 290,
+        "op": "BINARY_SUBSCR",
+        "arg": null
+      },
+      {
+        "offset": 300,
+        "op": "LOAD_CONST",
+        "arg": "return"
+      },
+      {
+        "offset": 302,
+        "op": "LOAD_NAME",
+        "arg": "Tuple"
+      },
+      {
+        "offset": 304,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 306,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 308,
+        "op": "LOAD_NAME",
+        "arg": "List"
+      },
+      {
+        "offset": 310,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 312,
+        "op": "BINARY_SUBSCR",
+        "arg": null
+      },
+      {
+        "offset": 322,
+        "op": "BUILD_TUPLE",
+        "arg": 3
+      },
+      {
+        "offset": 324,
+        "op": "BINARY_SUBSCR",
+        "arg": null
+      },
+      {
+        "offset": 334,
+        "op": "BUILD_TUPLE",
+        "arg": 4
+      },
+      {
+        "offset": 336,
+        "op": "LOAD_CONST",
+        "arg": "<code:parse_unified_args>"
+      },
+      {
+        "offset": 338,
+        "op": "MAKE_FUNCTION",
+        "arg": 4
+      },
+      {
+        "offset": 340,
+        "op": "STORE_NAME",
+        "arg": "parse_unified_args"
+      },
+      {
+        "offset": 342,
+        "op": "LOAD_CONST",
+        "arg": "mode"
+      },
+      {
+        "offset": 344,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 346,
+        "op": "LOAD_CONST",
+        "arg": "return"
+      },
+      {
+        "offset": 348,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 350,
+        "op": "BUILD_TUPLE",
+        "arg": 4
+      },
+      {
+        "offset": 352,
+        "op": "LOAD_CONST",
+        "arg": "<code:resolve_script_path>"
+      },
+      {
+        "offset": 354,
+        "op": "MAKE_FUNCTION",
+        "arg": 4
+      },
+      {
+        "offset": 356,
+        "op": "STORE_NAME",
+        "arg": "resolve_script_path"
+      },
+      {
+        "offset": 358,
+        "op": "LOAD_CONST",
+        "arg": "mode"
+      },
+      {
+        "offset": 360,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 362,
+        "op": "LOAD_CONST",
+        "arg": "return"
+      },
+      {
+        "offset": 364,
+        "op": "LOAD_NAME",
+        "arg": "Tuple"
+      },
+      {
+        "offset": 366,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 368,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 370,
+        "op": "BUILD_TUPLE",
+        "arg": 2
+      },
+      {
+        "offset": 372,
+        "op": "BINARY_SUBSCR",
+        "arg": null
+      },
+      {
+        "offset": 382,
+        "op": "BUILD_TUPLE",
+        "arg": 4
+      },
+      {
+        "offset": 384,
+        "op": "LOAD_CONST",
+        "arg": "<code:resolve_core_module>"
+      },
+      {
+        "offset": 386,
+        "op": "MAKE_FUNCTION",
+        "arg": 4
+      },
+      {
+        "offset": 388,
+        "op": "STORE_NAME",
+        "arg": "resolve_core_module"
+      },
+      {
+        "offset": 390,
+        "op": "LOAD_CONST",
+        "arg": "module_name"
+      },
+      {
+        "offset": 392,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 394,
+        "op": "LOAD_CONST",
+        "arg": "module_path"
+      },
+      {
+        "offset": 396,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 398,
+        "op": "LOAD_CONST",
+        "arg": "downstream_args"
+      },
+      {
+        "offset": 400,
+        "op": "LOAD_NAME",
+        "arg": "List"
+      },
+      {
+        "offset": 402,
+        "op": "LOAD_NAME",
+        "arg": "str"
+      },
+      {
+        "offset": 404,
+        "op": "BINARY_SUBSCR",
+        "arg": null
+      },
+      {
+        "offset": 414,
+        "op": "LOAD_CONST",
+        "arg": "return"
+      },
+      {
+        "offset": 416,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 418,
+        "op": "BUILD_TUPLE",
+        "arg": 8
+      },
+      {
+        "offset": 420,
+        "op": "LOAD_CONST",
+        "arg": "<code:run_core_module>"
+      },
+      {
+        "offset": 422,
+        "op": "MAKE_FUNCTION",
+        "arg": 4
+      },
+      {
+        "offset": 424,
+        "op": "STORE_NAME",
+        "arg": "run_core_module"
+      },
+      {
+        "offset": 426,
+        "op": "LOAD_CONST",
+        "arg": "return"
+      },
+      {
+        "offset": 428,
+        "op": "LOAD_NAME",
+        "arg": "int"
+      },
+      {
+        "offset": 430,
+        "op": "BUILD_TUPLE",
+        "arg": 2
+      },
+      {
+        "offset": 432,
+        "op": "LOAD_CONST",
+        "arg": "<code:main>"
+      },
+      {
+        "offset": 434,
+        "op": "MAKE_FUNCTION",
+        "arg": 4
+      },
+      {
+        "offset": 436,
+        "op": "STORE_NAME",
+        "arg": "main"
+      },
+      {
+        "offset": 438,
+        "op": "LOAD_NAME",
+        "arg": "__name__"
+      },
+      {
+        "offset": 440,
+        "op": "LOAD_CONST",
+        "arg": "__main__"
+      },
+      {
+        "offset": 442,
+        "op": "COMPARE_OP",
+        "arg": "=="
+      },
+      {
+        "offset": 448,
+        "op": "POP_JUMP_FORWARD_IF_FALSE",
+        "arg": 488
+      },
+      {
+        "offset": 450,
+        "op": "PUSH_NULL",
+        "arg": null
+      },
+      {
+        "offset": 452,
+        "op": "LOAD_NAME",
+        "arg": "SystemExit"
+      },
+      {
+        "offset": 454,
+        "op": "PUSH_NULL",
+        "arg": null
+      },
+      {
+        "offset": 456,
+        "op": "LOAD_NAME",
+        "arg": "main"
+      },
+      {
+        "offset": 458,
+        "op": "PRECALL",
+        "arg": 0
+      },
+      {
+        "offset": 462,
+        "op": "CALL",
+        "arg": 0
+      },
+      {
+        "offset": 472,
+        "op": "PRECALL",
+        "arg": 1
+      },
+      {
+        "offset": 476,
+        "op": "CALL",
+        "arg": 1
+      },
+      {
+        "offset": 486,
+        "op": "RAISE_VARARGS",
+        "arg": 1
+      },
+      {
+        "offset": 488,
+        "op": "LOAD_CONST",
+        "arg": null
+      },
+      {
+        "offset": 490,
+        "op": "RETURN_VALUE",
+        "arg": null
+      }
+    ],
+    "children": [
+      {
+        "name": "enable_high_dpi_awareness",
+        "first_line": 28,
+        "args": [],
+        "names": [
+          "os",
+          "name",
+          "ctypes",
+          "windll",
+          "shcore",
+          "user32",
+          "contextlib",
+          "suppress",
+          "Exception",
+          "SetProcessDpiAwareness",
+          "SetProcessDPIAware"
+        ],
+        "constants": [
+          "尽量开启高 DPI 感知，减少打包后窗口坐标受缩放影响。",
+          "nt",
+          null,
+          2
+        ],
+        "instructions": [
+          {
+            "offset": 0,
+            "op": "RESUME",
+            "arg": 0
+          },
+          {
+            "offset": 2,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 14,
+            "op": "LOAD_ATTR",
+            "arg": "name"
+          },
+          {
+            "offset": 24,
+            "op": "LOAD_CONST",
+            "arg": "nt"
+          },
+          {
+            "offset": 26,
+            "op": "COMPARE_OP",
+            "arg": "!="
+          },
+          {
+            "offset": 32,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 38
+          },
+          {
+            "offset": 34,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 36,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 38,
+            "op": "NOP",
+            "arg": null
+          },
+          {
+            "offset": 40,
+            "op": "LOAD_GLOBAL",
+            "arg": "ctypes"
+          },
+          {
+            "offset": 52,
+            "op": "LOAD_ATTR",
+            "arg": "windll"
+          },
+          {
+            "offset": 62,
+            "op": "LOAD_ATTR",
+            "arg": "shcore"
+          },
+          {
+            "offset": 72,
+            "op": "STORE_FAST",
+            "arg": "shcore"
+          },
+          {
+            "offset": 74,
+            "op": "LOAD_GLOBAL",
+            "arg": "ctypes"
+          },
+          {
+            "offset": 86,
+            "op": "LOAD_ATTR",
+            "arg": "windll"
+          },
+          {
+            "offset": 96,
+            "op": "LOAD_ATTR",
+            "arg": "user32"
+          },
+          {
+            "offset": 106,
+            "op": "STORE_FAST",
+            "arg": "user32"
+          },
+          {
+            "offset": 108,
+            "op": "LOAD_GLOBAL",
+            "arg": "contextlib"
+          },
+          {
+            "offset": 120,
+            "op": "LOAD_ATTR",
+            "arg": "suppress"
+          },
+          {
+            "offset": 130,
+            "op": "LOAD_GLOBAL",
+            "arg": "Exception"
+          },
+          {
+            "offset": 142,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 146,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 156,
+            "op": "BEFORE_WITH",
+            "arg": null
+          },
+          {
+            "offset": 158,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 160,
+            "op": "LOAD_FAST",
+            "arg": "shcore"
+          },
+          {
+            "offset": 162,
+            "op": "LOAD_METHOD",
+            "arg": "SetProcessDpiAwareness"
+          },
+          {
+            "offset": 184,
+            "op": "LOAD_CONST",
+            "arg": 2
+          },
+          {
+            "offset": 186,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 190,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 200,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 202,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 204,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 206,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 208,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 212,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 222,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 224,
+            "op": "JUMP_FORWARD",
+            "arg": 248
+          },
+          {
+            "offset": 226,
+            "op": "PUSH_EXC_INFO",
+            "arg": null
+          },
+          {
+            "offset": 228,
+            "op": "WITH_EXCEPT_START",
+            "arg": null
+          },
+          {
+            "offset": 230,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 240
+          },
+          {
+            "offset": 232,
+            "op": "RERAISE",
+            "arg": 2
+          },
+          {
+            "offset": 234,
+            "op": "COPY",
+            "arg": 3
+          },
+          {
+            "offset": 236,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 238,
+            "op": "RERAISE",
+            "arg": 1
+          },
+          {
+            "offset": 240,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 242,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 244,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 246,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 248,
+            "op": "LOAD_GLOBAL",
+            "arg": "contextlib"
+          },
+          {
+            "offset": 260,
+            "op": "LOAD_ATTR",
+            "arg": "suppress"
+          },
+          {
+            "offset": 270,
+            "op": "LOAD_GLOBAL",
+            "arg": "Exception"
+          },
+          {
+            "offset": 282,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 286,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 296,
+            "op": "BEFORE_WITH",
+            "arg": null
+          },
+          {
+            "offset": 298,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 300,
+            "op": "LOAD_FAST",
+            "arg": "user32"
+          },
+          {
+            "offset": 302,
+            "op": "LOAD_METHOD",
+            "arg": "SetProcessDPIAware"
+          },
+          {
+            "offset": 324,
+            "op": "PRECALL",
+            "arg": 0
+          },
+          {
+            "offset": 328,
+            "op": "CALL",
+            "arg": 0
+          },
+          {
+            "offset": 338,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 340,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 342,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 344,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 346,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 350,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 360,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 362,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 364,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 366,
+            "op": "PUSH_EXC_INFO",
+            "arg": null
+          },
+          {
+            "offset": 368,
+            "op": "WITH_EXCEPT_START",
+            "arg": null
+          },
+          {
+            "offset": 370,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 380
+          },
+          {
+            "offset": 372,
+            "op": "RERAISE",
+            "arg": 2
+          },
+          {
+            "offset": 374,
+            "op": "COPY",
+            "arg": 3
+          },
+          {
+            "offset": 376,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 378,
+            "op": "RERAISE",
+            "arg": 1
+          },
+          {
+            "offset": 380,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 382,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 384,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 386,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 388,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 390,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 392,
+            "op": "PUSH_EXC_INFO",
+            "arg": null
+          },
+          {
+            "offset": 394,
+            "op": "LOAD_GLOBAL",
+            "arg": "Exception"
+          },
+          {
+            "offset": 406,
+            "op": "CHECK_EXC_MATCH",
+            "arg": null
+          },
+          {
+            "offset": 408,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 418
+          },
+          {
+            "offset": 410,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 412,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 414,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 416,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 418,
+            "op": "RERAISE",
+            "arg": 0
+          },
+          {
+            "offset": 420,
+            "op": "COPY",
+            "arg": 3
+          },
+          {
+            "offset": 422,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 424,
+            "op": "RERAISE",
+            "arg": 1
+          }
+        ],
+        "children": []
+      },
+      {
+        "name": "emit_event",
+        "first_line": 43,
+        "args": [
+          "event",
+          "status"
+        ],
+        "names": [
+          "int",
+          "time",
+          "update",
+          "print",
+          "json",
+          "dumps",
+          "sys",
+          "stdout",
+          "flush"
+        ],
+        "constants": [
+          null,
+          "get_shoupai_unified.py",
+          1000,
+          "('event', 'status', 'script', 'timestamp_ms')",
+          true,
+          "('ensure_ascii',)"
+        ],
+        "instructions": [
+          {
+            "offset": 0,
+            "op": "RESUME",
+            "arg": 0
+          },
+          {
+            "offset": 2,
+            "op": "LOAD_FAST",
+            "arg": "event"
+          },
+          {
+            "offset": 4,
+            "op": "LOAD_FAST",
+            "arg": "status"
+          },
+          {
+            "offset": 6,
+            "op": "LOAD_CONST",
+            "arg": "get_shoupai_unified.py"
+          },
+          {
+            "offset": 8,
+            "op": "LOAD_GLOBAL",
+            "arg": "int"
+          },
+          {
+            "offset": 20,
+            "op": "LOAD_GLOBAL",
+            "arg": "time"
+          },
+          {
+            "offset": 32,
+            "op": "LOAD_ATTR",
+            "arg": "time"
+          },
+          {
+            "offset": 42,
+            "op": "PRECALL",
+            "arg": 0
+          },
+          {
+            "offset": 46,
+            "op": "CALL",
+            "arg": 0
+          },
+          {
+            "offset": 56,
+            "op": "LOAD_CONST",
+            "arg": 1000
+          },
+          {
+            "offset": 58,
+            "op": "BINARY_OP",
+            "arg": 5
+          },
+          {
+            "offset": 62,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 66,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 76,
+            "op": "LOAD_CONST",
+            "arg": "('event', 'status', 'script', 'timestamp_ms')"
+          },
+          {
+            "offset": 78,
+            "op": "BUILD_CONST_KEY_MAP",
+            "arg": 4
+          },
+          {
+            "offset": 80,
+            "op": "STORE_FAST",
+            "arg": "payload"
+          },
+          {
+            "offset": 82,
+            "op": "LOAD_FAST",
+            "arg": "payload"
+          },
+          {
+            "offset": 84,
+            "op": "LOAD_METHOD",
+            "arg": "update"
+          },
+          {
+            "offset": 106,
+            "op": "LOAD_FAST",
+            "arg": "extra"
+          },
+          {
+            "offset": 108,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 112,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 122,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 124,
+            "op": "LOAD_GLOBAL",
+            "arg": "print"
+          },
+          {
+            "offset": 136,
+            "op": "LOAD_GLOBAL",
+            "arg": "json"
+          },
+          {
+            "offset": 148,
+            "op": "LOAD_ATTR",
+            "arg": "dumps"
+          },
+          {
+            "offset": 158,
+            "op": "LOAD_FAST",
+            "arg": "payload"
+          },
+          {
+            "offset": 160,
+            "op": "LOAD_CONST",
+            "arg": true
+          },
+          {
+            "offset": 162,
+            "op": "KW_NAMES",
+            "arg": "<unknown>"
+          },
+          {
+            "offset": 164,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 168,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 178,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 182,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 192,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 194,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 206,
+            "op": "LOAD_ATTR",
+            "arg": "stdout"
+          },
+          {
+            "offset": 216,
+            "op": "LOAD_METHOD",
+            "arg": "flush"
+          },
+          {
+            "offset": 238,
+            "op": "PRECALL",
+            "arg": 0
+          },
+          {
+            "offset": 242,
+            "op": "CALL",
+            "arg": 0
+          },
+          {
+            "offset": 252,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 254,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 256,
+            "op": "RETURN_VALUE",
+            "arg": null
+          }
+        ],
+        "children": []
+      },
+      {
+        "name": "parse_unified_args",
+        "first_line": 55,
+        "args": [
+          "argv"
+        ],
+        "names": [
+          "startswith",
+          "len",
+          "append"
+        ],
+        "constants": [
+          "\n    解析统一入口参数。\n\n    支持两种调用方式：\n    1) 推荐：--mode v2_5_2 --window 微乐河北麻将\n    2) 兼容：v2_5_2 微乐河北麻将\n    ",
+          "v2_5_2",
+          "",
+          0,
+          "-",
+          1,
+          2,
+          null,
+          "--mode",
+          "--window"
+        ],
+        "instructions": [
+          {
+            "offset": 0,
+            "op": "RESUME",
+            "arg": 0
+          },
+          {
+            "offset": 2,
+            "op": "LOAD_CONST",
+            "arg": "v2_5_2"
+          },
+          {
+            "offset": 4,
+            "op": "STORE_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 6,
+            "op": "LOAD_CONST",
+            "arg": ""
+          },
+          {
+            "offset": 8,
+            "op": "STORE_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 10,
+            "op": "BUILD_LIST",
+            "arg": 0
+          },
+          {
+            "offset": 12,
+            "op": "STORE_FAST",
+            "arg": "passthrough"
+          },
+          {
+            "offset": 14,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 16,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 172
+          },
+          {
+            "offset": 18,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 20,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 22,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 32,
+            "op": "LOAD_METHOD",
+            "arg": "startswith"
+          },
+          {
+            "offset": 54,
+            "op": "LOAD_CONST",
+            "arg": "-"
+          },
+          {
+            "offset": 56,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 60,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 70,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 172
+          },
+          {
+            "offset": 72,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 74,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 76,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 86,
+            "op": "STORE_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 88,
+            "op": "LOAD_GLOBAL",
+            "arg": "len"
+          },
+          {
+            "offset": 100,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 102,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 106,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 116,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 118,
+            "op": "COMPARE_OP",
+            "arg": ">"
+          },
+          {
+            "offset": 124,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 162
+          },
+          {
+            "offset": 126,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 128,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 130,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 140,
+            "op": "STORE_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 142,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 144,
+            "op": "LOAD_CONST",
+            "arg": 2
+          },
+          {
+            "offset": 146,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 148,
+            "op": "BUILD_SLICE",
+            "arg": 2
+          },
+          {
+            "offset": 150,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 160,
+            "op": "STORE_FAST",
+            "arg": "passthrough"
+          },
+          {
+            "offset": 162,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 164,
+            "op": "LOAD_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 166,
+            "op": "LOAD_FAST",
+            "arg": "passthrough"
+          },
+          {
+            "offset": 168,
+            "op": "BUILD_TUPLE",
+            "arg": 3
+          },
+          {
+            "offset": 170,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 172,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 174,
+            "op": "STORE_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 176,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 178,
+            "op": "LOAD_GLOBAL",
+            "arg": "len"
+          },
+          {
+            "offset": 190,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 192,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 196,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 206,
+            "op": "COMPARE_OP",
+            "arg": "<"
+          },
+          {
+            "offset": 212,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 500
+          },
+          {
+            "offset": 214,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 216,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 218,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 228,
+            "op": "STORE_FAST",
+            "arg": "<redacted sensitive string>"
+          },
+          {
+            "offset": 230,
+            "op": "LOAD_FAST",
+            "arg": "<redacted sensitive string>"
+          },
+          {
+            "offset": 232,
+            "op": "LOAD_CONST",
+            "arg": "--mode"
+          },
+          {
+            "offset": 234,
+            "op": "COMPARE_OP",
+            "arg": "=="
+          },
+          {
+            "offset": 240,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 320
+          },
+          {
+            "offset": 242,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 244,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 246,
+            "op": "BINARY_OP",
+            "arg": 0
+          },
+          {
+            "offset": 250,
+            "op": "LOAD_GLOBAL",
+            "arg": "len"
+          },
+          {
+            "offset": 262,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 264,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 268,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 278,
+            "op": "COMPARE_OP",
+            "arg": "<"
+          },
+          {
+            "offset": 284,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 320
+          },
+          {
+            "offset": 286,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 288,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 290,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 292,
+            "op": "BINARY_OP",
+            "arg": 0
+          },
+          {
+            "offset": 296,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 306,
+            "op": "STORE_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 308,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 310,
+            "op": "LOAD_CONST",
+            "arg": 2
+          },
+          {
+            "offset": 312,
+            "op": "BINARY_OP",
+            "arg": 13
+          },
+          {
+            "offset": 316,
+            "op": "STORE_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 318,
+            "op": "JUMP_BACKWARD",
+            "arg": 176
+          },
+          {
+            "offset": 320,
+            "op": "LOAD_FAST",
+            "arg": "<redacted sensitive string>"
+          },
+          {
+            "offset": 322,
+            "op": "LOAD_CONST",
+            "arg": "--window"
+          },
+          {
+            "offset": 324,
+            "op": "COMPARE_OP",
+            "arg": "=="
+          },
+          {
+            "offset": 330,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 410
+          },
+          {
+            "offset": 332,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 334,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 336,
+            "op": "BINARY_OP",
+            "arg": 0
+          },
+          {
+            "offset": 340,
+            "op": "LOAD_GLOBAL",
+            "arg": "len"
+          },
+          {
+            "offset": 352,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 354,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 358,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 368,
+            "op": "COMPARE_OP",
+            "arg": "<"
+          },
+          {
+            "offset": 374,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 410
+          },
+          {
+            "offset": 376,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 378,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 380,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 382,
+            "op": "BINARY_OP",
+            "arg": 0
+          },
+          {
+            "offset": 386,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 396,
+            "op": "STORE_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 398,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 400,
+            "op": "LOAD_CONST",
+            "arg": 2
+          },
+          {
+            "offset": 402,
+            "op": "BINARY_OP",
+            "arg": 13
+          },
+          {
+            "offset": 406,
+            "op": "STORE_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 408,
+            "op": "JUMP_BACKWARD",
+            "arg": 176
+          },
+          {
+            "offset": 410,
+            "op": "LOAD_FAST",
+            "arg": "passthrough"
+          },
+          {
+            "offset": 412,
+            "op": "LOAD_METHOD",
+            "arg": "append"
+          },
+          {
+            "offset": 434,
+            "op": "LOAD_FAST",
+            "arg": "<redacted sensitive string>"
+          },
+          {
+            "offset": 436,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 440,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 450,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 452,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 454,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 456,
+            "op": "BINARY_OP",
+            "arg": 13
+          },
+          {
+            "offset": 460,
+            "op": "STORE_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 462,
+            "op": "LOAD_FAST",
+            "arg": "i"
+          },
+          {
+            "offset": 464,
+            "op": "LOAD_GLOBAL",
+            "arg": "len"
+          },
+          {
+            "offset": 476,
+            "op": "LOAD_FAST",
+            "arg": "argv"
+          },
+          {
+            "offset": 478,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 482,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 492,
+            "op": "COMPARE_OP",
+            "arg": "<"
+          },
+          {
+            "offset": 498,
+            "op": "POP_JUMP_BACKWARD_IF_TRUE",
+            "arg": 214
+          },
+          {
+            "offset": 500,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 502,
+            "op": "LOAD_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 504,
+            "op": "LOAD_FAST",
+            "arg": "passthrough"
+          },
+          {
+            "offset": 506,
+            "op": "BUILD_TUPLE",
+            "arg": 3
+          },
+          {
+            "offset": 508,
+            "op": "RETURN_VALUE",
+            "arg": null
+          }
+        ],
+        "children": []
+      },
+      {
+        "name": "resolve_script_path",
+        "first_line": 91,
+        "args": [
+          "mode"
+        ],
+        "names": [
+          "MODE_TO_SCRIPT",
+          "get",
+          "isinstance",
+          "list",
+          "endswith",
+          "append",
+          "os",
+          "path",
+          "join",
+          "BASE_DIR",
+          "exists"
+        ],
+        "constants": [
+          null,
+          "",
+          ".py",
+          "c",
+          0
+        ],
+        "instructions": [
+          {
+            "offset": 0,
+            "op": "RESUME",
+            "arg": 0
+          },
+          {
+            "offset": 2,
+            "op": "LOAD_GLOBAL",
+            "arg": "MODE_TO_SCRIPT"
+          },
+          {
+            "offset": 14,
+            "op": "LOAD_METHOD",
+            "arg": "get"
+          },
+          {
+            "offset": 36,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 38,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 42,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 52,
+            "op": "STORE_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 54,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 56,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 62
+          },
+          {
+            "offset": 58,
+            "op": "LOAD_CONST",
+            "arg": ""
+          },
+          {
+            "offset": 60,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 62,
+            "op": "LOAD_GLOBAL",
+            "arg": "isinstance"
+          },
+          {
+            "offset": 74,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 76,
+            "op": "LOAD_GLOBAL",
+            "arg": "list"
+          },
+          {
+            "offset": 88,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 92,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 102,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 108
+          },
+          {
+            "offset": 104,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 106,
+            "op": "JUMP_FORWARD",
+            "arg": 112
+          },
+          {
+            "offset": 108,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 110,
+            "op": "BUILD_LIST",
+            "arg": 1
+          },
+          {
+            "offset": 112,
+            "op": "STORE_FAST",
+            "arg": "candidates"
+          },
+          {
+            "offset": 114,
+            "op": "LOAD_FAST",
+            "arg": "candidates"
+          },
+          {
+            "offset": 116,
+            "op": "GET_ITER",
+            "arg": null
+          },
+          {
+            "offset": 118,
+            "op": "FOR_ITER",
+            "arg": 484
+          },
+          {
+            "offset": 120,
+            "op": "STORE_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 122,
+            "op": "BUILD_LIST",
+            "arg": 0
+          },
+          {
+            "offset": 124,
+            "op": "STORE_FAST",
+            "arg": "preferred_paths"
+          },
+          {
+            "offset": 126,
+            "op": "LOAD_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 128,
+            "op": "LOAD_METHOD",
+            "arg": "endswith"
+          },
+          {
+            "offset": 150,
+            "op": "LOAD_CONST",
+            "arg": ".py"
+          },
+          {
+            "offset": 152,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 156,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 166,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 286
+          },
+          {
+            "offset": 168,
+            "op": "LOAD_FAST",
+            "arg": "preferred_paths"
+          },
+          {
+            "offset": 170,
+            "op": "LOAD_METHOD",
+            "arg": "append"
+          },
+          {
+            "offset": 192,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 204,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 214,
+            "op": "LOAD_METHOD",
+            "arg": "join"
+          },
+          {
+            "offset": 236,
+            "op": "LOAD_GLOBAL",
+            "arg": "BASE_DIR"
+          },
+          {
+            "offset": 248,
+            "op": "LOAD_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 250,
+            "op": "FORMAT_VALUE",
+            "arg": "(None, False)"
+          },
+          {
+            "offset": 252,
+            "op": "LOAD_CONST",
+            "arg": "c"
+          },
+          {
+            "offset": 254,
+            "op": "BUILD_STRING",
+            "arg": 2
+          },
+          {
+            "offset": 256,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 260,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 270,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 274,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 284,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 286,
+            "op": "LOAD_FAST",
+            "arg": "preferred_paths"
+          },
+          {
+            "offset": 288,
+            "op": "LOAD_METHOD",
+            "arg": "append"
+          },
+          {
+            "offset": 310,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 322,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 332,
+            "op": "LOAD_METHOD",
+            "arg": "join"
+          },
+          {
+            "offset": 354,
+            "op": "LOAD_GLOBAL",
+            "arg": "BASE_DIR"
+          },
+          {
+            "offset": 366,
+            "op": "LOAD_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 368,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 372,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 382,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 386,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 396,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 398,
+            "op": "LOAD_FAST",
+            "arg": "preferred_paths"
+          },
+          {
+            "offset": 400,
+            "op": "GET_ITER",
+            "arg": null
+          },
+          {
+            "offset": 402,
+            "op": "FOR_ITER",
+            "arg": 482
+          },
+          {
+            "offset": 404,
+            "op": "STORE_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 406,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 418,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 428,
+            "op": "LOAD_METHOD",
+            "arg": "exists"
+          },
+          {
+            "offset": 450,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 452,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 456,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 466,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 480
+          },
+          {
+            "offset": 468,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 470,
+            "op": "SWAP",
+            "arg": 2
+          },
+          {
+            "offset": 472,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 474,
+            "op": "SWAP",
+            "arg": 2
+          },
+          {
+            "offset": 476,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 478,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 480,
+            "op": "JUMP_BACKWARD",
+            "arg": 402
+          },
+          {
+            "offset": 482,
+            "op": "JUMP_BACKWARD",
+            "arg": 118
+          },
+          {
+            "offset": 484,
+            "op": "LOAD_FAST",
+            "arg": "candidates"
+          },
+          {
+            "offset": 486,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 488,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 498,
+            "op": "STORE_FAST",
+            "arg": "first_candidate"
+          },
+          {
+            "offset": 500,
+            "op": "LOAD_FAST",
+            "arg": "first_candidate"
+          },
+          {
+            "offset": 502,
+            "op": "LOAD_METHOD",
+            "arg": "endswith"
+          },
+          {
+            "offset": 524,
+            "op": "LOAD_CONST",
+            "arg": ".py"
+          },
+          {
+            "offset": 526,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 530,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 540,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 622
+          },
+          {
+            "offset": 542,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 554,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 564,
+            "op": "LOAD_METHOD",
+            "arg": "join"
+          },
+          {
+            "offset": 586,
+            "op": "LOAD_GLOBAL",
+            "arg": "BASE_DIR"
+          },
+          {
+            "offset": 598,
+            "op": "LOAD_FAST",
+            "arg": "first_candidate"
+          },
+          {
+            "offset": 600,
+            "op": "FORMAT_VALUE",
+            "arg": "(None, False)"
+          },
+          {
+            "offset": 602,
+            "op": "LOAD_CONST",
+            "arg": "c"
+          },
+          {
+            "offset": 604,
+            "op": "BUILD_STRING",
+            "arg": 2
+          },
+          {
+            "offset": 606,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 610,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 620,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 622,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 634,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 644,
+            "op": "LOAD_METHOD",
+            "arg": "join"
+          },
+          {
+            "offset": 666,
+            "op": "LOAD_GLOBAL",
+            "arg": "BASE_DIR"
+          },
+          {
+            "offset": 678,
+            "op": "LOAD_FAST",
+            "arg": "first_candidate"
+          },
+          {
+            "offset": 680,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 684,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 694,
+            "op": "RETURN_VALUE",
+            "arg": null
+          }
+        ],
+        "children": []
+      },
+      {
+        "name": "resolve_core_module",
+        "first_line": 114,
+        "args": [
+          "mode"
+        ],
+        "names": [
+          "MODE_TO_SCRIPT",
+          "get",
+          "isinstance",
+          "list",
+          "endswith",
+          "os",
+          "path",
+          "join",
+          "BASE_DIR",
+          "dirname",
+          "splitext",
+          "basename",
+          "isdir",
+          "sorted",
+          "listdir"
+        ],
+        "constants": [
+          null,
+          "('', '')",
+          ".py",
+          0,
+          "_core"
+        ],
+        "instructions": [
+          {
+            "offset": 0,
+            "op": "MAKE_CELL",
+            "arg": "module_name"
+          },
+          {
+            "offset": 2,
+            "op": "RESUME",
+            "arg": 0
+          },
+          {
+            "offset": 4,
+            "op": "LOAD_GLOBAL",
+            "arg": "MODE_TO_SCRIPT"
+          },
+          {
+            "offset": 16,
+            "op": "LOAD_METHOD",
+            "arg": "get"
+          },
+          {
+            "offset": 38,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 40,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 44,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 54,
+            "op": "STORE_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 56,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 58,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 64
+          },
+          {
+            "offset": 60,
+            "op": "LOAD_CONST",
+            "arg": "('', '')"
+          },
+          {
+            "offset": 62,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 64,
+            "op": "LOAD_GLOBAL",
+            "arg": "isinstance"
+          },
+          {
+            "offset": 76,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 78,
+            "op": "LOAD_GLOBAL",
+            "arg": "list"
+          },
+          {
+            "offset": 90,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 94,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 104,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 110
+          },
+          {
+            "offset": 106,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 108,
+            "op": "JUMP_FORWARD",
+            "arg": 114
+          },
+          {
+            "offset": 110,
+            "op": "LOAD_FAST",
+            "arg": "script_rel"
+          },
+          {
+            "offset": 112,
+            "op": "BUILD_LIST",
+            "arg": 1
+          },
+          {
+            "offset": 114,
+            "op": "STORE_FAST",
+            "arg": "candidates"
+          },
+          {
+            "offset": 116,
+            "op": "LOAD_FAST",
+            "arg": "candidates"
+          },
+          {
+            "offset": 118,
+            "op": "GET_ITER",
+            "arg": null
+          },
+          {
+            "offset": 120,
+            "op": "EXTENDED_ARG",
+            "arg": 1
+          },
+          {
+            "offset": 122,
+            "op": "FOR_ITER",
+            "arg": 690
+          },
+          {
+            "offset": 124,
+            "op": "STORE_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 126,
+            "op": "LOAD_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 128,
+            "op": "LOAD_METHOD",
+            "arg": "endswith"
+          },
+          {
+            "offset": 150,
+            "op": "LOAD_CONST",
+            "arg": ".py"
+          },
+          {
+            "offset": 152,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 156,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 166,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 170
+          },
+          {
+            "offset": 168,
+            "op": "JUMP_BACKWARD",
+            "arg": 120
+          },
+          {
+            "offset": 170,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 182,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 192,
+            "op": "LOAD_METHOD",
+            "arg": "join"
+          },
+          {
+            "offset": 214,
+            "op": "LOAD_GLOBAL",
+            "arg": "BASE_DIR"
+          },
+          {
+            "offset": 226,
+            "op": "LOAD_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 228,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 232,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 242,
+            "op": "STORE_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 244,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 256,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 266,
+            "op": "LOAD_METHOD",
+            "arg": "dirname"
+          },
+          {
+            "offset": 288,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 290,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 294,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 304,
+            "op": "STORE_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 306,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 318,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 328,
+            "op": "LOAD_METHOD",
+            "arg": "splitext"
+          },
+          {
+            "offset": 350,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 362,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 372,
+            "op": "LOAD_METHOD",
+            "arg": "basename"
+          },
+          {
+            "offset": 394,
+            "op": "LOAD_FAST",
+            "arg": "rel_path"
+          },
+          {
+            "offset": 396,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 400,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 410,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 414,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 424,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 426,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 436,
+            "op": "FORMAT_VALUE",
+            "arg": "(None, False)"
+          },
+          {
+            "offset": 438,
+            "op": "LOAD_CONST",
+            "arg": "_core"
+          },
+          {
+            "offset": 440,
+            "op": "BUILD_STRING",
+            "arg": 2
+          },
+          {
+            "offset": 442,
+            "op": "STORE_DEREF",
+            "arg": "module_name"
+          },
+          {
+            "offset": 444,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 456,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 466,
+            "op": "LOAD_METHOD",
+            "arg": "isdir"
+          },
+          {
+            "offset": 488,
+            "op": "LOAD_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 490,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 494,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 504,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 508
+          },
+          {
+            "offset": 506,
+            "op": "JUMP_BACKWARD",
+            "arg": 120
+          },
+          {
+            "offset": 508,
+            "op": "LOAD_GLOBAL",
+            "arg": "sorted"
+          },
+          {
+            "offset": 520,
+            "op": "LOAD_CLOSURE",
+            "arg": "module_name"
+          },
+          {
+            "offset": 522,
+            "op": "BUILD_TUPLE",
+            "arg": 1
+          },
+          {
+            "offset": 524,
+            "op": "LOAD_CONST",
+            "arg": "<code:<genexpr>>"
+          },
+          {
+            "offset": 526,
+            "op": "MAKE_FUNCTION",
+            "arg": 8
+          },
+          {
+            "offset": 528,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 540,
+            "op": "LOAD_ATTR",
+            "arg": "listdir"
+          },
+          {
+            "offset": 550,
+            "op": "LOAD_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 552,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 556,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 566,
+            "op": "GET_ITER",
+            "arg": null
+          },
+          {
+            "offset": 568,
+            "op": "PRECALL",
+            "arg": 0
+          },
+          {
+            "offset": 572,
+            "op": "CALL",
+            "arg": 0
+          },
+          {
+            "offset": 582,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 586,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 596,
+            "op": "STORE_FAST",
+            "arg": "compiled_candidates"
+          },
+          {
+            "offset": 598,
+            "op": "LOAD_FAST",
+            "arg": "compiled_candidates"
+          },
+          {
+            "offset": 600,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 686
+          },
+          {
+            "offset": 602,
+            "op": "LOAD_DEREF",
+            "arg": "module_name"
+          },
+          {
+            "offset": 604,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 616,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 626,
+            "op": "LOAD_METHOD",
+            "arg": "join"
+          },
+          {
+            "offset": 648,
+            "op": "LOAD_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 650,
+            "op": "LOAD_FAST",
+            "arg": "compiled_candidates"
+          },
+          {
+            "offset": 652,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 654,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 664,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 668,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 678,
+            "op": "BUILD_TUPLE",
+            "arg": 2
+          },
+          {
+            "offset": 680,
+            "op": "SWAP",
+            "arg": 2
+          },
+          {
+            "offset": 682,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 684,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 686,
+            "op": "EXTENDED_ARG",
+            "arg": 1
+          },
+          {
+            "offset": 688,
+            "op": "JUMP_BACKWARD",
+            "arg": 120
+          },
+          {
+            "offset": 690,
+            "op": "LOAD_CONST",
+            "arg": "('', '')"
+          },
+          {
+            "offset": 692,
+            "op": "RETURN_VALUE",
+            "arg": null
+          }
+        ],
+        "children": [
+          {
+            "name": "<genexpr>",
+            "first_line": 130,
+            "args": [
+              ".0"
+            ],
+            "names": [
+              "startswith",
+              "lower",
+              "endswith"
+            ],
+            "constants": [
+              ".pyd",
+              null
+            ],
+            "instructions": [
+              {
+                "offset": 0,
+                "op": "COPY_FREE_VARS",
+                "arg": 1
+              },
+              {
+                "offset": 2,
+                "op": "RETURN_GENERATOR",
+                "arg": null
+              },
+              {
+                "offset": 4,
+                "op": "POP_TOP",
+                "arg": null
+              },
+              {
+                "offset": 6,
+                "op": "RESUME",
+                "arg": 0
+              },
+              {
+                "offset": 8,
+                "op": "LOAD_FAST",
+                "arg": ".0"
+              },
+              {
+                "offset": 10,
+                "op": "FOR_ITER",
+                "arg": 144
+              },
+              {
+                "offset": 12,
+                "op": "STORE_FAST",
+                "arg": "file_name"
+              },
+              {
+                "offset": 14,
+                "op": "LOAD_FAST",
+                "arg": "file_name"
+              },
+              {
+                "offset": 16,
+                "op": "LOAD_METHOD",
+                "arg": "startswith"
+              },
+              {
+                "offset": 38,
+                "op": "LOAD_DEREF",
+                "arg": "module_name"
+              },
+              {
+                "offset": 40,
+                "op": "PRECALL",
+                "arg": 1
+              },
+              {
+                "offset": 44,
+                "op": "CALL",
+                "arg": 1
+              },
+              {
+                "offset": 54,
+                "op": "POP_JUMP_BACKWARD_IF_FALSE",
+                "arg": 10
+              },
+              {
+                "offset": 56,
+                "op": "LOAD_FAST",
+                "arg": "file_name"
+              },
+              {
+                "offset": 58,
+                "op": "LOAD_METHOD",
+                "arg": "lower"
+              },
+              {
+                "offset": 80,
+                "op": "PRECALL",
+                "arg": 0
+              },
+              {
+                "offset": 84,
+                "op": "CALL",
+                "arg": 0
+              },
+              {
+                "offset": 94,
+                "op": "LOAD_METHOD",
+                "arg": "endswith"
+              },
+              {
+                "offset": 116,
+                "op": "LOAD_CONST",
+                "arg": ".pyd"
+              },
+              {
+                "offset": 118,
+                "op": "PRECALL",
+                "arg": 1
+              },
+              {
+                "offset": 122,
+                "op": "CALL",
+                "arg": 1
+              },
+              {
+                "offset": 132,
+                "op": "POP_JUMP_BACKWARD_IF_FALSE",
+                "arg": 10
+              },
+              {
+                "offset": 134,
+                "op": "LOAD_FAST",
+                "arg": "file_name"
+              },
+              {
+                "offset": 136,
+                "op": "YIELD_VALUE",
+                "arg": null
+              },
+              {
+                "offset": 138,
+                "op": "RESUME",
+                "arg": 1
+              },
+              {
+                "offset": 140,
+                "op": "POP_TOP",
+                "arg": null
+              },
+              {
+                "offset": 142,
+                "op": "JUMP_BACKWARD",
+                "arg": 10
+              },
+              {
+                "offset": 144,
+                "op": "LOAD_CONST",
+                "arg": null
+              },
+              {
+                "offset": 146,
+                "op": "RETURN_VALUE",
+                "arg": null
+              }
+            ],
+            "children": []
+          }
+        ]
+      },
+      {
+        "name": "run_core_module",
+        "first_line": 141,
+        "args": [
+          "module_name",
+          "module_path",
+          "downstream_args"
+        ],
+        "names": [
+          "os",
+          "path",
+          "dirname",
+          "sys",
+          "argv",
+          "insert",
+          "importlib",
+          "import_module",
+          "contextlib",
+          "suppress",
+          "ValueError",
+          "remove"
+        ],
+        "constants": [
+          null,
+          false,
+          0,
+          true
+        ],
+        "instructions": [
+          {
+            "offset": 0,
+            "op": "RESUME",
+            "arg": 0
+          },
+          {
+            "offset": 2,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 14,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 24,
+            "op": "LOAD_METHOD",
+            "arg": "dirname"
+          },
+          {
+            "offset": 46,
+            "op": "LOAD_FAST",
+            "arg": "module_path"
+          },
+          {
+            "offset": 48,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 52,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 62,
+            "op": "STORE_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 64,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 76,
+            "op": "LOAD_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 86,
+            "op": "STORE_FAST",
+            "arg": "old_argv"
+          },
+          {
+            "offset": 88,
+            "op": "LOAD_CONST",
+            "arg": false
+          },
+          {
+            "offset": 90,
+            "op": "STORE_FAST",
+            "arg": "inserted_path"
+          },
+          {
+            "offset": 92,
+            "op": "NOP",
+            "arg": null
+          },
+          {
+            "offset": 94,
+            "op": "LOAD_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 96,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 108,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 118,
+            "op": "CONTAINS_OP",
+            "arg": 1
+          },
+          {
+            "offset": 120,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 190
+          },
+          {
+            "offset": 122,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 134,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 144,
+            "op": "LOAD_METHOD",
+            "arg": "insert"
+          },
+          {
+            "offset": 166,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 168,
+            "op": "LOAD_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 170,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 174,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 184,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 186,
+            "op": "LOAD_CONST",
+            "arg": true
+          },
+          {
+            "offset": 188,
+            "op": "STORE_FAST",
+            "arg": "inserted_path"
+          },
+          {
+            "offset": 190,
+            "op": "LOAD_FAST",
+            "arg": "module_path"
+          },
+          {
+            "offset": 192,
+            "op": "BUILD_LIST",
+            "arg": 1
+          },
+          {
+            "offset": 194,
+            "op": "LOAD_FAST",
+            "arg": "downstream_args"
+          },
+          {
+            "offset": 196,
+            "op": "LIST_EXTEND",
+            "arg": 1
+          },
+          {
+            "offset": 198,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 210,
+            "op": "STORE_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 220,
+            "op": "LOAD_GLOBAL",
+            "arg": "importlib"
+          },
+          {
+            "offset": 232,
+            "op": "LOAD_ATTR",
+            "arg": "import_module"
+          },
+          {
+            "offset": 242,
+            "op": "LOAD_FAST",
+            "arg": "module_name"
+          },
+          {
+            "offset": 244,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 248,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 258,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 260,
+            "op": "LOAD_FAST",
+            "arg": "old_argv"
+          },
+          {
+            "offset": 262,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 274,
+            "op": "STORE_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 284,
+            "op": "LOAD_FAST",
+            "arg": "inserted_path"
+          },
+          {
+            "offset": 286,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 454
+          },
+          {
+            "offset": 288,
+            "op": "LOAD_GLOBAL",
+            "arg": "contextlib"
+          },
+          {
+            "offset": 300,
+            "op": "LOAD_ATTR",
+            "arg": "suppress"
+          },
+          {
+            "offset": 310,
+            "op": "LOAD_GLOBAL",
+            "arg": "ValueError"
+          },
+          {
+            "offset": 322,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 326,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 336,
+            "op": "BEFORE_WITH",
+            "arg": null
+          },
+          {
+            "offset": 338,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 340,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 352,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 362,
+            "op": "LOAD_METHOD",
+            "arg": "remove"
+          },
+          {
+            "offset": 384,
+            "op": "LOAD_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 386,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 390,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 400,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 402,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 404,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 406,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 408,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 412,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 422,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 424,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 426,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 428,
+            "op": "PUSH_EXC_INFO",
+            "arg": null
+          },
+          {
+            "offset": 430,
+            "op": "WITH_EXCEPT_START",
+            "arg": null
+          },
+          {
+            "offset": 432,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 442
+          },
+          {
+            "offset": 434,
+            "op": "RERAISE",
+            "arg": 2
+          },
+          {
+            "offset": 436,
+            "op": "COPY",
+            "arg": 3
+          },
+          {
+            "offset": 438,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 440,
+            "op": "RERAISE",
+            "arg": 1
+          },
+          {
+            "offset": 442,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 444,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 446,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 448,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 450,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 452,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 454,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 456,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 458,
+            "op": "PUSH_EXC_INFO",
+            "arg": null
+          },
+          {
+            "offset": 460,
+            "op": "LOAD_FAST",
+            "arg": "old_argv"
+          },
+          {
+            "offset": 462,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 474,
+            "op": "STORE_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 484,
+            "op": "LOAD_FAST",
+            "arg": "inserted_path"
+          },
+          {
+            "offset": 486,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 650
+          },
+          {
+            "offset": 488,
+            "op": "LOAD_GLOBAL",
+            "arg": "contextlib"
+          },
+          {
+            "offset": 500,
+            "op": "LOAD_ATTR",
+            "arg": "suppress"
+          },
+          {
+            "offset": 510,
+            "op": "LOAD_GLOBAL",
+            "arg": "ValueError"
+          },
+          {
+            "offset": 522,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 526,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 536,
+            "op": "BEFORE_WITH",
+            "arg": null
+          },
+          {
+            "offset": 538,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 540,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 552,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 562,
+            "op": "LOAD_METHOD",
+            "arg": "remove"
+          },
+          {
+            "offset": 584,
+            "op": "LOAD_FAST",
+            "arg": "module_dir"
+          },
+          {
+            "offset": 586,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 590,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 600,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 602,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 604,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 606,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 608,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 612,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 622,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 624,
+            "op": "RERAISE",
+            "arg": 0
+          },
+          {
+            "offset": 626,
+            "op": "PUSH_EXC_INFO",
+            "arg": null
+          },
+          {
+            "offset": 628,
+            "op": "WITH_EXCEPT_START",
+            "arg": null
+          },
+          {
+            "offset": 630,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 640
+          },
+          {
+            "offset": 632,
+            "op": "RERAISE",
+            "arg": 2
+          },
+          {
+            "offset": 634,
+            "op": "COPY",
+            "arg": 3
+          },
+          {
+            "offset": 636,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 638,
+            "op": "RERAISE",
+            "arg": 1
+          },
+          {
+            "offset": 640,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 642,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 644,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 646,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 648,
+            "op": "RERAISE",
+            "arg": 0
+          },
+          {
+            "offset": 650,
+            "op": "RERAISE",
+            "arg": 0
+          },
+          {
+            "offset": 652,
+            "op": "COPY",
+            "arg": 3
+          },
+          {
+            "offset": 654,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 656,
+            "op": "RERAISE",
+            "arg": 1
+          }
+        ],
+        "children": []
+      },
+      {
+        "name": "main",
+        "first_line": 158,
+        "args": [],
+        "names": [
+          "enable_high_dpi_awareness",
+          "parse_unified_args",
+          "sys",
+          "argv",
+          "resolve_core_module",
+          "resolve_script_path",
+          "emit_event",
+          "sorted",
+          "MODE_TO_SCRIPT",
+          "<redacted sensitive string>",
+          "os",
+          "path",
+          "exists",
+          "append",
+          "extend",
+          "run_core_module",
+          "runpy",
+          "run_path"
+        ],
+        "constants": [
+          null,
+          1,
+          "runner_error",
+          "unknown_mode",
+          "('mode', 'supported_modes')",
+          2,
+          "script_missing",
+          "('mode', 'script_path')",
+          "runner_dispatch",
+          "ok",
+          0,
+          "__main__",
+          "('run_name',)"
+        ],
+        "instructions": [
+          {
+            "offset": 0,
+            "op": "RESUME",
+            "arg": 0
+          },
+          {
+            "offset": 2,
+            "op": "LOAD_GLOBAL",
+            "arg": "enable_high_dpi_awareness"
+          },
+          {
+            "offset": 14,
+            "op": "PRECALL",
+            "arg": 0
+          },
+          {
+            "offset": 18,
+            "op": "CALL",
+            "arg": 0
+          },
+          {
+            "offset": 28,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 30,
+            "op": "LOAD_GLOBAL",
+            "arg": "parse_unified_args"
+          },
+          {
+            "offset": 42,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 54,
+            "op": "LOAD_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 64,
+            "op": "LOAD_CONST",
+            "arg": 1
+          },
+          {
+            "offset": 66,
+            "op": "LOAD_CONST",
+            "arg": null
+          },
+          {
+            "offset": 68,
+            "op": "BUILD_SLICE",
+            "arg": 2
+          },
+          {
+            "offset": 70,
+            "op": "BINARY_SUBSCR",
+            "arg": null
+          },
+          {
+            "offset": 80,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 84,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 94,
+            "op": "UNPACK_SEQUENCE",
+            "arg": 3
+          },
+          {
+            "offset": 98,
+            "op": "STORE_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 100,
+            "op": "STORE_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 102,
+            "op": "STORE_FAST",
+            "arg": "passthrough"
+          },
+          {
+            "offset": 104,
+            "op": "LOAD_GLOBAL",
+            "arg": "resolve_core_module"
+          },
+          {
+            "offset": 116,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 118,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 122,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 132,
+            "op": "UNPACK_SEQUENCE",
+            "arg": 2
+          },
+          {
+            "offset": 136,
+            "op": "STORE_FAST",
+            "arg": "module_name"
+          },
+          {
+            "offset": 138,
+            "op": "STORE_FAST",
+            "arg": "module_path"
+          },
+          {
+            "offset": 140,
+            "op": "LOAD_FAST",
+            "arg": "module_path"
+          },
+          {
+            "offset": 142,
+            "op": "JUMP_IF_TRUE_OR_POP",
+            "arg": 172
+          },
+          {
+            "offset": 144,
+            "op": "LOAD_GLOBAL",
+            "arg": "resolve_script_path"
+          },
+          {
+            "offset": 156,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 158,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 162,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 172,
+            "op": "STORE_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 174,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 176,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 292
+          },
+          {
+            "offset": 178,
+            "op": "LOAD_GLOBAL",
+            "arg": "emit_event"
+          },
+          {
+            "offset": 190,
+            "op": "LOAD_CONST",
+            "arg": "runner_error"
+          },
+          {
+            "offset": 192,
+            "op": "LOAD_CONST",
+            "arg": "unknown_mode"
+          },
+          {
+            "offset": 194,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 196,
+            "op": "LOAD_GLOBAL",
+            "arg": "sorted"
+          },
+          {
+            "offset": 208,
+            "op": "LOAD_GLOBAL",
+            "arg": "MODE_TO_SCRIPT"
+          },
+          {
+            "offset": 220,
+            "op": "LOAD_METHOD",
+            "arg": "<redacted sensitive string>"
+          },
+          {
+            "offset": 242,
+            "op": "PRECALL",
+            "arg": 0
+          },
+          {
+            "offset": 246,
+            "op": "CALL",
+            "arg": 0
+          },
+          {
+            "offset": 256,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 260,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 270,
+            "op": "KW_NAMES",
+            "arg": "<unknown>"
+          },
+          {
+            "offset": 272,
+            "op": "PRECALL",
+            "arg": 4
+          },
+          {
+            "offset": 276,
+            "op": "CALL",
+            "arg": 4
+          },
+          {
+            "offset": 286,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 288,
+            "op": "LOAD_CONST",
+            "arg": 2
+          },
+          {
+            "offset": 290,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 292,
+            "op": "LOAD_GLOBAL",
+            "arg": "os"
+          },
+          {
+            "offset": 304,
+            "op": "LOAD_ATTR",
+            "arg": "path"
+          },
+          {
+            "offset": 314,
+            "op": "LOAD_METHOD",
+            "arg": "exists"
+          },
+          {
+            "offset": 336,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 338,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 342,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 352,
+            "op": "POP_JUMP_FORWARD_IF_TRUE",
+            "arg": 396
+          },
+          {
+            "offset": 354,
+            "op": "LOAD_GLOBAL",
+            "arg": "emit_event"
+          },
+          {
+            "offset": 366,
+            "op": "LOAD_CONST",
+            "arg": "runner_error"
+          },
+          {
+            "offset": 368,
+            "op": "LOAD_CONST",
+            "arg": "script_missing"
+          },
+          {
+            "offset": 370,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 372,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 374,
+            "op": "KW_NAMES",
+            "arg": "<unknown>"
+          },
+          {
+            "offset": 376,
+            "op": "PRECALL",
+            "arg": 4
+          },
+          {
+            "offset": 380,
+            "op": "CALL",
+            "arg": 4
+          },
+          {
+            "offset": 390,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 392,
+            "op": "LOAD_CONST",
+            "arg": 2
+          },
+          {
+            "offset": 394,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 396,
+            "op": "LOAD_GLOBAL",
+            "arg": "emit_event"
+          },
+          {
+            "offset": 408,
+            "op": "LOAD_CONST",
+            "arg": "runner_dispatch"
+          },
+          {
+            "offset": 410,
+            "op": "LOAD_CONST",
+            "arg": "ok"
+          },
+          {
+            "offset": 412,
+            "op": "LOAD_FAST",
+            "arg": "mode"
+          },
+          {
+            "offset": 414,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 416,
+            "op": "KW_NAMES",
+            "arg": "<unknown>"
+          },
+          {
+            "offset": 418,
+            "op": "PRECALL",
+            "arg": 4
+          },
+          {
+            "offset": 422,
+            "op": "CALL",
+            "arg": 4
+          },
+          {
+            "offset": 432,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 434,
+            "op": "BUILD_LIST",
+            "arg": 0
+          },
+          {
+            "offset": 436,
+            "op": "STORE_FAST",
+            "arg": "downstream_args"
+          },
+          {
+            "offset": 438,
+            "op": "LOAD_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 440,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 484
+          },
+          {
+            "offset": 442,
+            "op": "LOAD_FAST",
+            "arg": "downstream_args"
+          },
+          {
+            "offset": 444,
+            "op": "LOAD_METHOD",
+            "arg": "append"
+          },
+          {
+            "offset": 466,
+            "op": "LOAD_FAST",
+            "arg": "window_name"
+          },
+          {
+            "offset": 468,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 472,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 482,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 484,
+            "op": "LOAD_FAST",
+            "arg": "downstream_args"
+          },
+          {
+            "offset": 486,
+            "op": "LOAD_METHOD",
+            "arg": "extend"
+          },
+          {
+            "offset": 508,
+            "op": "LOAD_FAST",
+            "arg": "passthrough"
+          },
+          {
+            "offset": 510,
+            "op": "PRECALL",
+            "arg": 1
+          },
+          {
+            "offset": 514,
+            "op": "CALL",
+            "arg": 1
+          },
+          {
+            "offset": 524,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 526,
+            "op": "LOAD_FAST",
+            "arg": "module_path"
+          },
+          {
+            "offset": 528,
+            "op": "POP_JUMP_FORWARD_IF_FALSE",
+            "arg": 568
+          },
+          {
+            "offset": 530,
+            "op": "LOAD_GLOBAL",
+            "arg": "run_core_module"
+          },
+          {
+            "offset": 542,
+            "op": "LOAD_FAST",
+            "arg": "module_name"
+          },
+          {
+            "offset": 544,
+            "op": "LOAD_FAST",
+            "arg": "module_path"
+          },
+          {
+            "offset": 546,
+            "op": "LOAD_FAST",
+            "arg": "downstream_args"
+          },
+          {
+            "offset": 548,
+            "op": "PRECALL",
+            "arg": 3
+          },
+          {
+            "offset": 552,
+            "op": "CALL",
+            "arg": 3
+          },
+          {
+            "offset": 562,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 564,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 566,
+            "op": "RETURN_VALUE",
+            "arg": null
+          },
+          {
+            "offset": 568,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 580,
+            "op": "LOAD_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 590,
+            "op": "STORE_FAST",
+            "arg": "old_argv"
+          },
+          {
+            "offset": 592,
+            "op": "NOP",
+            "arg": null
+          },
+          {
+            "offset": 594,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 596,
+            "op": "BUILD_LIST",
+            "arg": 1
+          },
+          {
+            "offset": 598,
+            "op": "LOAD_FAST",
+            "arg": "downstream_args"
+          },
+          {
+            "offset": 600,
+            "op": "LIST_EXTEND",
+            "arg": 1
+          },
+          {
+            "offset": 602,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 614,
+            "op": "STORE_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 624,
+            "op": "LOAD_GLOBAL",
+            "arg": "runpy"
+          },
+          {
+            "offset": 636,
+            "op": "LOAD_ATTR",
+            "arg": "run_path"
+          },
+          {
+            "offset": 646,
+            "op": "LOAD_FAST",
+            "arg": "script_path"
+          },
+          {
+            "offset": 648,
+            "op": "LOAD_CONST",
+            "arg": "__main__"
+          },
+          {
+            "offset": 650,
+            "op": "KW_NAMES",
+            "arg": "<unknown>"
+          },
+          {
+            "offset": 652,
+            "op": "PRECALL",
+            "arg": 2
+          },
+          {
+            "offset": 656,
+            "op": "CALL",
+            "arg": 2
+          },
+          {
+            "offset": 666,
+            "op": "POP_TOP",
+            "arg": null
+          },
+          {
+            "offset": 668,
+            "op": "LOAD_FAST",
+            "arg": "old_argv"
+          },
+          {
+            "offset": 670,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 682,
+            "op": "STORE_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 692,
+            "op": "JUMP_FORWARD",
+            "arg": 728
+          },
+          {
+            "offset": 694,
+            "op": "PUSH_EXC_INFO",
+            "arg": null
+          },
+          {
+            "offset": 696,
+            "op": "LOAD_FAST",
+            "arg": "old_argv"
+          },
+          {
+            "offset": 698,
+            "op": "LOAD_GLOBAL",
+            "arg": "sys"
+          },
+          {
+            "offset": 710,
+            "op": "STORE_ATTR",
+            "arg": "argv"
+          },
+          {
+            "offset": 720,
+            "op": "RERAISE",
+            "arg": 0
+          },
+          {
+            "offset": 722,
+            "op": "COPY",
+            "arg": 3
+          },
+          {
+            "offset": 724,
+            "op": "POP_EXCEPT",
+            "arg": null
+          },
+          {
+            "offset": 726,
+            "op": "RERAISE",
+            "arg": 1
+          },
+          {
+            "offset": 728,
+            "op": "LOAD_CONST",
+            "arg": 0
+          },
+          {
+            "offset": 730,
+            "op": "RETURN_VALUE",
+            "arg": null
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  "limit": "Static bytecode inventory; no target code was executed."
+}

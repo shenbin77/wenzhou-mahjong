@@ -1,0 +1,10 @@
+{
+  "status": "abstain",
+  "reason": "须先人工确认这是温州茶 2 人局",
+  "image": "温州茶（传统麻将）\\采集\\assist_sessions\\goal_review_20261018\\20261018_073318_826856_fb287b.png",
+  "annotation": null,
+  "captured_at": "2026-10-18T07:33:18.827843+08:00",
+  "serial": "emulator-5556",
+  "image_sha256": "08756fd4e777730c134b65b4e2ce629038c3858b442f3d2c379e9da0cca37bc9",
+  "record": "温州茶（传统麻将）\\采集\\assist_sessions\\goal_review_20261018\\20261018_073318_826856_fb287b.json"
+}

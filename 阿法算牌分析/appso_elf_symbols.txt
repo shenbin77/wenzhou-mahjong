@@ -1,0 +1,9 @@
+
+Symbol table '.dynsym' contains 6 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000224000 26752 OBJECT  GLOBAL DEFAULT    7 _kDartVmSnapshotInstructions
+     2: 000000000022a880 0x7621f0 OBJECT  GLOBAL DEFAULT    7 _kDartIsolateSnapshotInstructions
+     3: 0000000000000340 36672 OBJECT  GLOBAL DEFAULT    5 _kDartVmSnapshotData
+     4: 0000000000009280 0x217390 OBJECT  GLOBAL DEFAULT    5 _kDartIsolateSnapshotData
+     5: 00000000000001c8    32 OBJECT  GLOBAL DEFAULT    1 _kDartSnapshotBuildId

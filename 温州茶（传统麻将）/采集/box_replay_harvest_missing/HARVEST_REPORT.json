@@ -1,0 +1,231 @@
+{
+ "schema": "replay-harvest/v1",
+ "harvested_at": "2026-10-15T20:06:00+08:00",
+ "device": "emulator-5554",
+ "machineId": "3b795a2f-ef13-46a1-b0bb-4375bdcbde33",
+ "package": "com.xm.zjgamecenter",
+ "resolution": [
+  1600,
+  900
+ ],
+ "safety": {
+  "started_real_play": false,
+  "clicked_开始游戏": false,
+  "spent_房卡": false,
+  "joined_table": false
+ },
+ "tap_path": {
+  "documented_user_path": "比赛场 → 进入 → 右上角 → 详情 → 回放",
+  "executed_from_current_session": [
+   {
+    "step": "ensure_比赛战绩_list",
+    "note": "already on or returned via 返回列表 / close popup"
+   },
+   {
+    "step": "date_select",
+    "coords": [
+     280,
+     348
+    ],
+    "dates": [
+     "2026-10-15",
+     "2026-10-14"
+    ]
+   },
+   {
+    "step": "详情",
+    "coords": [
+     1450,
+     265
+    ]
+   },
+   {
+    "step": "回放_tab_beside_分享",
+    "coords": [
+     1540,
+     248
+    ],
+    "note": "toggles per-round teal 回放 column; tap when rows show 分享 to load 回放; if rows already show 回放 do NOT retap"
+   },
+   {
+    "step": "第N局_回放",
+    "coords": [
+     1495,
+     321
+    ],
+    "note": "round1; subsequent rounds ~80px lower each"
+   },
+   {
+    "step": "wait_auto_playback",
+    "note": "do NOT tap 开始游戏; wait ~4s for deal"
+   },
+   {
+    "step": "close_replay_X",
+    "coords": [
+     1040,
+     440
+    ]
+   },
+   {
+    "step": "返回列表",
+    "coords": [
+     1440,
+     133
+    ]
+   }
+  ]
+ },
+ "sessions": [
+  {
+   "date": "2026-10-15",
+   "room": "346299",
+   "rounds": "16/16",
+   "time": "17:47",
+   "players": [
+    "百合花",
+    "晓红",
+    "任海明",
+    "徐徐"
+   ],
+   "rounds_opened": [
+    1
+   ],
+   "playback_frames": [
+    "07_round1_waiting.png",
+    "08_playback_t4s.png",
+    "09_playback_t8s.png",
+    "10_playback_t12s.png",
+    "11_playback_t16s.png",
+    "12_playback_t20s.png"
+   ],
+   "frame_paths": [
+    "2026-10-15/r01/frame_01.png",
+    "2026-10-15/r01/frame_02.png",
+    "2026-10-15/r01/frame_03.png",
+    "2026-10-15/r01/frame_04.png",
+    "2026-10-15/r01/frame_05.png"
+   ]
+  },
+  {
+   "date": "2026-10-14",
+   "room": "302805",
+   "rounds": "16/16",
+   "time": "19:04",
+   "players": [
+    "李哥",
+    "dkl",
+    "啊泽哥",
+    "晓红"
+   ],
+   "rounds_opened": [
+    1,
+    2
+   ],
+   "playback_frames": [
+    "26_1014_round1_open.png",
+    "27_1014_playback_a.png",
+    "28_1014_playback_b.png",
+    "29_1014_playback_c.png"
+   ],
+   "frame_paths": [
+    "2026-10-14/r01/frame_01.png",
+    "2026-10-14/r01/frame_02.png",
+    "2026-10-14/r01/frame_03.png",
+    "2026-10-14/r01/frame_04.png",
+    "2026-10-14/r02/frame_01.png",
+    "2026-10-14/r02/frame_02.png"
+   ]
+  }
+ ],
+ "bot_training_assessment": {
+  "replay_works": true,
+  "frame_quality": "good — 1600x900, face-up all hands in replay, discards, remaining count, wind/timer readable",
+  "controls": [
+   "rewind",
+   "pause/play",
+   "forward",
+   "X close",
+   "播放速度 X1"
+  ],
+  "caveats": [
+   "center overlay partially occludes table center",
+   "auto-playback without 开始游戏 confirmed",
+   "header 回放 tab toggles share vs replay column — must detect state",
+   "only round 1 sampled per date; 15 more rounds each available"
+  ]
+ },
+ "counts": {
+  "png_in_box_harvest_dir": 62,
+  "png_on_windows_agent_tools": 30,
+  "useful_playback_frames_box": 20,
+  "path_ui_frames_box": 42,
+  "layout_frames_box": 11
+ },
+ "files_box": [
+  "01_crop_br.png",
+  "01_crop_right.png",
+  "01_crop_tr.png",
+  "01_current.png",
+  "02_after_header_replay_tap.png",
+  "03_after_retap_header.png",
+  "03_bottom_nav.png",
+  "03_close_zone.png",
+  "03_full_ref.png",
+  "03_left_mid.png",
+  "04_detail_btn_zone.png",
+  "04_lobby_after_close.png",
+  "05_header_btns.png",
+  "05_match_detail.png",
+  "05_row_btns.png",
+  "05_share_replay_tight.png",
+  "05_topright.png",
+  "06_after_replay_tab.png",
+  "06_right_top.png",
+  "07_round1_opened.png",
+  "07_round1_waiting.png",
+  "08_playback_t4s.png",
+  "09_playback_t8s.png",
+  "10_playback_t12s.png",
+  "11_playback_t16s.png",
+  "12_ctrl_crop.png",
+  "12_ctrl_wide.png",
+  "12_playback_t20s.png",
+  "13_after_x_tap.png",
+  "13_ctrl.png",
+  "13_tl.png",
+  "13_x_zone.png",
+  "14_after_back.png",
+  "14_mid.png",
+  "14_top.png",
+  "15_back_to_detail.png",
+  "16_date_zone.png",
+  "16_match_list.png",
+  "17_date_crop.png",
+  "17_date_picker.png",
+  "17_list_only.png",
+  "18_date_hdr.png",
+  "18_list_1014.png",
+  "18_row.png",
+  "19_1014_detail.png",
+  "19_1014_detail_hdr.png",
+  "20_1014_after_replay_tab.png",
+  "20_1014_after_replay_tab_hdr.png",
+  "24_1014_last.png",
+  "24_1014_last_hdr.png",
+  "25_1014_replay_rows.png",
+  "26_1014_round1_open.png",
+  "27_1014_playback_a.png",
+  "28_1014_playback_b.png",
+  "29_1014_playback_c.png",
+  "cmp1_header_btns.png",
+  "cmp1_rows.png",
+  "cmp2_header_btns.png",
+  "cmp2_rows.png",
+  "hist_header.png",
+  "hist_rows.png",
+  "ret_list_zone.png"
+ ],
+ "blockers": [
+  "Windows machine WIN-QJUNGEH8THF unreachable from ~20:10 CST mid-batch (r03-r06 of 10-14 running on device); frames for r02(2 of 4 copied) and r03+ remain on Windows only"
+ ]
+}

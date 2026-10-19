@@ -1,0 +1,325 @@
+{
+  "stats": {
+    "generated_at": "2026-10-15 20:29:36 CST",
+    "dry_run": false,
+    "input_note": "explicit:/workspace/majiang-data/replay_harvest/2026-10-14/r02",
+    "n_frames": 3,
+    "n_ok": 3,
+    "n_with_tiles": 1,
+    "n_complete": 1,
+    "n_gameplay": 1,
+    "n_hand14": 0,
+    "n_hand13": 1,
+    "n_rounds_estimated": 1,
+    "recognition_complete_rate": 1.0,
+    "recognition_complete_rate_note": null,
+    "hongzhong_dist_gameplay": {
+      "0": 1
+    },
+    "starting_hongzhong_dist": {
+      "0": 1
+    },
+    "starting_shanten_avg": 3.0,
+    "starting_shanten_note": null,
+    "n_settled_rounds": 0,
+    "n_wins_by_score_sign": 0,
+    "win_rate": null,
+    "win_rate_note": "无法从结算帧/settle OCR 推出胜率：本批无可靠 settle_score",
+    "hu_rate_note": "无法从结算帧/settle OCR 推出胜率：本批无可靠 settle_score",
+    "elapsed_sec": 0.1,
+    "template_dir": "/workspace/majiang-bot/pc_bot/templates_hongzhong_v2"
+  },
+  "rounds": [
+    {
+      "start_frame": "frame_02.png",
+      "frames": [
+        "frame_02.png"
+      ],
+      "hands": [
+        {
+          "name": "frame_02.png",
+          "concealed": [
+            1,
+            2,
+            4,
+            6,
+            9,
+            9,
+            42,
+            42,
+            45,
+            46,
+            27,
+            29,
+            29
+          ],
+          "shanten": 3,
+          "hongzhong": 0,
+          "is_hand14": false
+        }
+      ],
+      "starting_hand": [
+        1,
+        2,
+        4,
+        6,
+        9,
+        9,
+        42,
+        42,
+        45,
+        46,
+        27,
+        29,
+        29
+      ],
+      "starting_shanten": 3,
+      "starting_hongzhong": 0,
+      "settle_score": null,
+      "settle_frame": null
+    }
+  ],
+  "frames": [
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r02/frame_01.png",
+      "name": "frame_01.png",
+      "rel": "frame_01.png",
+      "mtime": "2026-10-15 20:09:27 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 2,
+        "round_uid": "302805-2026-10-14-r02",
+        "replay_code": "72321963",
+        "frames": [
+          "2026-10-14/r02/frame_01.png",
+          "2026-10-14/r02/frame_02.png"
+        ],
+        "capture_timestamps": [
+          1792066167.2778182,
+          1792066167.5818183
+        ],
+        "status": "captured",
+        "seats": {
+          "bottom": "晓红",
+          "left": "李哥",
+          "top": "dkl",
+          "right": "啊泽哥"
+        },
+        "user_seat": "bottom (晓红)",
+        "dealer": "晓红",
+        "wild": "红中 (赖子)",
+        "rules": "放炮麻将:点炮胡/庄闲算分/红中赖子/可胡七对/4人",
+        "scores_before_round": {
+          "晓红": 2,
+          "李哥": -2,
+          "dkl": 0,
+          "啊泽哥": 0
+        },
+        "frames_on_windows_only": [
+          "frame_03.png",
+          "frame_04.png"
+        ],
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        900
+      ],
+      "ok": true,
+      "concealed": [],
+      "concealed_names": [],
+      "melds": [],
+      "n_boxes": 0,
+      "n_accepted": 0,
+      "complete": false,
+      "gameplay": false,
+      "is_hand13": false,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 0,
+      "shanten": null,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    },
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r02/frame_02.png",
+      "name": "frame_02.png",
+      "rel": "frame_02.png",
+      "mtime": "2026-10-15 20:09:27 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 2,
+        "round_uid": "302805-2026-10-14-r02",
+        "replay_code": "72321963",
+        "frames": [
+          "2026-10-14/r02/frame_01.png",
+          "2026-10-14/r02/frame_02.png"
+        ],
+        "capture_timestamps": [
+          1792066167.2778182,
+          1792066167.5818183
+        ],
+        "status": "captured",
+        "seats": {
+          "bottom": "晓红",
+          "left": "李哥",
+          "top": "dkl",
+          "right": "啊泽哥"
+        },
+        "user_seat": "bottom (晓红)",
+        "dealer": "晓红",
+        "wild": "红中 (赖子)",
+        "rules": "放炮麻将:点炮胡/庄闲算分/红中赖子/可胡七对/4人",
+        "scores_before_round": {
+          "晓红": 2,
+          "李哥": -2,
+          "dkl": 0,
+          "啊泽哥": 0
+        },
+        "frames_on_windows_only": [
+          "frame_03.png",
+          "frame_04.png"
+        ],
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        900
+      ],
+      "ok": true,
+      "concealed": [
+        1,
+        2,
+        4,
+        6,
+        9,
+        9,
+        42,
+        42,
+        45,
+        46,
+        27,
+        29,
+        29
+      ],
+      "concealed_names": [
+        "1万",
+        "2万",
+        "4万",
+        "6万",
+        "9万",
+        "9万",
+        "2条",
+        "2条",
+        "5条",
+        "6条",
+        "7筒",
+        "9筒",
+        "9筒"
+      ],
+      "melds": [],
+      "n_boxes": 13,
+      "n_accepted": 13,
+      "complete": true,
+      "gameplay": true,
+      "is_hand13": true,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 0,
+      "shanten": 3,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    },
+    {
+      "path": "/workspace/majiang-data/replay_harvest/2026-10-14/r02/detail_row.png",
+      "name": "detail_row.png",
+      "rel": "detail_row.png",
+      "mtime": "2026-10-15 20:15:43 CST",
+      "meta": {
+        "date": "2026-10-14",
+        "room_id": "302805",
+        "session_start": "19:04",
+        "players": [
+          "李哥",
+          "dkl",
+          "啊泽哥",
+          "晓红"
+        ],
+        "round_index": 2,
+        "round_uid": "302805-2026-10-14-r02",
+        "replay_code": "72321963",
+        "frames": [
+          "2026-10-14/r02/frame_01.png",
+          "2026-10-14/r02/frame_02.png"
+        ],
+        "capture_timestamps": [
+          1792066167.2778182,
+          1792066167.5818183
+        ],
+        "status": "captured",
+        "seats": {
+          "bottom": "晓红",
+          "left": "李哥",
+          "top": "dkl",
+          "right": "啊泽哥"
+        },
+        "user_seat": "bottom (晓红)",
+        "dealer": "晓红",
+        "wild": "红中 (赖子)",
+        "rules": "放炮麻将:点炮胡/庄闲算分/红中赖子/可胡七对/4人",
+        "scores_before_round": {
+          "晓红": 2,
+          "李哥": -2,
+          "dkl": 0,
+          "啊泽哥": 0
+        },
+        "frames_on_windows_only": [
+          "frame_03.png",
+          "frame_04.png"
+        ],
+        "user_account": "晓红"
+      },
+      "size": [
+        1600,
+        80
+      ],
+      "ok": true,
+      "concealed": [],
+      "concealed_names": [],
+      "melds": [],
+      "n_boxes": 0,
+      "n_accepted": 0,
+      "complete": false,
+      "gameplay": false,
+      "is_hand13": false,
+      "is_hand14": false,
+      "open_meld_count": 0,
+      "hongzhong": 0,
+      "shanten": null,
+      "advise": null,
+      "settle_score": null,
+      "settle_note": null,
+      "rejected": 0
+    }
+  ]
+}

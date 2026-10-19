@@ -1,0 +1,128 @@
+{
+    "templates":  [
+                      {
+                          "file":  "w1.png",
+                          "label":  "w1"
+                      },
+                      {
+                          "file":  "w2.png",
+                          "label":  "w2"
+                      },
+                      {
+                          "file":  "w3.png",
+                          "label":  "w3"
+                      },
+                      {
+                          "file":  "w4.png",
+                          "label":  "w4"
+                      },
+                      {
+                          "file":  "w5.png",
+                          "label":  "w5"
+                      },
+                      {
+                          "file":  "w6.png",
+                          "label":  "w6"
+                      },
+                      {
+                          "file":  "w7.png",
+                          "label":  "w7"
+                      },
+                      {
+                          "file":  "w8.png",
+                          "label":  "w8"
+                      },
+                      {
+                          "file":  "w9.png",
+                          "label":  "w9"
+                      },
+                      {
+                          "file":  "t1.png",
+                          "label":  "t1"
+                      },
+                      {
+                          "file":  "t2.png",
+                          "label":  "s2"
+                      },
+                      {
+                          "file":  "t3.png",
+                          "label":  "t3"
+                      },
+                      {
+                          "file":  "t4.png",
+                          "label":  "s4"
+                      },
+                      {
+                          "file":  "t5.png",
+                          "label":  "s5"
+                      },
+                      {
+                          "file":  "t6.png",
+                          "label":  "s6"
+                      },
+                      {
+                          "file":  "b1.png",
+                          "label":  "s1"
+                      },
+                      {
+                          "file":  "b2.png",
+                          "label":  "s1"
+                      },
+                      {
+                          "file":  "b3.png",
+                          "label":  "s1"
+                      },
+                      {
+                          "file":  "f_dong.png",
+                          "label":  "dong"
+                      },
+                      {
+                          "file":  "f_xi.png",
+                          "label":  "xi"
+                      },
+                      {
+                          "file":  "f_bei.png",
+                          "label":  "bei"
+                      },
+                      {
+                          "file":  "tea_r08_s3.png",
+                          "label":  "s3",
+                          "source":  "2026-10-16/740195/r08/frame_02.png",
+                          "box":  [560, 768, 648, 892],
+                          "source_sha256":  "83feb4992e6f7eae6b8d6ed7c7d35d1c724c38857ebd58810e826b004d1bd37e",
+                          "template_sha256":  "ed6a1b622ab80fa8025a60d8ff64b4b717f37c31aa112b24d5aa798bde4d0119"
+                      },
+                      {
+                          "file":  "tea_r08_s7.png",
+                          "label":  "s7",
+                          "source":  "2026-10-16/740195/r08/frame_02.png",
+                          "box":  [837, 768, 925, 892],
+                          "source_sha256":  "83feb4992e6f7eae6b8d6ed7c7d35d1c724c38857ebd58810e826b004d1bd37e",
+                          "template_sha256":  "f9be27b9d2ed774331be0359e52764307ad0599d63bc16a46447bf206ff25c5a"
+                      },
+                      {
+                          "file":  "tea_r08_t2.png",
+                          "label":  "t2",
+                          "source":  "2026-10-16/740195/r08/frame_02.png",
+                          "box":  [1113, 768, 1202, 892],
+                          "source_sha256":  "83feb4992e6f7eae6b8d6ed7c7d35d1c724c38857ebd58810e826b004d1bd37e",
+                          "template_sha256":  "52edc66e26f839253f37d4379096c2254079e1bec321469c84729b325f8a4d39"
+                      },
+                      {
+                          "file":  "tea_r08_t8.png",
+                          "label":  "t8",
+                          "source":  "2026-10-16/740195/r08/frame_02.png",
+                          "box":  [1206, 768, 1294, 892],
+                          "source_sha256":  "83feb4992e6f7eae6b8d6ed7c7d35d1c724c38857ebd58810e826b004d1bd37e",
+                          "template_sha256":  "9b8f38f30d9a9870de1ca1cdf3f126faed71c21d356353ffa48eb76853595a3a"
+                      },
+                      {
+                          "file":  "tea_r08_t5.png",
+                          "label":  "t5",
+                          "source":  "2026-10-16/740195/r08/frame_02.png",
+                          "box":  [1491, 768, 1581, 892],
+                          "source_sha256":  "83feb4992e6f7eae6b8d6ed7c7d35d1c724c38857ebd58810e826b004d1bd37e",
+                          "template_sha256":  "869f55aa737f068abd14b1f8f0693dc46cf39081ec105891284a2187ce0de934"
+                      }
+                  ]
+}

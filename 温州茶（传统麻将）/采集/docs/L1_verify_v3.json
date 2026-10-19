@@ -1,0 +1,20 @@
+{
+  "engine": {
+    "soft_zimo": {
+      "deltas": {
+        "0": 6,
+        "1": -2,
+        "2": -2,
+        "3": -2
+      },
+      "kind": "ruan",
+      "mult": 1,
+      "base": 2
+    }
+  },
+  "tile": {},
+  "notes": [
+    "引擎失败: 未知 win_type: dianpao",
+    "TileVision失败: verified template manifest missing: D:\\温州麻将\\温州茶（传统麻将）\\采集\\templates\\tea_tiles\\manifest.json"
+  ]
+}
