@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tkinter as tk
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -46,6 +47,18 @@ def append_feedback(record_path: str | Path, verdict: str, actual_tile: str | No
     return target
 
 
+def tea_round_fingerprint(image_path: str | Path | None) -> str | None:
+    """Identify the visible room/round HUD; unknown screens cannot lock a session."""
+    if not image_path or not Path(image_path).is_file():
+        return None
+    with Image.open(image_path) as image:
+        if image.size != (1600, 900):
+            return None
+        hud = image.convert("L").crop((15, 55, 225, 140))
+        compact = bytes(pixel // 8 for pixel in hud.tobytes())
+    return hashlib.sha256(compact).hexdigest()
+
+
 class TeaAssistWindow:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -57,8 +70,9 @@ class TeaAssistWindow:
         )
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.future: Future | None = None
-        self.future_mode: str | None = None
+        self.future_context: tuple[str, str, str] | None = None
         self.continuous = False
+        self.continuous_round: str | None = None
         self.timer: str | None = None
         self.current: dict | None = None
         self.preview = None
@@ -67,7 +81,7 @@ class TeaAssistWindow:
         self.caishen = tk.StringVar()
         self.confirm_mode = tk.BooleanVar(value=False)
         self.actual_tile = tk.StringVar()
-        self.status = tk.StringVar(value="选择玩法并确认局数，再抓图或导入截图。")
+        self.status = tk.StringVar(value="确认玩法；温州茶还需选择本局财神牌。")
         self.hand = tk.StringVar(value="手牌：—")
         self._build()
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -90,6 +104,7 @@ class TeaAssistWindow:
             state="readonly", width=19,
         )
         self.caishen_choice.grid(row=0, column=5, padx=6)
+        self.caishen_choice.bind("<<ComboboxSelected>>", self._on_caishen_change)
         self.confirm_choice = ttk.Checkbutton(
             controls, text="已确认是 2 人温州茶", variable=self.confirm_mode,
         )
@@ -103,7 +118,7 @@ class TeaAssistWindow:
         ttk.Button(controls, text="修正手牌并重算", command=self.manual_correction).grid(
             row=2, column=3, pady=8, sticky="ew",
         )
-        ttk.Button(controls, text="连续观察（约 3 秒一次）", command=self.start).grid(
+        ttk.Button(controls, text="连续观察本局（约 3 秒一次）", command=self.start).grid(
             row=3, column=0, columnspan=2, pady=8, sticky="ew",
         )
         ttk.Button(controls, text="停止", command=self.stop).grid(
@@ -148,23 +163,65 @@ class TeaAssistWindow:
     def _on_mode_change(self, _event=None) -> None:
         self.stop()
         self.confirm_mode.set(False)
+        self.caishen.set("")
         is_tea = self.mode.get() == "温州茶 · 2人"
         self.caishen_choice.configure(state="readonly" if is_tea else "disabled")
         self.confirm_choice.configure(
             text="已确认是 2 人温州茶" if is_tea else "已确认是 4 人温州熟",
         )
-        self.current = None
+        self._clear_result()
         self.status.set("已切换玩法。请重新确认当前对局。")
+
+    def _on_caishen_change(self, _event=None) -> None:
+        self.stop()
+        self._clear_result()
+        self.status.set("财神牌已变化；请核对当前局，再开始观察。")
+
+    def _clear_result(self) -> None:
+        self.current = None
+        self.hand.set("手牌：—")
+        self.preview = None
+        self.picture.configure(image="")
+
+    def _ready(self) -> bool:
+        if not self.confirm_mode.get():
+            self.status.set("先确认当前对局玩法，再分析。")
+            return False
+        if self.mode.get() == "温州茶 · 2人" and self.caishen.get() not in TILE_CHOICES:
+            self.status.set("先选择并核对本局财神牌，再分析。")
+            return False
+        return True
+
+    def _context(self) -> tuple[str, str, str]:
+        return self.mode.get(), self.caishen.get(), self.serial.get().strip()
+
+    def _accept_continuous_result(self, result: dict) -> bool:
+        if not (self.continuous and self.mode.get() == "温州茶 · 2人"
+                and result.get("status") in {"advise", "hu", "wait"}):
+            return True
+        fingerprint = tea_round_fingerprint(result.get("image"))
+        if fingerprint is None:
+            self.stop()
+            self._clear_result()
+            self.status.set("无法确认房号和局数；已停止连续观察。")
+            return False
+        if self.continuous_round is None:
+            self.continuous_round = fingerprint
+        elif fingerprint != self.continuous_round:
+            self.stop()
+            self._clear_result()
+            self.status.set("房号或局数已变化；请重新核对财神牌后开始观察。")
+            return False
+        return True
 
     def capture(self) -> None:
         if self.future is not None:
             return
-        if not self.confirm_mode.get():
-            self.status.set("先确认当前对局玩法，再抓图。")
+        if not self._ready():
             return
         label = TILE_CHOICES.get(self.caishen.get(), "")
         self.status.set("正在抓图和分析……")
-        self.future_mode = self.mode.get()
+        self.future_context = self._context()
         if self.mode.get() == "温州茶 · 2人":
             self.future = self.executor.submit(
                 capture_and_analyze, serial=self.serial.get().strip(),
@@ -182,13 +239,15 @@ class TeaAssistWindow:
     def import_image(self) -> None:
         if self.future is not None:
             return
+        if not self._ready():
+            return
         selected = filedialog.askopenfilename(
             title="导入游戏截图", filetypes=[("截图", "*.png *.jpg *.jpeg")],
         )
         if not selected:
             return
         self.status.set("正在识别导入截图……")
-        self.future_mode = self.mode.get()
+        self.future_context = self._context()
         if self.mode.get() == "温州茶 · 2人":
             self.future = self.executor.submit(
                 import_and_analyze, selected, session_dir=self.session_dir,
@@ -205,6 +264,8 @@ class TeaAssistWindow:
     def manual_correction(self) -> None:
         if self.future is not None:
             return
+        if not self._ready():
+            return
         labels = " ".join((self.current or {}).get("hand") or [])
         typed = simpledialog.askstring(
             "修正手牌", "按顺序输入牌名，空格分隔，例如 w1 t3 s9 hongzhong",
@@ -214,7 +275,7 @@ class TeaAssistWindow:
             return
         previous = self.current or {}
         self.status.set("正在按修正手牌重算……")
-        self.future_mode = self.mode.get()
+        self.future_context = self._context()
         if self.mode.get() == "温州茶 · 2人":
             self.future = self.executor.submit(
                 analyze_manual_hand, typed,
@@ -242,10 +303,12 @@ class TeaAssistWindow:
         future, self.future = self.future, None
         try:
             result = future.result()
-            if self.future_mode == self.mode.get():
-                self._show(result)
+            if self.future_context == self._context():
+                if self._accept_continuous_result(result):
+                    self._show(result)
             else:
-                self.status.set("旧玩法的结果已保存；请按当前玩法重新分析。")
+                self._clear_result()
+                self.status.set("设置已变化；旧结果已保存，请按当前设置重新分析。")
         except Exception as exc:
             self.status.set(f"采集停止：{exc}")
             self.stop()
@@ -277,12 +340,16 @@ class TeaAssistWindow:
             self.picture.configure(image=self.preview)
 
     def start(self) -> None:
+        if self.continuous or not self._ready():
+            return
+        self.continuous_round = None
         self.continuous = True
         if self.timer is None and self.future is None:
             self.capture()
 
     def stop(self) -> None:
         self.continuous = False
+        self.continuous_round = None
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None

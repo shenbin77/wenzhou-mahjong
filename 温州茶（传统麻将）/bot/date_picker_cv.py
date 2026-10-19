@@ -22,6 +22,8 @@ def read_image(path):
 
 
 def write_image(path, im):
+    if path.exists():
+        raise FileExistsError(path)
     ok, data = cv2.imencode('.png', im)
     if not ok:
         raise RuntimeError('PNG encoding failed')
@@ -208,10 +210,10 @@ def select_date(adb, bank, target, output):
     min_y = min(r['box'][1] for r in lists[-1])
     max_y = max(r['box'][1]+r['box'][3] for r in lists[-1])
     streak = 0
-    for _ in range(12):
+    for probe in range(12):
         time.sleep(.35)
         after = adb.shot()
-        write_image(output/'after.png', after)
+        write_image(output/f'after_{probe+1:02d}.png', after)
         if after.shape != frames[-1].shape:
             raise RuntimeError('Display geometry changed; verification aborted')
         recognized = recognize(after, bank)
@@ -227,7 +229,9 @@ def select_date(adb, bank, target, output):
         streak = streak+1 if valid else 0
         if streak >= 2:
             return {'verified': True, 'selected': target,
-                    'field_score': near[0]['score'], 'tap': [x+w/2, y+h/2]}
+                    'field_score': near[0]['score'],
+                    'field_box': list(near[0]['box']),
+                    'tap': [x+w/2, y+h/2]}
     raise RuntimeError('Tap sent, but selected date NOT verified; inspect after.png. '
                        'No blind retry was sent. A different field font needs its own templates.')
 

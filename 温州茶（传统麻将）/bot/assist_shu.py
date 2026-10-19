@@ -20,6 +20,7 @@ import numpy as np
 
 from assist_tea import _load_image, _write_annotation
 from harvest_tea import DEFAULT_ADB, DEFAULT_SERIAL, EXPECTED_PACKAGE
+from mode_vision import detect_shu_rule_text
 from pc_bot.tile_vision import TILE_IDS, TARGET_IDS, TileVision
 from brain_v0.engine.advisor import Advisor
 from brain_v0.engine.wenzhou_rules import hand_is_win, hand_shanten, ting_tiles
@@ -84,6 +85,18 @@ def analyze_shu_snapshot(
     if output is not None and output.resolve() == source.resolve():
         raise ValueError("标注图不能覆盖原始截图")
     _, image = _load_image(source)
+    if image.shape[1] != 1600 or image.shape[0] not in (900, 948):
+        early_reason = "画面尺寸未验证；目前仅支持 1600×900 或录像的 1600×948"
+    elif not detect_shu_rule_text(image):
+        early_reason = "画面未确认温州熟 4 人红中放炮玩法"
+    else:
+        early_reason = None
+    if early_reason:
+        _write_annotation(image, [], None, output)
+        return {"mode": "shu_4p", "image": str(source),
+                "annotation": str(output) if output else None,
+                "hand": [], "meld_count": 0, "suggested_boxes": [],
+                "dry_run": True, "status": "abstain", "reason": early_reason}
     vision = TileVision()
     vision.recognize_hand(image)
     diagnostics = vision.diagnostics
@@ -97,8 +110,6 @@ def analyze_shu_snapshot(
         _write_annotation(image, diagnostics, None, output)
         return {**result, "status": "abstain", "reason": reason}
 
-    if image.shape[1] != 1600 or image.shape[0] not in (900, 948):
-        return abstain("画面尺寸未验证；目前仅支持 1600×900 或录像的 1600×948")
     if not vision.last_complete:
         return abstain("存在未识别、遮挡或低置信度手牌")
     meld_boxes = vision.last_meld_boxes

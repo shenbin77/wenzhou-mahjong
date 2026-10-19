@@ -219,6 +219,7 @@ def test_detect_hand_requires_sixteen_or_seventeen_concealed_tiles(monkeypatch):
 @pytest.mark.parametrize(("path", "players"), [
     ("2026-10-16/740195/r08/frame_01.png", 2),
     ("2026-10-15/room_p2a/r05/frame_02.png", 2),
+    ("2026-10-19/833667/r01/frame_20s.png", 2),
     ("2026-10-13/323028/r01/frame_01.png", 4),
     ("2026-10-13/207547/r01/frame_01.png", 4),
 ])
@@ -257,3 +258,18 @@ def test_unknown_player_count_abstains(tmp_path):
     assert detect_hand(png.tobytes()) == []
     with pytest.raises(ValueError, match="未确认茶 2 人局"):
         TeaBot(log_dir=str(tmp_path)).see(png.tobytes())
+
+    obscured = BOT_DIR.parent / "采集" / "2026-10-19" / "833667" / "r01" / "frame_15s.png"
+    image = cv2.imdecode(np.fromfile(str(obscured), np.uint8), cv2.IMREAD_COLOR)
+    assert detect_tea_player_count(image) is None
+    assert detect_hand(obscured.read_bytes()) == []
+
+
+def test_new_two_player_replay_round_two_has_complete_bright_hand():
+    from tile_vision import detect_hand
+
+    frame = (BOT_DIR.parent / "采集" / "2026-10-19" / "833667" / "r02"
+             / "frame_04s_complete.png")
+    assert detect_hand(frame.read_bytes()) == [
+        3, 5, 8, 41, 42, 43, 44, 44, 44, 45, 48, 48, 23, 26, 28, 64,
+    ]

@@ -15,7 +15,7 @@ if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
 from assist_tea import analyze_manual_hand, analyze_snapshot, capture_and_analyze, import_and_analyze  # noqa: E402
-from assist_window import append_feedback  # noqa: E402
+from assist_window import TeaAssistWindow, TILE_CHOICES, append_feedback, tea_round_fingerprint  # noqa: E402
 
 
 FRAME = BOT_DIR.parent / "采集" / "2026-10-16" / "740195" / "r08" / "frame_02.png"
@@ -154,3 +154,52 @@ def test_manual_correction_rejects_unconfirmed_or_impossible_hand(tmp_path):
                             caishen_label="s7", confirmed_two_player=True,
                             session_dir=tmp_path)
     assert not list(tmp_path.glob("manual_*.json"))
+
+
+class _Value:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+def test_continuous_tea_stops_before_showing_next_round_with_old_caishen():
+    r01 = BOT_DIR.parent / "采集" / "2026-10-19" / "833667" / "r01"
+    r02 = BOT_DIR.parent / "采集" / "2026-10-19" / "833667" / "r02"
+    assert tea_round_fingerprint(r01 / "frame_15s.png") == tea_round_fingerprint(r01 / "frame_20s.png")
+    assert tea_round_fingerprint(r01 / "frame_20s.png") != tea_round_fingerprint(r02 / "frame_04s_complete.png")
+
+    window = TeaAssistWindow.__new__(TeaAssistWindow)
+    window.mode = _Value("温州茶 · 2人")
+    window.continuous = True
+    window.continuous_round = None
+    window.timer = None
+    window.status = _Value("")
+    window.hand = _Value("旧手牌")
+    window.current = {"status": "advise"}
+    window.preview = object()
+    shown = []
+    window.picture = SimpleNamespace(configure=lambda **kwargs: shown.append(kwargs))
+
+    assert window._accept_continuous_result({"status": "advise", "image": str(r01 / "frame_20s.png")})
+    assert window._accept_continuous_result({"status": "advise", "image": str(r01 / "frame_15s.png")})
+    assert not window._accept_continuous_result({"status": "advise", "image": str(r02 / "frame_04s_complete.png")})
+    assert window.continuous is False and window.current is None
+    assert "重新核对财神牌" in window.status.get()
+    assert window.hand.get() == "手牌：—" and shown[-1] == {"image": ""}
+
+
+def test_tea_preflight_requires_current_caishen_before_capture():
+    window = TeaAssistWindow.__new__(TeaAssistWindow)
+    window.mode = _Value("温州茶 · 2人")
+    window.confirm_mode = _Value(True)
+    window.caishen = _Value("")
+    window.status = _Value("")
+    assert not window._ready()
+    assert "财神牌" in window.status.get()
+    window.caishen.set(next(iter(TILE_CHOICES)))
+    assert window._ready()

@@ -528,6 +528,13 @@ def choose_date_bank(dpcv, opened, date_str, references):
     return matches[0]
 
 
+def selected_date_persists(dpcv, image, bank, target, field_box):
+    """Check the same selected-date field again before reading result rows."""
+    nearby = [row for row in dpcv.recognize(image, bank)
+              if dpcv.overlap(row["box"], field_box) >= .7]
+    return len(nearby) == 1 and nearby[0]["date"] == target
+
+
 def select_date(date_str):
     """
     选择日期。date_str 格式 "2026-10-16"。
@@ -592,40 +599,28 @@ def select_date(date_str):
     try:
         opened = adb.shot()
         bank = choose_date_bank(dpcv, opened, date_str, references)
-        debug_dir = Path(os.path.dirname(os.path.abspath(__file__))) / "date_debug"
-        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_dir = (Path(os.path.dirname(os.path.abspath(__file__))) / "date_debug"
+                     / (datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                        + "_" + uuid.uuid4().hex[:6]))
+        debug_dir.mkdir(parents=True, exist_ok=False)
         result = dpcv.select_date(adb, bank, date_str, debug_dir)
-        log("日期选择成功: %s (score=%.3f)" % (result.get("selected"), result.get("field_score", 0)))
     except Exception as e:
         log("日期选择失败: %s" % e)
         return False
 
-    # 点刷新
+    # The picker already loads the chosen day's results. In this game the
+    # Refresh button resets the filter to today; do not press it here.
     time.sleep(1)
-    gray = grab_gray()
-    if gray is not None:
-        handle_popup(gray)
-        gray = grab_gray()
-    if gray is None:
+    current = adb.shot()
+    gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+    if (current.shape != opened.shape
+            or not match_template(gray, "btn_date_dropdown")[0]
+            or not selected_date_persists(dpcv, current, bank, date_str,
+                                          result["field_box"])):
+        log("日期选择后顶部日期未保持为 %s，停止采集" % date_str)
         return False
-    found, conf, cx, cy = match_template(gray, "btn_refresh")
-    if not found:
-        log("TEMPLATE_MISS: 刷新按钮；停止")
-        return False
-    confirmed = confirm_match("btn_refresh", gray, cx, cy)
-    if confirmed is None:
-        log("刷新按钮未通过双帧确认")
-        return False
-    log("点刷新 conf=%.3f" % conf)
-    x, y, fresh = confirmed
-    tap(x, y, fresh.shape)
-    time.sleep(2.5)
-    # The refresh control can remain visible on the same page. A fresh frame is
-    # still required here; whether the record list loaded needs manual review.
-    refreshed = grab_gray()
-    if refreshed is None or refreshed.shape != fresh.shape:
-        log("刷新后截图失败或显示尺寸变化，停止采集")
-        return False
+    log("日期选择成功且保持: %s (score=%.3f)" %
+        (result.get("selected"), result.get("field_score", 0)))
     return True
 
 def checked_click(name, prior_gray, cx, cy, verify_name, multiple=False,

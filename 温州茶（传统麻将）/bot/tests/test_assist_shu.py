@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
 BOT_DIR = Path(__file__).resolve().parents[1]
@@ -13,8 +15,23 @@ if str(BOT_DIR) not in sys.path:
 
 from assist_shu import (analyze_shu_manual_hand, analyze_shu_snapshot,
                         import_shu_and_analyze)  # noqa: E402
+from mode_vision import detect_shu_rule_text  # noqa: E402
 
 FRAMES = BOT_DIR.parents[1] / "阿法算牌分析" / "熟识牌对照_20261018"
+
+
+def test_shu_rule_text_accepts_red_zhong_replay_and_rejects_tea(tmp_path):
+    for name in ("frame_233s_14.png", "frame_261s_14.png"):
+        image = cv2.imdecode(np.fromfile(str(FRAMES / name), np.uint8), cv2.IMREAD_COLOR)
+        assert detect_shu_rule_text(image)
+
+    tea = BOT_DIR.parent / "采集" / "2026-10-13" / "323028" / "r01" / "frame_01.png"
+    image = cv2.imdecode(np.fromfile(str(tea), np.uint8), cv2.IMREAD_COLOR)
+    assert not detect_shu_rule_text(image)
+    marked = tmp_path / "wrong_mode.png"
+    result = analyze_shu_snapshot(tea, confirmed_four_player=True, output_path=marked)
+    assert result["status"] == "abstain" and "未确认温州熟" in result["reason"]
+    assert result["hand"] == [] and marked.is_file()
 
 
 @pytest.mark.parametrize(

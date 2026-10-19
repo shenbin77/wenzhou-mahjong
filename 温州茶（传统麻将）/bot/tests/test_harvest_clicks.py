@@ -33,6 +33,21 @@ def test_date_bank_matches_observed_list_only():
         harvest.choose_date_bank(date_picker, opened, "2026-10-19", (references[1], references[1]))
 
 
+def test_selected_date_must_still_match_after_loading_results():
+    """The game's Refresh control resets the selected day to today."""
+    dates = [f"2026-10-{day:02d}" for day in range(15, 20)]
+    bank = date_picker.make_bank(
+        date_picker.read_image(SAMPLES / "2026-10-19" / "date_15_19" / "reference.png"), dates)
+    evidence = SAMPLES / "2026-10-19" / "date_refresh_reset"
+    selected = date_picker.read_image(evidence / "selected_16_before_refresh.png")
+    reset = date_picker.read_image(evidence / "reset_19_after_refresh.png")
+    boxes = [r["box"] for r in date_picker.recognize(selected, bank)
+             if r["date"] == "2026-10-16" and r["box"][1] < 180]
+    assert len(boxes) == 1
+    assert harvest.selected_date_persists(date_picker, selected, bank, "2026-10-16", boxes[0])
+    assert not harvest.selected_date_persists(date_picker, reset, bank, "2026-10-16", boxes[0])
+
+
 def test_tap_rejects_coordinates_outside_the_native_frame(monkeypatch):
     calls = []
     monkeypatch.setattr(harvest, "DRY_RUN", False)
