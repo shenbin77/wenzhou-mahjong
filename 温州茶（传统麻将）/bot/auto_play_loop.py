@@ -205,8 +205,11 @@ class AutoPlayLoop:
         # ``CLAIM_TAP_CHANNEL_READY``（TapExecutor 白名单只放行手牌 ROI y≥720，
         # 行动圆盘在 y≈600，通道尚未接线）。
         self.claim_auto_click = bool(claim_auto_click)
+        # Advisory claim ledger may run L2 without button glyphs; auto-click
+        # still forces require_template_match inside decide_action (P0-2).
         self._claim_policy = claim_policy or ActionPolicyConfig(
-            auto_click_enabled=self.claim_auto_click)
+            auto_click_enabled=self.claim_auto_click,
+            require_template_match=bool(self.claim_auto_click))
         # 上一帧的识牌结果：行动行出现时用它构造 L2 的局面快照。
         self._last_result: dict | None = None
         # 牌河/来牌读取：行动决策（碰/吃/杠/胡）要拿"别家刚打出的那张"。
@@ -402,7 +405,17 @@ class AutoPlayLoop:
                 "guard_boxes": [list(box) for box in action_guard.boxes],
                 "reason": action_guard.reason,
             }
-            guard_event.update(self._claim_policy_event(image, frame_path))
+            # P0-5: refresh hand from THIS frame before claim decide.
+            try:
+                claim_analysis = self._analyze(raw, frame_path)
+                if isinstance(claim_analysis, dict):
+                    self._last_result = claim_analysis
+                else:
+                    claim_analysis = None
+            except Exception:  # noqa: BLE001 - claim path fail-closed
+                claim_analysis = None
+            guard_event.update(self._claim_policy_event(
+                image, frame_path, analysis=claim_analysis))
             if action_guard.state == "uncertain":
                 return self._anomaly(
                     "action_guard_uncertain", action_guard.reason, started,
@@ -559,7 +572,8 @@ class AutoPlayLoop:
     # ------------------------------------------------------------------
     # 行动（吃/碰/杠/胡/过）决策闸门
     # ------------------------------------------------------------------
-    def _claim_policy_event(self, image: np.ndarray, frame_path: Path) -> dict:
+    def _claim_policy_event(self, image: np.ndarray, frame_path: Path,
+                             analysis: dict | None = None) -> dict:
         """行动行可见时跑一次 ``action_policy.decide_action``，只落证据。
 
         默认**不点击**：``claim_auto_click=False`` 时每个动作都还要人工确认；
@@ -581,7 +595,8 @@ class AutoPlayLoop:
                               "frame": str(frame_path)}}
         # 来牌从本帧的牌河读数里取（discard_vision 给的是 DiscardState）。
         # 换局没确认过的帧：本帧"来牌"可能是跨局差分出来的，不许进 L2。
-        payload = dict(self._last_result or {})
+        # P0-5: never reuse a prior frame's analysis for claim decisions.
+        payload: dict = dict(analysis) if isinstance(analysis, dict) else {}
         if self._discard_state is not None and self._discard_trusted:
             payload["discards"] = self._discard_state
         hand = HandState.from_analysis(payload)

@@ -269,7 +269,8 @@ def test_action_ui_blocks_before_analysis_and_tap(tmp_path):
 
     assert event["event"] == "idle"
     assert event["guard"] == "action_visible"
-    assert analyzer.calls == 0
+    # P0-5: claim path refreshes hand from THIS frame before decide_action.
+    assert analyzer.calls == 1
     assert tap.execute_calls == []
     assert loop.stopped is False
 
@@ -284,7 +285,8 @@ def test_uncertain_action_guard_fails_closed(tmp_path):
 
     assert event["event"] == "error"
     assert event["error"] == "action_guard_uncertain"
-    assert analyzer.calls == 0
+    # Uncertain guard still fail-closes; may analyze for claim ledger, never tap.
+    assert analyzer.calls <= 1
     assert tap.execute_calls == []
 
 
@@ -1062,8 +1064,7 @@ def test_claim_row_without_incoming_tile_stays_blocked(tmp_path):
     """来牌链路未接线 → 金盘在也只能拦下，绝不点。"""
     loop, _shot, _analyzer, tap, _ = make_loop(
         tmp_path, enabled=True, frames=[action_row_frame()],
-        action_guard=CLAIM_GUARD)
-    loop._last_result = dict(CLAIM_HAND_ANALYSIS)
+        action_guard=CLAIM_GUARD, analyses=[CLAIM_HAND_ANALYSIS])
 
     event = loop.tick()
 
@@ -1095,8 +1096,8 @@ def test_claim_row_uses_discard_vision_incoming_tile(tmp_path):
         tmp_path, enabled=True, frames=[action_row_frame()],
         action_guard=CLAIM_GUARD,
         discard_fn=lambda _img: DiscardState(incoming_tile=1,
-                                             incoming_source="opponent"))
-    loop._last_result = dict(CLAIM_HAND_ANALYSIS)
+                                             incoming_source="opponent"),
+        analyses=[CLAIM_HAND_ANALYSIS])
 
     event = loop.tick()
 
@@ -1212,8 +1213,7 @@ def test_round_change_frame_never_feeds_discards_to_l2(tmp_path):
         tmp_path, frames=[action_row_frame()], action_guard=CLAIM_GUARD,
         discard_fn=lambda _img: DiscardState(incoming_tile=1,
                                              incoming_source="opponent"),
-        hud=[(HUD_B, None)])
-    loop._last_result = dict(CLAIM_HAND_ANALYSIS)
+        hud=[(HUD_B, None)], analyses=[CLAIM_HAND_ANALYSIS])
     loop.round.hud_key = HUD_A          # 本帧 HUD 变成本帧之外的另一局
 
     event = loop.tick()
