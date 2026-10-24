@@ -1198,3 +1198,27 @@ def test_discard_read_failure_forgets_baseline_too(tmp_path):
     assert "forget" in order, "异常帧的基线也要作废"
     assert loop.stopped is False, "读牌河失败不许停机"
     assert event["claim"]["status"] == "blocked"
+
+
+def test_round_change_frame_never_feeds_discards_to_l2(tmp_path):
+    """换局未确认的帧：本帧来牌不许喂给 L2（哪怕它读出了牌）。
+
+    早判只看画面读到的 HUD/财神，正式判定还会看 analyze 的财神；这一帧两者
+    之间有缝，所以宁可不给来牌——L2 因此走"来牌未知"弃权。
+    """
+    from discard_vision import DiscardState
+
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, frames=[action_row_frame()], action_guard=CLAIM_GUARD,
+        discard_fn=lambda _img: DiscardState(incoming_tile=1,
+                                             incoming_source="opponent"),
+        hud=[(HUD_B, None)])
+    loop._last_result = dict(CLAIM_HAND_ANALYSIS)
+    loop.round.hud_key = HUD_A          # 本帧 HUD 变成本帧之外的另一局
+
+    event = loop.tick()
+
+    assert event["claim"]["status"] == "blocked", event["claim"]
+    assert "来牌未知" in json.dumps(event["claim"], ensure_ascii=False)
+    assert event["claim"]["tap_point"] is None
+    assert tap.execute_calls == []

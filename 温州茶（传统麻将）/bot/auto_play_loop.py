@@ -216,6 +216,9 @@ class AutoPlayLoop:
         self.discard_key = str(discard_key or f"auto_play:{self.serial}")
         self._discard = discard_fn or self._read_discards_sequential
         self._discard_state: Any = None
+        # 本帧的牌河读数能不能信：换局没确认过的帧，它的"来牌"是拿上一局
+        # 的牌河做差分算出来的，绝不能喂给 L2。
+        self._discard_trusted: bool = True
 
         self.round = RoundState()
         self.consecutive_errors = 0
@@ -377,7 +380,10 @@ class AutoPlayLoop:
         # 就会用到 _discard_state，所以这里先判一次。本帧结果存下来复用，
         # 后面不再重复调 _round_key。
         hud_key, key_caishen = self._probe_round_key(frame_path)
-        if not self.round.same_round(hud_key, key_caishen):
+        # 换局没确认过的帧，本帧读出的"来牌"是跨局差分的结果，标记不可信：
+        # 基线照样作废，且本帧的读数不许进 L2（见 _claim_policy_event）。
+        self._discard_trusted = self.round.same_round(hud_key, key_caishen)
+        if not self._discard_trusted:
             self._forget_discards()
         # 每帧喂一次牌河：来牌要前后两帧才认得出，缺了它行动决策只能出"过"。
         self._read_discards(image)
@@ -574,8 +580,9 @@ class AutoPlayLoop:
             return {"claim": {"status": "read_failed", "reason": f"{exc}",
                               "frame": str(frame_path)}}
         # 来牌从本帧的牌河读数里取（discard_vision 给的是 DiscardState）。
+        # 换局没确认过的帧：本帧"来牌"可能是跨局差分出来的，不许进 L2。
         payload = dict(self._last_result or {})
-        if self._discard_state is not None:
+        if self._discard_state is not None and self._discard_trusted:
             payload["discards"] = self._discard_state
         hand = HandState.from_analysis(payload)
         decision = decide_action(claim_state, hand, self._claim_policy, image=image)
