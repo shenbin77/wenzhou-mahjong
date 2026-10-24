@@ -9,6 +9,8 @@ Usage::
     python bot/review_caishen_pending.py --list     # 只列出待复核条目
     python bot/review_caishen_pending.py --confirm <name.json>
     python bot/review_caishen_pending.py --confirm <name.json> --label t6
+    python bot/review_caishen_pending.py --confirm <name.json> --label t6 --witness other.png
+    python bot/review_caishen_pending.py --confirm <name.json> --label t6 --witness other.png --require-heldout
     python bot/review_caishen_pending.py --reject <name.json>
 
 ``--confirm`` appends the entry to ``templates/caishen/manifest.json`` with
@@ -84,7 +86,19 @@ def _known_labels() -> set[str]:
                 | {"dong", "nan", "xi", "bei", "bai", "hongzhong", "fa"})
 
 
-def confirm(name: str, label_override: str | None = None) -> int:
+def confirm(name: str, label_override: str | None = None, *,
+             witness_path: str | Path | None = None,
+             require_heldout: bool = False) -> int:
+    """Promote a pending candidate into the production manifest.
+
+    Provenance fields are always written. ``heldout_passed`` stays False unless
+    an independent witness frame clears :func:`caishen_validation.check_witness`.
+    Source-frame self-match never sets ``heldout_passed``. With
+    ``require_heldout=True``, missing/failing witness refuses the promotion
+    (fail-closed) instead of writing a provisional entry.
+    """
+    import caishen_validation
+
     sidecar = PENDING_DIR / name
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     label = label_override or record["label"]
@@ -105,12 +119,25 @@ def confirm(name: str, label_override: str | None = None) -> int:
     if target.exists() or record["file"] in taken:
         print(f"!! manifest 已有同名模板: {record['file']}")
         return 2
+
+    tile = cv2.imdecode(np.fromfile(str(png), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if tile is None:
+        print(f"!! 候选图片无法解码: {png}")
+        return 2
+    source_hash = record.get("source_sha256")
+    heldout = caishen_validation.evaluate_promotion_heldout(
+        tile, source_hash, witness_path)
+    if require_heldout and not heldout["passed"]:
+        print(f"!! heldout fail-closed: {heldout['reason']}")
+        return 2
+
     source_kind = record.get("source_kind") or (
         "auto_nomination" if str(record.get("visual_check", "")).startswith("pending: auto_")
         else "manual_pick")
     record["visual_check"] = (
         f"confirmed: {source_kind} reviewed {time.strftime('%Y-%m-%d %H:%M:%S')}; "
-        "operator read the sprite by eye — never by cluster majority vote")
+        "operator read the sprite by eye — never by cluster majority vote; "
+        f"heldout={'passed' if heldout['passed'] else 'unconfirmed'}")
     shutil.move(str(png), str(target))
     manifest["templates"].append({
         "label": label,
@@ -124,7 +151,10 @@ def confirm(name: str, label_override: str | None = None) -> int:
         "review_method": "human_eye",
         "reviewer": "operator",
         "source_frame_hash": record.get("source_sha256"),
-        "heldout_passed": False,
+        "heldout_passed": bool(heldout["passed"]),
+        "heldout_score": heldout.get("score"),
+        "heldout_witness_hash": heldout.get("witness_frame_hash"),
+        "heldout_reason": heldout.get("reason"),
         "suggested_label": record.get("suggested_label"),
     })
     manifest["note"] = (
@@ -133,13 +163,15 @@ def confirm(name: str, label_override: str | None = None) -> int:
         "_MIN_SCORE without relaxing it. A label may own several templates; detection "
         "keeps the best score per label. Every label was verified by eye on an 8x crop "
         "(live entries by the operator on the table, then re-checked here) — never by "
-        "cluster majority vote.")
+        "cluster majority vote. heldout_passed=True only after an independent witness "
+        "frame clears caishen_validation.check_witness; source self-match is never heldout.")
     _save_manifest(manifest)
     sidecar.unlink()
     zoom = PENDING_DIR / f"zoom_{Path(record['file']).stem}.png"
     if zoom.exists():
         zoom.unlink()
-    print(f"OK 已入库: {label} <- {record['file']}")
+    flag = "heldout=PASS" if heldout["passed"] else "heldout=UNCONFIRMED"
+    print(f"OK 已入库: {label} <- {record['file']} ({flag})")
     return 0
 
 

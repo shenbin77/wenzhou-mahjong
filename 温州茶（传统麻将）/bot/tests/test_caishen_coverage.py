@@ -208,6 +208,10 @@ def test_review_promotes_unnamed_candidate_when_labelled(review_sandbox, monkeyp
     entries = json.loads(manifest.read_text(encoding="utf-8"))["templates"]
     assert len(entries) == 1
     assert entries[0]["label"] == "t6"
+    assert entries[0]["source_kind"] == "auto_nomination"
+    assert entries[0]["review_method"] == "human_eye"
+    assert entries[0]["reviewer"] == "operator"
+    assert entries[0]["heldout_passed"] is False
     assert (templates_dir_of(manifest) / entries[0]["file"]).is_file()
     assert not (pending / sidecar).exists()
 
