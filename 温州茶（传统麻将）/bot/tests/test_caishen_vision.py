@@ -34,8 +34,10 @@ def _read(relative: str) -> np.ndarray:
     ("2026-10-19/833667/r10/room833667_round10_67ea9201_2.png", "w2"),
     ("2026-10-19/984226/r01/room984226_round1_3d58eb17_2.png", "t3"),
     ("2026-10-16/740195/r08/frame_02.png", "s9"),
-    ("2026-10-15/291755/r05/frame_01.png", "t7"),
-    ("2026-10-13/207547/r03/frame_01.png", "t6"),
+    # 2026-10-25 纠错：两帧同帧手牌的"财"角标牌分别是 6筒 / 7筒（手牌模板独立读出），
+    # 小牌也分别是"上二绿横排"/"上三绿斜排"。旧断言把 6/7 对调了。
+    ("2026-10-15/291755/r05/frame_01.png", "t6"),
+    ("2026-10-13/207547/r03/frame_01.png", "t7"),
 ])
 def test_marker_from_other_room_or_date(relative, expected):
     observed = detect_caishen(_read(relative))
@@ -103,7 +105,9 @@ LIVE_SESSION_1024 = CAPTURES / "assist_sessions" / "20261024_035412" / "live" / 
 @pytest.mark.parametrize(("frame", "expected"), [
     ("20261024_110911_867393_f1fe70.png", "t9"),
     ("20261024_104839_549465_396b27.png", "s7"),
-    ("20261024_104001_144544_5526f7.png", "s3"),
+    # 2026-10-25 纠错：该帧财字小牌为 3x3 竖条、中列红 = 9条；旧断言 s3 只是因为
+    # s3_live2 模板被误标（其实也是 9条）才"通过"的。
+    ("20261024_104001_144544_5526f7.png", "s9"),
 ])
 def test_20261024_live_variant_frames_clear_strict_thresholds(frame, expected):
     if not (LIVE_SESSION_1024 / frame).exists():

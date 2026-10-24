@@ -36,6 +36,31 @@ def _caishen_fail_reason(observed) -> str:
         detail = f"候选{cand} {detail}"
     return f"未识别本局财神：{base}（{detail}）；仅显示识牌证据，不给建议"
 
+# 手牌里带"财"角标的牌，其字形是与桌面财字小牌**独立**的第二份财神证据。
+# 两者都高置信却不一致，说明财神模板库可能标错（2026-10-25 审计实测：
+# s3_live2/t2_live3/t2_live4/t4_live5 与 t6/t7 共 6 个模板标签错误），此时必须弃权。
+# 只在字形本身达到普通识牌门槛（0.82/0.055）时才裁决；万字牌被角标盖住数字、
+# 字形分数通常 <0.82，不会触发。只会多弃权，不会多给建议。
+_BADGE_GLYPH_MIN_SCORE = 0.82
+_BADGE_GLYPH_MIN_MARGIN = 0.055
+
+
+def _badge_glyph_conflict(vision, caishen_label: str) -> str | None:
+    """Return a reason when a 财-marked hand tile confidently reads as another tile."""
+    for item in list(getattr(vision, "diagnostics", None) or []) + \
+            list(getattr(vision, "meld_diagnostics", None) or []):
+        if item.get("reason") != "caishen_marked":
+            continue
+        glyph = item.get("glyph_label")
+        if not glyph or glyph == caishen_label:
+            continue
+        if (float(item.get("glyph_score", 0.0) or 0.0) >= _BADGE_GLYPH_MIN_SCORE
+                and float(item.get("margin", 0.0) or 0.0) >= _BADGE_GLYPH_MIN_MARGIN):
+            return (f"财神证据矛盾：桌面财字小牌读作{caishen_label}，"
+                    f"手中财角标牌字形读作{glyph}（{float(item['glyph_score']):.3f}），停止建议")
+    return None
+
+
 def _load_image(path: Path) -> tuple[bytes, np.ndarray]:
     data = path.read_bytes()
     image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -325,6 +350,9 @@ def analyze_snapshot(
             finally:
                 if on_recognized is not None:
                     on_recognized()
+            conflict = _badge_glyph_conflict(bot._vision, caishen_label)
+            if conflict:
+                raise ValueError(conflict)
             thought = bot.think(hand)
         except (ValueError, RuntimeError) as exc:
             vision = bot._vision
