@@ -203,6 +203,20 @@ def _as_int(value) -> int | None:
         return None
 
 
+def logical_meld_slots(result: dict) -> int:
+    """Exposed-meld **logical** tile slots for tea rules (each group = 3).
+
+    A kong still occupies one meld slot of 3 for hand-count accounting
+    (P0-1 / P0-2), even when four physical faces are visible.
+    """
+    melds = result.get("melds")
+    if isinstance(melds, (list, tuple)) and melds:
+        groups = [g for g in melds if isinstance(g, (list, tuple)) and g]
+        return MELD_TILE_COUNT * len(groups)
+    count = _as_int(result.get("meld_count")) or 0
+    return MELD_TILE_COUNT * max(0, count)
+
+
 def meld_total(result: dict) -> int:
     """各副露的**实际张数**之和（吃/碰 3、杠 4）。
 
@@ -380,10 +394,11 @@ def action_ui_evidence(image) -> dict:
     * **按钮区**（``claim_vision.read_claims``，每次对本帧重算）：有没有检出行动
       圆盘、几个、在什么位置、按既有的保守规则该读出什么决策。这里**不改变**任
       何门禁结论，只记录。
-    * **玩法门禁**（``mode_vision.MODE_LATCH`` 的当前状态）：锁存了没有、锁的是
-      几人、上次确认的分值/次名差、锁了多久/多少帧、被重置过几次。``mode_source``
-      为 ``"latched"`` 表示这一帧是**吃粘滞**过关的，而不是逐帧重新判定出来的
-      ——按钮圆盘压住规则文字时正是这种情况。
+    * **玩法门禁**（``mode_vision.RULE_GATES`` 的当前状态，两把锁都记）：玩法人数
+      锁没锁、锁的是几人、上次确认的分值/次名差；牌集（无中发）锁没锁、上次确认
+      的分值；以及各自锁了多久/多少帧、被重置过几次。``mode_source`` /
+      ``deck_source`` 为 ``"latched"`` 表示这一帧是**吃粘滞**过关的，而不是逐帧
+      重新判定出来的 —— 按钮圆盘压住规则文字时正是这种情况。
 
     只读：不截图、不点击、不改任何锁状态（``MODE_LATCH.snapshot()`` 是纯读）。
     """
@@ -393,6 +408,8 @@ def action_ui_evidence(image) -> dict:
         "action_discs": [],
         "claim_decision": None,
         "claim_reason": "",
+        "countdown_status": "unknown",
+        "countdown_seconds": None,
         "action_gold_pixel_ratio": None,
         "mode_latched": False,
         "mode_players": None,
@@ -403,6 +420,12 @@ def action_ui_evidence(image) -> dict:
         "mode_latch_age_s": None,
         "mode_latch_resets": None,
         "mode_latch_available": False,
+        "deck_latched": False,
+        "deck_value": None,
+        "deck_score": None,
+        "deck_source": "unavailable",
+        "deck_score_min": None,
+        "deck_latch_available": False,
     }
     if image is not None and isinstance(image, np.ndarray) and image.ndim == 3:
         try:
@@ -427,11 +450,13 @@ def action_ui_evidence(image) -> dict:
                 ratios = (state.evidence or {}).get("pixel_ratio") or {}
                 record["action_gold_pixel_ratio"] = _as_float(ratios.get("gold"))
     try:
-        from mode_vision import MODE_LATCH
+        from mode_vision import DECK_LATCH, DECK_SCORE_MIN, MODE_LATCH
     except Exception:  # noqa: BLE001 - 门禁不可用时如实标注
         return record
+    deck_score_min = DECK_SCORE_MIN
     try:
         snapshot = MODE_LATCH.snapshot()
+        deck = DECK_LATCH.snapshot()
     except Exception as exc:  # noqa: BLE001 - 可观测性失败不影响门禁结论
         record["claim_reason"] = f"{record['claim_reason']}；玩法门禁状态不可读：{exc}"
         return record
@@ -444,6 +469,11 @@ def action_ui_evidence(image) -> dict:
         "mode_latch_age_s": _as_float(snapshot.get("age_s"), 3),
         "mode_latch_resets": snapshot.get("resets"),
         "mode_latch_available": True,
+        "deck_latched": bool(deck.get("latched")),
+        "deck_value": deck.get("value"),
+        "deck_score": _as_float(deck.get("score")),
+        "deck_score_min": deck_score_min,
+        "deck_latch_available": True,
     })
     # ``source`` 只在门禁这一帧真的被问过时才可信；锁存"过期"时标注 expired。
     if snapshot.get("latched"):
@@ -454,6 +484,14 @@ def action_ui_evidence(image) -> dict:
         record["mode_source"] = "not_confirmed"
     else:
         record["mode_source"] = "unavailable"
+    if deck.get("latched"):
+        record["deck_source"] = "latched"
+    elif deck.get("expired"):
+        record["deck_source"] = "latch_expired"
+    elif deck.get("value") is None:
+        record["deck_source"] = "not_confirmed"
+    else:
+        record["deck_source"] = "unavailable"
     return record
 
 
@@ -518,8 +556,10 @@ def evaluate_turn(result: dict, image, history: Sequence[HandObservation] | None
     meld_sizes = ([len(group) for group in melds if isinstance(group, (list, tuple))]
                   if isinstance(melds, (list, tuple)) else [])
     melds_used = meld_total(result)
+    logical_slots = logical_meld_slots(result)
     meld_count = len(meld_sizes) if meld_sizes else (_as_int(result.get("meld_count")) or 0)
-    expected = TILES_PER_HAND - melds_used
+    # Tea rules: expected concealed uses logical slots (kong=3), not physical 4.
+    expected = TILES_PER_HAND - logical_slots
     boxes = concealed_boxes(result)
     # 张数守恒用「物理牌框数」而不是「已接受张数」：识别不全（accepted < physical）
     # 是"没读全"，只该 wait，绝不能硬停机。两者分开记进台账便于复核。
@@ -537,6 +577,7 @@ def evaluate_turn(result: dict, image, history: Sequence[HandObservation] | None
         "caishen_id": known_caishen_id(result),
         "meld_count": meld_count,
         "meld_total": melds_used,
+        "logical_meld_slots": logical_slots,
         "meld_group_sizes": meld_sizes,
         "expected_concealed": expected,
         "physical_boxes": physical,
@@ -611,6 +652,14 @@ def evaluate_turn(result: dict, image, history: Sequence[HandObservation] | None
         return verdict(STATE_WAIT,
                        f"画面尚未稳定（连续一致 {streak} 帧 < {STABLE_FRAMES} 帧，"
                        "可能在摸牌/发牌动画中）")
+    # P0-3: claim row visible => do not discard; countdown detector still unknown.
+    if action_ui.get("action_discs_seen"):
+        return verdict(
+            STATE_WAIT,
+            "行动圆盘可见：本帧先处理吃碰杠胡/过，不出牌"
+            + ("（倒计时未接线，不假设还有时间）"
+               if action_ui.get("countdown_status") == "unknown" else ""),
+            code="gate_claim_ui")
     return verdict(STATE_DISCARD_READY,
                    f"轮到我方出牌：暗手 {physical} 张 + 副露 {melds_used} 张 = 17，"
                    f"面亮度 {brightness:.2f}，连续 {streak} 帧一致")

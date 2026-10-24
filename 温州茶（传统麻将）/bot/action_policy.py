@@ -984,7 +984,10 @@ class ActionPolicyConfig:
         auto_click_enabled: 自动点击总闸，默认 ``False``。
         confirmed_actions: 已看过回放确认过的动作集合，默认空。
         require_template_match: ``True`` 时 L1 必须有模板且过闸，否则弃权；
-            默认 ``False``——因为模板样本尚未采集，此时由 L2 引擎消歧。
+            **默认 ``True``**（P0-2）。无按钮模板的 L2 单测须显式传 ``False``。
+            ``auto_click_enabled=True`` 时无论调用方设置一律强制 ``True``。
+        max_claim_age_s: 声称行快照最大年龄（秒）。``None`` 不校验；
+            有 ``ClaimState.captured_at`` 且超龄时 L1 弃权。
         template_provider: 模板来源（返回 ``{名字: 灰度图}``）；``None`` 用
             :data:`CLAIM_TEMPLATE_DIR`。
         forbidden_boxes: 黑名单 ROI（xyxy），命中即永不点击。
@@ -1001,7 +1004,8 @@ class ActionPolicyConfig:
 
     auto_click_enabled: bool = False
     confirmed_actions: frozenset[str] = frozenset()
-    require_template_match: bool = False
+    require_template_match: bool = True
+    max_claim_age_s: float | None = None
     template_provider: Callable[[], Mapping[str, Any]] | None = None
     forbidden_boxes: tuple[tuple[int, int, int, int], ...] = DEFAULT_FORBIDDEN_BOXES
     forbidden_labels: frozenset[str] = BLACKLISTED_LABELS
@@ -1447,6 +1451,9 @@ def decide_action(
           通道；是否真的能点还要看 ``needs_human_confirm`` 与点击通道本身。
     """
     cfg = config or ActionPolicyConfig()
+    # P0-2: auto-click never runs without a real button glyph match.
+    if cfg.auto_click_enabled and not cfg.require_template_match:
+        cfg = replace(cfg, require_template_match=True)
     hand = hand_state if isinstance(hand_state, HandState) else HandState()
     if not isinstance(claim_state, ClaimState):
         return None
@@ -1482,6 +1489,17 @@ def decide_action(
         return _blocked(claim_state, image, cfg,
                         f"L1 模板未过闸（status={evidence['template_status']}，"
                         f"要求 top1≥{TEMPLATE_TOP1_MIN} 且次名差≥{TEMPLATE_MARGIN_MIN}）")
+    # P0-2: stale claim-row snapshot must not drive a tap.
+    age_limit = cfg.max_claim_age_s
+    captured_at = getattr(claim_state, "captured_at", None)
+    if age_limit is not None and captured_at is not None:
+        import time as _time
+        age_s = _time.time() - float(captured_at)
+        evidence["claim_age_s"] = round(age_s, 3)
+        evidence["max_claim_age_s"] = float(age_limit)
+        if age_s > float(age_limit):
+            return _blocked(claim_state, image, cfg,
+                            f"L1 声称行快照过期（age={age_s:.3f}s > {age_limit}s）")
 
     # 归属未确认时用闪光标仲裁（"哪边后打"）；仲裁结果写进证据。
     hand, incoming_evidence = resolve_incoming(image, hand, cfg)
