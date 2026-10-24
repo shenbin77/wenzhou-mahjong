@@ -22,6 +22,7 @@ if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
 from tile_vision import TileVision  # noqa: E402
+from assist_tea import analyze_snapshot  # noqa: E402
 
 TEA_ROOT = BOT_DIR.parent
 TEMPLATES = TEA_ROOT / "采集" / "templates" / "tea_tiles"
@@ -69,3 +70,15 @@ def test_dimmed_unmarked_missing_tile_never_completes_the_hand():
     unaccepted = [d for d in vision.diagnostics if not d["accepted"]]
     assert len(unaccepted) == 1
     assert unaccepted[0]["reason"] != "caishen_marked"
+
+
+def test_dimmed_hand_still_publishes_complete_visible_melds():
+    """暗手读不全也不能丢掉已完整识别的副露，否则单亮态张数会算错。"""
+    result = analyze_snapshot(
+        DIMMED_PONG_FRAME, caishen_label="t3", confirmed_two_player=True,
+        log_dir=None)
+
+    assert result["status"] == "abstain"
+    assert result["meld_count"] == 1
+    assert len(result["melds"]) == 1
+    assert len(result["melds"][0]) in (3, 4)

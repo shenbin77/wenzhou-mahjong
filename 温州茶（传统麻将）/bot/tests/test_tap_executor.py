@@ -50,6 +50,17 @@ def erase_tile(png_bytes: bytes, box) -> bytes:
     return encoded.tobytes()
 
 
+def hint_panel_after_select(png_bytes: bytes, box) -> bytes:
+    """模拟实机：已选牌抬出常规 ROI，中央同时出现胡提示面板。"""
+    image = cv2.imdecode(
+        np.frombuffer(erase_tile(png_bytes, box), dtype=np.uint8),
+        cv2.IMREAD_COLOR).copy()
+    image[470:680, 300:1300] = (200, 230, 240)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
 RAISE_LIFT_PX = 25
 
 
@@ -295,6 +306,27 @@ def test_first_click_that_already_discards_forbids_second_tap(
     assert len([c for c in fake.commands if "screencap" in c]) == 2
 
 
+def test_hint_panel_false_minus_one_still_sends_confirming_second_tap(
+        analysis, monkeypatch):
+    """实机回归：胡提示面板把抬起牌漏出 ROI，不能误判成已出牌。"""
+    png = frame_png()
+    box = [int(v) for v in analysis["suggested_boxes"][0]]
+    selected = hint_panel_after_select(png, box)
+    after = confirmed_frame(erase_tile(png, box), box)
+    fake = FakeAdb([png, selected, after])
+    monkeypatch.setattr(subprocess, "run", fake)
+    executor = TapExecutor(enabled=True, adb_path="fake-adb",
+                           serial="emulator-test", select_delay=0,
+                           verify_delay=0, fresh_retry_attempts=1)
+
+    outcome = executor.execute(analysis)
+
+    assert outcome["executed"] is True
+    assert outcome["stage"] == "verified"
+    assert len(fake.tap_commands()) == 2
+    assert fake.tap_commands()[0][-2:] == fake.tap_commands()[1][-2:]
+
+
 def test_second_click_forbidden_when_target_not_raised(analysis, monkeypatch):
     """审计 B：第一击后张数守恒但牌没抬起（只有无关动画）→ 禁止第二击。"""
     png = frame_png()
@@ -449,6 +481,7 @@ def test_dry_run_never_creates_a_probe_directory(analysis, monkeypatch, tmp_path
 CLAIM_BG = (20, 60, 30)
 GOLD_CENTER = (1431, 610)   # 实测金盘连通域框 [1372,550,1491,671]
 PASS_CENTER = (1033, 604)   # 实测过盘连通域框 [979,549,1088,660]
+CANCEL_PANEL_CENTER = (1300, 380)
 GOLD_BOX = (1372, 550, 1491, 671)
 
 
@@ -466,7 +499,7 @@ def _png(image: np.ndarray) -> bytes:
 
 
 def claim_frame(*, gold: bool = True, blue: bool = False,
-                second_gold_at=None) -> bytes:
+                second_gold_at=None, blue_center=PASS_CENTER) -> bytes:
     """合成一帧带行动圆盘的画面（颜色/几何照 claim_vision 实测口径）。"""
     image = _blank_frame()
     if gold:
@@ -474,7 +507,7 @@ def claim_frame(*, gold: bool = True, blue: bool = False,
     if second_gold_at is not None:
         cv2.circle(image, second_gold_at, 60, (0, 200, 255), -1)
     if blue:
-        cv2.circle(image, PASS_CENTER, 55, (255, 170, 0), -1)
+        cv2.circle(image, blue_center, 55, (255, 170, 0), -1)
     return _png(image)
 
 
@@ -617,6 +650,30 @@ def test_claim_tap_rejects_cancel_disc_and_unreadable_frame(
         executor_two.execute_claim(GOLD_CENTER, action="peng")
     assert fake.tap_commands() == []
     assert empty.tap_commands() == []
+
+
+def test_explicit_selection_cancel_clicks_unique_panel_disc_and_keeps_evidence(
+        monkeypatch, tmp_path):
+    """用户授权：候选面板唯一“取消”可点；点击前后证据照常落盘。"""
+    before = claim_frame(gold=False, blue=True,
+                         blue_center=CANCEL_PANEL_CENTER)
+    fake = FakeAdb([before, _png(_blank_frame())])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    outcome = executor.execute_claim(
+        CANCEL_PANEL_CENTER, action="cancel_selection", kind="cancel")
+
+    assert outcome["executed"] is True
+    assert outcome["kind"] == "cancel"
+    assert outcome["ui_responded"] is True
+    assert fake.tap_commands() == [[
+        "fake-adb", "-s", "emulator-test", "shell", "input", "tap",
+        "1300", "380",
+    ]]
+    probe = _latest_probe(tmp_path)
+    assert (probe / "before.png").is_file()
+    assert (probe / "after.png").is_file()
+    assert _read_evidence(tmp_path)["claim"]["action"] == "cancel_selection"
 
 
 def test_claim_tap_rejects_kind_mismatch_and_ambiguous_candidates(

@@ -720,18 +720,46 @@ def test_wall_cards_above_16_does_not_trip_wall_stop(tmp_path):
 
 
 def test_unknown_caishen_stops_when_enabled(tmp_path):
-    """P0-5: enabled + 本帧财神未知 → gate_unknown_caishen。"""
+    """P0-5: 单帧坏读先重拍；连续三帧未知才 gate_unknown_caishen。"""
     loop, _shot, _analyzer, tap, _ = make_loop(
         tmp_path, enabled=True,
         analyses=[advise(caishen=None)],
         hud=[(b"hud-ok", None)],
     )
+    first = loop.tick()
+    second = loop.tick()
     event = loop.tick()
+
+    assert first["event"] == "idle"
+    assert first["status"] == "abstain"
+    assert first["unknown_caishen_ticks"] == 1
+    assert second["event"] == "idle"
+    assert second["unknown_caishen_ticks"] == 2
     assert event["event"] == "stop"
     assert event["gate"] == "gate_unknown_caishen"
+    assert event["unknown_caishen_ticks"] == 3
     assert tap.execute_calls == []
     assert "table_state" in event
     assert event["table_state"]["caishen_known"] is False
+
+
+def test_unknown_caishen_budget_recovers_when_next_frame_is_known(tmp_path):
+    """两帧漏读后恢复：清空预算，仍需正常回合门禁，不能补点。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True,
+        analyses=[advise(caishen=None), advise(caishen=None),
+                  advise(caishen="w1")],
+        hud=[(b"hud-ok", None)],
+    )
+
+    assert loop.tick()["unknown_caishen_ticks"] == 1
+    assert loop.tick()["unknown_caishen_ticks"] == 2
+    recovered = loop.tick()
+
+    assert recovered.get("gate") != "gate_unknown_caishen"
+    assert loop._unknown_caishen_ticks == 0
+    assert loop.stopped is False
+    assert tap.execute_calls == []
 
 
 def test_card_unknown_does_not_block_and_never_clicks_recharge(tmp_path):
@@ -1108,6 +1136,17 @@ def action_row_frame() -> bytes:
     return encoded.tobytes()
 
 
+def selection_cancel_frame() -> bytes:
+    """1600x900 候选面板：只有一个高位蓝色圆形“取消”。"""
+    frame = np.zeros((900, 1600, 3), np.uint8)
+    frame[:, :] = (30, 120, 40)
+    blue = cv2.cvtColor(np.uint8([[[95, 200, 160]]]), cv2.COLOR_HSV2BGR)[0][0]
+    cv2.circle(frame, (1300, 380), 50, tuple(int(c) for c in blue), thickness=-1)
+    ok, encoded = cv2.imencode(".png", frame)
+    assert ok
+    return encoded.tobytes()
+
+
 CLAIM_GUARD = lambda _image: ActionGuardResult(  # noqa: E731
     "action_visible", ((1383, 552, 1483, 652),), "检测到行动界面")
 
@@ -1190,6 +1229,25 @@ def test_claim_auto_click_executes_and_l3_verifies_pass(tmp_path, monkeypatch):
     assert len(tap.execute_claim_calls) == 1
     assert tap.execute_claim_calls[0]["action"] == ACTION_PASS
     assert loop.actions_done == 1
+
+
+def test_unique_selection_cancel_is_auto_clicked_without_hand_decision(tmp_path):
+    """候选面板只剩取消时直接关闭，不要求来牌/手牌分析，也不算一次出牌。"""
+    tap = FakeTap()
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[selection_cancel_frame()],
+        action_guard=CLAIM_GUARD, claim_auto_click=True, tap=tap,
+        analyses=[ValueError("候选面板遮住手牌")])
+
+    event = loop.tick()
+
+    assert event["event"] == "idle"
+    assert event["claim"]["action"] == "cancel_selection"
+    assert event["claim"]["auto_click"]["executed"] is True
+    assert event["claim"]["auto_click"]["semantic_verified"] is True
+    assert tap.execute_claim_calls[0]["action"] == "cancel_selection"
+    assert tap.execute_claim_calls[0]["kind"] == "cancel"
+    assert loop.actions_done == 0
 
 
 def test_claim_row_uses_discard_vision_incoming_tile(tmp_path):

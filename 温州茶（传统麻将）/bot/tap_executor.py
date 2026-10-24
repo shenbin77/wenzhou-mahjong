@@ -27,7 +27,8 @@
 4. 两段确认 + 点击后验证
    浙江游戏大厅需要先点牌使其抬起，再点同一位置确认出牌。第一次点击后
    必须看到目标列画面变化；**两次点击之间还要复核手牌状态（审计 B）**：
-   手牌已少一张 → 判定牌已离手、**禁止第二击**；否则必须张数守恒、
+   手牌已少一张 → 通常判定牌已离手、**禁止第二击**；但若同时严格命中
+   “胡提示面板”单信号，则说明抬起牌被识牌 ROI 漏掉，仍须第二击确认；否则必须张数守恒、
    目标牌仍在原列且几何抬起（``y1`` 低于同帧中位数 ≥
    ``RAISED_BOX_LIFT_PX``），才允许第二击。第二次点击后，目标列还必须
    再次变化，且手牌数量恰好减一。任何一步不满足都 ``TapUnverified``，
@@ -63,7 +64,8 @@
 * 点击坐标必须落在 ``claim_vision.read_claims`` **实测**返回的圆盘连通域框内，
   槽位推断值（``SLOT_CENTER_X``）一律不接受；
 * 黑名单（:data:`CLAIM_ACTION_BLACKLIST`，含房卡价的 ``洗牌``/``切牌``）
-  按动作名永不放行；``取消`` 盘（:data:`CLAIM_KIND_BLACKLIST`）永不点；
+  按动作名永不放行；``取消`` 只有显式 ``cancel_selection``、本帧唯一蓝盘
+  且落在候选面板白名单时放行，普通行动决策仍不能借它冒充“过”；
 * fail-closed：读不出圆盘、坐标不在实测框内、任何一项校验不过 → 拒绝点击。
 
 识别链路（tile_vision / tea_bot / assist_tea / claim_vision）只 import，不修改。
@@ -97,6 +99,7 @@ from claim_vision import (
 from harvest_tea import DEFAULT_ADB, DEFAULT_SERIAL, EXPECTED_PACKAGE
 from tea_bot import _TEMPLATE_DIR  # noqa: F401  # 仅复用已验证的茶模板路径，不改动
 from tile_vision import TILE_IDS, TileVision
+from turn_gate import detect_settled_screen
 
 # 1600x900 已验证 ADB 原生截图的手牌横排上沿（count_tiles 默认 roi 0.8*h）。
 HAND_ROI_MIN_Y = 720
@@ -146,6 +149,11 @@ CLAIM_ROI_Y_MIN: int = 560
 CLAIM_ROI_Y_MAX: int = 660
 CLAIM_ROI_X_MIN: int = 740
 CLAIM_ROI_X_MAX: int = 1520
+# 吃牌候选面板的蓝色圆盘可能高于行动行；只给显式取消动作使用。
+SELECTION_CANCEL_ROI_Y_MIN: int = 300
+SELECTION_CANCEL_ROI_Y_MAX: int = 720
+SELECTION_CANCEL_ROI_X_MIN: int = 740
+SELECTION_CANCEL_ROI_X_MAX: int = 1580
 # 落点必须离实测圆盘框边缘至少 2px：压边的点不是"稳稳落在圆盘上"。
 CLAIM_BOX_EDGE_MARGIN: int = 2
 
@@ -172,7 +180,12 @@ CLAIM_ACTION_KINDS: Mapping[str, str] = {
     "kong": KIND_GOLD, "杠": KIND_GOLD,
     "chi": KIND_GOLD, "吃": KIND_GOLD,
     "pass": KIND_PASS, "过": KIND_PASS,
+    "cancel_selection": KIND_CANCEL, "取消候选": KIND_CANCEL,
 }
+
+SELECTION_CANCEL_ACTIONS: frozenset[str] = frozenset({
+    "cancel_selection", "取消候选",
+})
 
 
 class TapAborted(RuntimeError):
@@ -603,7 +616,10 @@ class TapExecutor:
         if label in CLAIM_ACTION_BLACKLIST:
             raise TapRejected(f"动作 {label!r} 在永不点击黑名单里，拒绝点击")
         expected_kind = kind if kind is not None else CLAIM_ACTION_KINDS.get(label)
-        if expected_kind is not None and expected_kind in CLAIM_KIND_BLACKLIST:
+        allow_selection_cancel = (label in SELECTION_CANCEL_ACTIONS
+                                  and expected_kind == KIND_CANCEL)
+        if (expected_kind is not None and expected_kind in CLAIM_KIND_BLACKLIST
+                and not allow_selection_cancel):
             raise TapRejected(
                 f"动作 {label!r} 期望的圆盘种类 {expected_kind!r} 在黑名单里，拒绝点击")
         # 第二道闸：落盘目录必须是调用方显式给的（见方法 docstring）。
@@ -611,9 +627,14 @@ class TapExecutor:
         # 第三道闸：坐标几何白名单。给了坐标就先验，零 adb 调用即可拒绝
         # 充值(800,120) / 游戏中心(1480,60) / 开始游戏(800,430) 这类点。
         if point is not None:
-            self.validate_claim_point(point)
+            if allow_selection_cancel:
+                self.validate_selection_cancel_point(point)
+            else:
+                self.validate_claim_point(point)
         if not self._enabled:
-            return self._plan_claim(image, point, label, expected_kind)
+            return self._plan_claim(
+                image, point, label, expected_kind,
+                allow_selection_cancel=allow_selection_cancel)
 
         evidence = _TapEvidence(dump_dir, tile_label=label)
         try:
@@ -623,11 +644,16 @@ class TapExecutor:
             # 第四道闸：圆盘必须是从**本帧**像素里实测出来的连通域，
             # 不是槽位推断；读不出来就没有任何可点的东西。
             state = read_claims(before)
-            button = self._resolve_claim_button(state, point, expected_kind)
+            button = self._resolve_claim_button(
+                state, point, expected_kind,
+                allow_selection_cancel=allow_selection_cancel)
             box = tuple(int(value) for value in button.box[:4])
             if point is None:
                 x, y = int(button.center[0]), int(button.center[1])
-                self.validate_claim_point((x, y))
+                if allow_selection_cancel:
+                    self.validate_selection_cancel_point((x, y))
+                else:
+                    self.validate_claim_point((x, y))
             else:
                 x, y = int(point[0]), int(point[1])
             claim_record = self._claim_record(
@@ -730,6 +756,19 @@ class TapExecutor:
                     f"行动行点击坐标 ({x},{y}) 落在实测禁区 {list(box)} 内，拒绝点击")
         return x, y
 
+    def validate_selection_cancel_point(
+        self, point: tuple[int, int]
+    ) -> tuple[int, int]:
+        """候选面板取消专用白名单；仍须命中 read_claims 的唯一取消圆盘。"""
+        x, y = int(point[0]), int(point[1])
+        if not (SELECTION_CANCEL_ROI_X_MIN <= x <= SELECTION_CANCEL_ROI_X_MAX
+                and SELECTION_CANCEL_ROI_Y_MIN <= y <= SELECTION_CANCEL_ROI_Y_MAX):
+            raise TapRejected(
+                f"候选面板取消坐标 ({x},{y}) 不在专用 ROI "
+                f"x∈[{SELECTION_CANCEL_ROI_X_MIN},{SELECTION_CANCEL_ROI_X_MAX}]、"
+                f"y∈[{SELECTION_CANCEL_ROI_Y_MIN},{SELECTION_CANCEL_ROI_Y_MAX}] 内，拒绝点击")
+        return x, y
+
     @staticmethod
     def _claim_point_in_box(point: tuple[int, int], box) -> bool:
         """坐标是否稳稳落在实测圆盘连通域框内（离边至少 2px）。"""
@@ -744,6 +783,8 @@ class TapExecutor:
         state: ClaimState,
         point: tuple[int, int] | None,
         expected_kind: str | None,
+        *,
+        allow_selection_cancel: bool = False,
     ) -> ClaimButton:
         """从 ``read_claims`` 的实测结果里挑出要点的那一个圆盘。
 
@@ -764,8 +805,15 @@ class TapExecutor:
         if not buttons:
             raise TapRejected(
                 f"本帧 read_claims 没有实测到任何行动圆盘（{state.reason}），拒绝点击")
-        eligible = [button for button in buttons
-                    if button.kind not in CLAIM_KIND_BLACKLIST]
+        if allow_selection_cancel:
+            if len(buttons) != 1 or buttons[0].kind != KIND_CANCEL:
+                raise TapRejected(
+                    "候选面板取消只允许本帧唯一一个取消盘；"
+                    f"实测到 {[button.kind for button in buttons]}，拒绝点击")
+            eligible = list(buttons)
+        else:
+            eligible = [button for button in buttons
+                        if button.kind not in CLAIM_KIND_BLACKLIST]
         if not eligible:
             raise TapRejected(
                 "本帧只实测到取消盘（点它会不可逆地中断进行中的选择），拒绝点击")
@@ -847,16 +895,23 @@ class TapExecutor:
         point: tuple[int, int] | None,
         label: str,
         expected_kind: str | None,
+        *,
+        allow_selection_cancel: bool = False,
     ) -> dict:
         """``dry_run`` 分支：用调用方给的一帧复核圆盘几何，零 adb、零落盘。"""
         if image is None:
             raise TapAborted(
                 "dry_run 的 execute_claim 必须显式传 image（不截图也能复核圆盘几何）")
         state = read_claims(image)
-        button = self._resolve_claim_button(state, point, expected_kind)
+        button = self._resolve_claim_button(
+            state, point, expected_kind,
+            allow_selection_cancel=allow_selection_cancel)
         if point is None:
             x, y = int(button.center[0]), int(button.center[1])
-            self.validate_claim_point((x, y))
+            if allow_selection_cancel:
+                self.validate_selection_cancel_point((x, y))
+            else:
+                self.validate_claim_point((x, y))
         else:
             x, y = int(point[0]), int(point[1])
         return {
@@ -1129,8 +1184,10 @@ class TapExecutor:
 
         判据（顺序即语义，fail-closed）：
 
-        1. **已少一张** → 牌已经离手，``discarded=True``：禁止第二击——
-           再点同一位置可能点到空出来的牌位或别的控件；
+        1. **已少一张** → 通常牌已经离手，``discarded=True``：禁止第二击。
+           唯一例外是本帧严格只有 ``central_panel``（胡提示面板）单信号：
+           实机上被抬起的已选牌会移出常规手牌 ROI，导致计数假少一张；此时
+           ``ready=True``，第二击仍点第一次已经过白名单验证的同一坐标；
         2. **张数既不少一也不守恒** → 状态异常，禁止第二击；
         3. 张数守恒 → 目标牌列上必须还有牌（最近框与建议牌框的 x 重叠
            ≥ 牌宽一半），且它的 ``y1`` 比同帧其它暗手框的中位数低
@@ -1138,12 +1195,13 @@ class TapExecutor:
 
         Returns:
             ``{"discarded", "ready", "reason", "count", "boxes",
-            "target_box", "median_y1", "lifted"}``；任何一步拿不到数都
+            "target_box", "median_y1", "lifted", "hint_panel_selection"}``；任何一步拿不到数都
             ``ready=False`` 并写明原因。
         """
         result: dict = {"discarded": False, "ready": False, "reason": "",
                         "count": None, "boxes": [], "target_box": None,
-                        "median_y1": None, "lifted": False}
+                        "median_y1": None, "lifted": False,
+                        "hint_panel_selection": False}
         try:
             vision = self._make_vision()
             count, boxes = vision.count_tiles(image)
@@ -1154,6 +1212,20 @@ class TapExecutor:
         result["boxes"] = [[int(value) for value in box[:4]]
                            for box in boxes or []]
         if count == before_count - 1:
+            try:
+                settled, panel_evidence = detect_settled_screen(image)
+                signals = panel_evidence.get("settled_signals") or []
+            except Exception:  # noqa: BLE001 - 检测失败就走原来的禁止第二击
+                settled, signals = False, []
+            if not settled and signals == ["central_panel"]:
+                result["ready"] = True
+                result["hint_panel_selection"] = True
+                result["reason"] = (
+                    "第一次点击后手牌计数少一张，但严格命中胡提示面板"
+                    " central_panel 单信号：已选抬起牌移出常规手牌 ROI，"
+                    "允许在原白名单坐标发送第二击确认"
+                )
+                return result
             result["discarded"] = True
             result["reason"] = ("第一次点击后手牌已少一张"
                                 f"（{before_count} → {count}），判定牌已离手；"

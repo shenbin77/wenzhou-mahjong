@@ -105,6 +105,63 @@ def test_odd_group_sizes_still_leave_the_hand():
     assert groups == [1, 4]
 
 
+def test_illegal_trailing_platform_group_returns_to_concealed_hand():
+    """实机 5558：真八条碰后，抬高的四万/五万/白板仍是暗手。"""
+    vision = make_vision()
+    true_meld = flat_row(6, 875, 3)
+    false_meld = flat_row(278, 875, 3)
+    hand = hand_row(560, 10)
+    vision.last_meld_boxes = true_meld + false_meld
+    vision.detection_diagnostics = {
+        "meld_groups": [3, 3],
+        "meld_boxes": [list(box) for box in vision.last_meld_boxes],
+        "concealed_count": 10,
+    }
+    vision.meld_diagnostics = [
+        *[{"accepted": True, "tile_id": 48, "box": list(box),
+           "region": "exposed"} for box in true_meld],
+        *[{"accepted": True, "tile_id": tile_id, "box": list(box),
+           "region": "exposed"}
+          for tile_id, box in zip((4, 5, 67), false_meld)],
+    ]
+    vision.diagnostics = [
+        {"accepted": True, "tile_id": 21, "box": list(box),
+         "region": "concealed"} for box in hand]
+
+    corrected = vision._return_invalid_trailing_platform_groups(hand)
+
+    assert corrected[:3] == false_meld
+    assert vision.last_meld_boxes == true_meld
+    assert vision.detection_diagnostics["meld_groups"] == [3]
+    assert vision.detection_diagnostics["concealed_count"] == 13
+    assert [d["region"] for d in vision.diagnostics[:3]] == ["concealed"] * 3
+    assert vision.detection_diagnostics["platform_reclassified_groups"][0][
+        "tile_ids"] == [4, 5, 67]
+
+
+def test_narrow_blank_tile_retries_with_median_width(monkeypatch):
+    """仅白板窄框允许扩到本帧中位宽，其他低分牌不走该恢复路径。"""
+    vision = make_vision()
+    image = np.zeros((900, 1600, 3), np.uint8)
+
+    def fake_classify(crop, caishen_label=None):
+        width = crop.shape[1]
+        return {"accepted": width >= 80, "tile_id": 67 if width >= 80 else None,
+                "label": "bai", "score": .94 if width >= 80 else .56,
+                "margin": .60 if width >= 80 else .08,
+                "reason": "accepted" if width >= 80 else "low_score"}
+
+    monkeypatch.setattr(vision, "classify_crop", fake_classify)
+    result, fixed = vision._classify_detected_box(
+        image, (452, 761, 513, 875), None,
+        typical_width=88, next_left=560)
+
+    assert fixed == (452, 761, 540, 875)
+    assert result["accepted"] is True
+    assert result["reason"] == "accepted_narrow_bai_retry"
+    assert result["original_box"] == [452, 761, 513, 875]
+
+
 # ---------------------------------------------------------------------------
 # Real-frame regressions (frames shipped with the repo)
 # ---------------------------------------------------------------------------

@@ -134,6 +134,37 @@ def _visible_stacked_kongs(vision) -> list[dict]:
     return found
 
 
+def _complete_visible_meld_groups(vision) -> list[list[int]]:
+    """Publish fully-read legal melds even when the concealed hand is dimmed.
+
+    ``TeaBot.see`` historically stopped at ``vision.last_complete`` before it
+    copied meld groups. In the single-bright discard state that loses otherwise
+    complete exposed evidence and makes downstream accounting expect 17 hidden
+    tiles. This helper only publishes groups whose geometry, every face and
+    legal Mahjong shape all pass; any doubt returns an empty list.
+    """
+    if vision is None:
+        return []
+    sizes = list((getattr(vision, "detection_diagnostics", {}) or {})
+                 .get("meld_groups") or [])
+    boxes = [tuple(int(v) for v in box)
+             for box in (getattr(vision, "last_meld_boxes", []) or [])]
+    faces = list(getattr(vision, "meld_diagnostics", []) or [])
+    if (not sizes or sum(sizes) != len(boxes) or len(faces) != len(boxes)
+            or not all(face.get("accepted") and face.get("tile_id") is not None
+                       for face in faces)):
+        return []
+    ids = [int(face["tile_id"]) for face in faces]
+    concealed = list(getattr(vision, "diagnostics", []) or [])
+    hand_left = min((int(item["box"][0]) for item in concealed
+                     if item.get("box")), default=None)
+    try:
+        return TeaBot._meld_groups_by_geometry(
+            ids, boxes, sizes, hand_left=hand_left)
+    except (TypeError, ValueError):
+        return []
+
+
 def _caishen_fields(caishen_label: str, observed: CaishenRead) -> dict:
     """构造财神回传字段，供成功分支与各弃权分支共用同一口径。
 
@@ -357,6 +388,8 @@ def analyze_snapshot(
         except (ValueError, RuntimeError) as exc:
             vision = bot._vision
             diagnostics, hand_ids = _recording_vision(vision)
+            visible_melds = (list(bot.meld_groups)
+                             or _complete_visible_meld_groups(vision))
             _write_annotation(image, diagnostics, None, output)
             return {
                 "status": "abstain",
@@ -367,8 +400,8 @@ def analyze_snapshot(
                 "recognized": [d["label"] for d in diagnostics if d["accepted"]],
                 "vision_diagnostics": diagnostics,
                 "hand_ids": hand_ids,
-                "meld_count": bot.meld_count,
-                "melds": bot.meld_groups,
+                "meld_count": len(visible_melds),
+                "melds": visible_melds,
                 "stacked_kongs": _visible_stacked_kongs(vision),
                 **_caishen_fields(caishen_label, observed),
                 **discard_fields,

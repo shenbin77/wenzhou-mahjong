@@ -185,8 +185,8 @@ def test_engine_says_cannot_peng_then_abstain() -> None:
     assert "引擎" in decision.blocked_reason or "L2" in decision.blocked_reason
 
 
-def test_engine_says_cannot_peng_does_not_fall_back_to_pass() -> None:
-    """引擎与画面矛盾时不能"顺手点过"——那是拿不可信状态做决定。"""
+def test_engine_says_cannot_peng_does_not_fall_back_without_live_auto_gate() -> None:
+    """未开实时自动总闸时仍只记证据，不自动改按过。"""
     decision = decide_action(state(gold_button(), pass_button()), NO_CLAIM_HAND,
                              ActionPolicyConfig(auto_click_enabled=True,
                                                 confirmed_actions=frozenset({"pass"})))
@@ -195,8 +195,8 @@ def test_engine_says_cannot_peng_does_not_fall_back_to_pass() -> None:
     assert not decision.executable
 
 
-def test_unknown_incoming_tile_blocks_claims() -> None:
-    """来牌未知 → 碰/吃/杠/胡全不可验证，金盘在也只能弃权。"""
+def test_unknown_incoming_tile_blocks_claims_without_live_auto_gate() -> None:
+    """未开实时自动总闸时，来牌未知仍只落证据。"""
     hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=None,
                      player_count=2)
     decision = decide_action(state(gold_button(), pass_button()), hand, ADVISORY)

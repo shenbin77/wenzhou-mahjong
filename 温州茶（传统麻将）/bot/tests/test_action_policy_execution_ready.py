@@ -302,3 +302,27 @@ def test_verified_claim_templates_match_native_action_frames() -> None:
         for button in read_claims(image_b).buttons
     }
     assert "chi" in matches_b
+
+
+def test_live_auto_unknown_claim_uses_verified_pass_instead_of_stalling() -> None:
+    """第一版连续代打：来牌未知不猜吃，原生“过”模板过闸后自动过。"""
+    frame = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261023_201640"
+             / "live" / "tea_2p" / "20261023_205442_192224_8bef75.png")
+    if not frame.is_file():
+        pytest.skip("原生吃/过行动帧缺失")
+    image = cv2.imdecode(np.fromfile(str(frame), np.uint8), cv2.IMREAD_COLOR)
+    hand = HandState(
+        concealed=(1, 1, 2, 4, 5, 6, 7, 8, 9,
+                   21, 22, 23, 24, 41, 42, 43),
+        incoming_tile=None, incoming_source=None, player_count=2,
+    )
+
+    decision = ap.decide_action(
+        read_claims(image), hand,
+        ap.recommended_runner_config(auto_click_enabled=True), image=image)
+
+    assert decision is not None
+    assert decision.action == ACTION_PASS
+    assert decision.executable
+    assert decision.needs_human_confirm is False
+    assert "来牌未知" in decision.l2_reason

@@ -382,6 +382,89 @@ class TileVision:
         return any(all(lo <= t <= hi for t in ids) and max(ids) - min(ids) == 2
                    for lo, hi in ((1, 9), (21, 29), (41, 49)))
 
+    @classmethod
+    def _meld_face_group_ok(cls, faces):
+        """Return whether one fully-read geometric group can be a real meld."""
+        if len(faces) not in (3, 4) or not all(d.get('accepted') for d in faces):
+            return False
+        ids = [d.get('tile_id') for d in faces]
+        if any(tile_id is None for tile_id in ids):
+            return False
+        if len(set(ids)) == 1:
+            return True
+        return len(ids) == 3 and cls._same_suit_run(ids)
+
+    def _classify_detected_box(self, img, box, caishen_label, *,
+                               typical_width, next_left=None):
+        """Classify one detected box, repairing only a clipped blank tile.
+
+        白板中间几乎没有墨迹，竖边检测偶尔会在右侧过早结束。只有原裁框明显
+        偏窄、top-1 已是白板、并且右侧确有足够空位时，才把同一物理框扩到本帧
+        中位牌宽重拍一次；其他牌、其他失败原因一律保持原判。
+        """
+        x0, y0, x1, y1 = box
+        result = self.classify_crop(img[y0:y1, x0:x1],
+                                    caishen_label=caishen_label)
+        width = x1 - x0
+        if (result.get('accepted') or result.get('label') != 'bai'
+                or typical_width <= 0 or width >= typical_width * .80):
+            return result, tuple(box)
+        gap_floor = max(12, round(typical_width * .14))
+        right_limit = img.shape[1] if next_left is None else next_left - gap_floor
+        expanded_right = min(round(x0 + typical_width), right_limit)
+        if expanded_right < x1 + max(6, round(typical_width * .08)):
+            return result, tuple(box)
+        retry = self.classify_crop(img[y0:y1, x0:expanded_right],
+                                   caishen_label=caishen_label)
+        if not (retry.get('accepted') and retry.get('label') == 'bai'):
+            return result, tuple(box)
+        retry['reason'] = 'accepted_narrow_bai_retry'
+        retry['original_box'] = list(box)
+        retry['original_score'] = result.get('score')
+        return retry, (x0, y0, expanded_right, y1)
+
+    def _return_invalid_trailing_platform_groups(self, concealed_boxes):
+        """Move a confidently illegal trailing platform group back to the hand.
+
+        Some live frames raise the first three concealed tiles to the same baseline
+        as a real meld. Geometry then reports ``[3, 3]`` although the second triple
+        is, for example, 四万/五万/白板. A real exposed group cannot have that
+        shape. When at least one preceding group remains and the trailing group is
+        fully read but illegal, the only conservative interpretation is that the
+        trailing boxes are concealed. The correction is published in diagnostics.
+        """
+        sizes = list(self.detection_diagnostics.get('meld_groups') or [])
+        if len(sizes) < 2 or sum(sizes) != len(self.meld_diagnostics):
+            return list(concealed_boxes)
+        moved = []
+        concealed_boxes = list(concealed_boxes)
+        while len(sizes) > 1:
+            size = sizes[-1]
+            faces = self.meld_diagnostics[-size:]
+            if not all(d.get('accepted') for d in faces) \
+                    or self._meld_face_group_ok(faces):
+                break
+            boxes = self.last_meld_boxes[-size:]
+            ids = [int(d['tile_id']) for d in faces]
+            del self.meld_diagnostics[-size:]
+            del self.last_meld_boxes[-size:]
+            sizes.pop()
+            for item in faces:
+                item['region'] = 'concealed'
+                item['region_reclassified_reason'] = 'illegal_trailing_meld_shape'
+            self.diagnostics = list(faces) + self.diagnostics
+            concealed_boxes = list(boxes) + concealed_boxes
+            moved.append({'size': size, 'tile_ids': ids,
+                          'boxes': [list(box) for box in boxes],
+                          'reason': 'illegal_trailing_meld_shape'})
+        if moved:
+            self.detection_diagnostics['meld_groups'] = sizes
+            self.detection_diagnostics['meld_boxes'] = [
+                list(box) for box in self.last_meld_boxes]
+            self.detection_diagnostics['concealed_count'] = len(concealed_boxes)
+            self.detection_diagnostics['platform_reclassified_groups'] = moved
+        return concealed_boxes
+
     @staticmethod
     def _split_exposed_prefix(boxes, scale):
         """Cut the leading exposed-meld groups off the concealed hand.
@@ -550,17 +633,31 @@ class TileVision:
         count, boxes = self.count_tiles(img, roi)
         result, self.diagnostics = [], []
         self.last_melds,self.meld_diagnostics=[],[]
+        detected = sorted(list(boxes) + list(self.last_meld_boxes), key=lambda b: b[0])
+        typical_width = float(np.median([b[2] - b[0] for b in detected])) \
+            if detected else 0.0
+        next_left = {tuple(box): (detected[index + 1][0]
+                                  if index + 1 < len(detected) else None)
+                     for index, box in enumerate(detected)}
+        classified_boxes = []
         for box in boxes:
-            x0,y0,x1,y1 = box
-            d = self.classify_crop(img[y0:y1,x0:x1], caishen_label=label)
-            d['box'] = list(box)
+            d, fixed_box = self._classify_detected_box(
+                img, box, label, typical_width=typical_width,
+                next_left=next_left.get(tuple(box)))
+            d['box'] = list(fixed_box)
             d['region'] = 'concealed'
             self.diagnostics.append(d)
+            classified_boxes.append(fixed_box)
+        boxes = classified_boxes
+        classified_meld_boxes = []
         for box in self.last_meld_boxes:
-            x0,y0,x1,y1=box
-            d=self.classify_crop(img[y0:y1,x0:x1], caishen_label=label)
-            d['box']=list(box);d['region']='exposed'
+            d, fixed_box = self._classify_detected_box(
+                img, box, label, typical_width=typical_width,
+                next_left=next_left.get(tuple(box)))
+            d['box']=list(fixed_box);d['region']='exposed'
             self.meld_diagnostics.append(d)
+            classified_meld_boxes.append(fixed_box)
+        self.last_meld_boxes = classified_meld_boxes
         # Recover at most one weak tile in three consecutive equal-label boxes,
         # whether concealed or exposed. Both neighbours must have passed the
         # original classifier; a dark whole hand therefore still abstains.
@@ -612,6 +709,8 @@ class TileVision:
 
         recover_triplet(self.diagnostics, boxes, 'concealed')
         recover_triplet(self.meld_diagnostics, self.last_meld_boxes, 'exposed')
+        boxes = self._return_invalid_trailing_platform_groups(boxes)
+        count = len(boxes)
         result = [(d['tile_id'], *d['box']) for d in self.diagnostics if d['accepted']]
         self.last_melds = [(d['tile_id'], *d['box']) for d in self.meld_diagnostics
                            if d['accepted']]

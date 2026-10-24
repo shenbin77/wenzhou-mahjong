@@ -1882,11 +1882,30 @@ def decide_action(
         if not feasible:
             why = "；".join(f"{action}: {report[action]['why']}"
                             for action in (ACTION_KONG, ACTION_PENG, ACTION_CHI))
+            # 第一版连续代打：无法安全确认吃/碰/杠时，若“过”本身已通过
+            # 独立模板闸，就明确放弃本次机会继续牌局。过不会改变手牌/副露，
+            # 比让行动面板永久卡住更保守；读不清过按钮仍保持原弃权。
+            pass_status = _status_for(per_button, pass_button)
+            if (cfg.auto_click_enabled and pass_button is not None
+                    and (not cfg.require_template_match
+                         or pass_status == TEMPLATE_STATUS_MATCHED)):
+                return _accept(
+                    ACTION_PASS, pass_button, None, cfg, evidence, {}, report,
+                    l2=f"吃碰杠均未获完整证据（{why}）；安全选择过",
+                    template_status=pass_status)
             return _blocked(claim_state, image, cfg,
                             "L2 否决：画面出现金盘，但引擎判定碰/吃/杠皆不可行，弃权",
                             l2_reason=why, engine=report)
         if len(feasible) > 1:
             names = "、".join(feasible)
+            pass_status = _status_for(per_button, pass_button)
+            if (cfg.auto_click_enabled and pass_button is not None
+                    and (not cfg.require_template_match
+                         or pass_status == TEMPLATE_STATUS_MATCHED)):
+                return _accept(
+                    ACTION_PASS, pass_button, None, cfg, evidence, {}, report,
+                    l2=f"L2 同时有 {len(feasible)} 种可能（{names}），不猜；安全选择过",
+                    template_status=pass_status)
             return _blocked(claim_state, image, cfg,
                             f"L1 分不出金盘是碰还是吃/杠，L2 有 {len(feasible)} 种可能（{names}），"
                             f"弃权（不猜）",

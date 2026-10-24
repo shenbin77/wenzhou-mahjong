@@ -15,7 +15,8 @@
   * 换局/HUD/财神冲突采用连续帧防抖，候选期零点击；自动财神不沿用旧局值；
   * HUD 与画面财神连续 3 帧都不可读 → 停止；期间拒绝真实点击；
   * 牌墙/房卡读数 ≤ 16 → 停止（P0-5）；不可读记 unknown，不阻断开发局，但绝不点充值；
-  * 启用且本帧财神未知 → 停止（P0-5 ``gate_unknown_caishen``）；
+  * 启用且本帧财神未知 → 最多等待 2 帧有界重拍，连续第 3 帧仍未知才停止；
+    等待期间零点击且不沿用旧财神（P0-5 ``gate_unknown_caishen``）；
   * **回合所有权**（``turn_gate``，dry_run 与真点都要过）：轮到我方、已摸牌、
     张数守恒（17 = 暗手 + 副露）、画面连续两帧一致、手牌未被压暗；
     ``wait`` 只等待并记 ``idle``，``blocked``（证据自相矛盾）立即停手；
@@ -69,11 +70,12 @@ from action_policy import (
     validate_runner_config,
     verify_after_click,
 )
-from claim_vision import read_claims
+from claim_vision import KIND_CANCEL, read_claims
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE
 from single_bright_cut import SingleBrightCutTracker, detect_single_bright_cut
 from tap_executor import (
     TapAborted,
+    TapRejected,
     TapExecutor,
     TapPrecheckRetryExhausted,
     TapUnverified,
@@ -123,6 +125,7 @@ HINT_PANEL_RETRY_EVERY = 10
 ROUND_CHANGE_CONFIRM_TICKS = 2
 ROUND_IDENTITY_UNKNOWN_BUDGET = 3
 MANUAL_CAISHEN_CONFLICT_TICKS = 2
+CAISHEN_UNKNOWN_BUDGET = 3
 
 
 def locate_drawn_tile(result: dict, good_hand_ids) -> dict | None:
@@ -353,6 +356,7 @@ class AutoPlayLoop:
         self._round_candidate: tuple[bytes | None, str | None] | None = None
         self._round_candidate_ticks = 0
         self._round_identity_unknown_ticks = 0
+        self._unknown_caishen_ticks = 0
         self._manual_caishen_conflict: str | None = None
         self._manual_caishen_conflict_ticks = 0
 
@@ -625,6 +629,7 @@ class AutoPlayLoop:
             self.round.seq += 1
             self.round.hud_key = hud_key
             self.round.caishen = caishen
+            self._unknown_caishen_ticks = 0
             # 换局：稳定帧必须重新攒（换局后的第一帧绝不放行）。
             self.turn_history.clear()
             # 牌河基线也要作废：拿上一局的牌河做差分会白丢一轮（后果是弃权，
@@ -688,12 +693,31 @@ class AutoPlayLoop:
                 "suggestion_id": None,
                 "reason": f"决策事实不足({','.join(missing)})；本帧弃权",
             })
-        if self.enabled and table.should_stop_for_unknown_caishen:
-            return self._stop(
-                "gate_unknown_caishen",
-                "本帧财神未知：停止代打（P0-5）",
-                base,
-            )
+        if table.should_stop_for_unknown_caishen:
+            self._unknown_caishen_ticks += 1
+            base["unknown_caishen_ticks"] = self._unknown_caishen_ticks
+            base["unknown_caishen_budget"] = CAISHEN_UNKNOWN_BUDGET
+            if (self.enabled and self._unknown_caishen_ticks
+                    >= CAISHEN_UNKNOWN_BUDGET):
+                return self._stop(
+                    "gate_unknown_caishen",
+                    (f"财神连续 {self._unknown_caishen_ticks} 帧未知："
+                     "停止代打（P0-5）"),
+                    base,
+                )
+            return self._event({
+                **base,
+                "event": "idle",
+                "status": "abstain",
+                "suggestion": None,
+                "suggestion_id": None,
+                "reason": (
+                    f"财神连续 {self._unknown_caishen_ticks}/"
+                    f"{CAISHEN_UNKNOWN_BUDGET} 帧未知，等待有界重拍；"
+                    "期间零点击且不沿用旧财神"
+                ),
+            })
+        self._unknown_caishen_ticks = 0
         # 门禁三：回合所有权。dry_run 与真点都必须先过这一关，台账逐帧留证。
         verdict = self._evaluate_turn_gate(
             result, image, record=not changed_round)
@@ -1164,6 +1188,53 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001 - 读不出即记异常，不放行
             return {"claim": {"status": "read_failed", "reason": f"{exc}",
                               "frame": str(frame_path)}}
+        # 吃牌二次候选面板的蓝色圆盘：用户明确要求 BOT 能自动点“取消”。
+        # 只接受“本帧唯一圆盘就是 cancel”，邀请弹窗的矩形取消不走此通道。
+        if (len(claim_state.buttons) == 1
+                and claim_state.buttons[0].kind == KIND_CANCEL):
+            button = claim_state.buttons[0]
+            payload = {
+                "status": "ready" if self.claim_auto_click else "observed",
+                "action": "cancel_selection",
+                "frame": str(frame_path),
+                "known": True,
+                "buttons": [KIND_CANCEL],
+                "tap_point": list(button.center),
+                "reason": ("本帧唯一实测圆盘为候选面板取消；"
+                           "显式开启行动点击后允许关闭候选面板"),
+            }
+            if not self.claim_auto_click:
+                return {"claim": payload}
+            payload["auto_click"] = {
+                "requested": True, "executed": False,
+                "channel_ready": CLAIM_TAP_CHANNEL_READY,
+            }
+            if not CLAIM_TAP_CHANNEL_READY:
+                payload["auto_click"]["reason"] = "行动圆盘点击通道未启用"
+                return {"claim": payload}
+            try:
+                outcome = self._tap.execute_claim(
+                    button.center, action="cancel_selection", kind=KIND_CANCEL,
+                    image=image, session_dir=self.session_dir)
+            except TapRejected as exc:
+                # fresh 帧里面板已自行消失属于零点击安全竞争，不停整条循环。
+                payload["auto_click"].update({
+                    "reason": str(exc), "stage": "stale_or_rejected",
+                })
+                return {"claim": payload}
+            except TapAborted as exc:
+                payload["auto_click"].update({"reason": str(exc), "stage": "aborted"})
+                return {"claim": payload, "_terminal": {
+                    "gate": "selection_cancel_unverified",
+                    "reason": f"候选面板取消点击结果未知：{exc}",
+                }}
+            payload["auto_click"].update({
+                "executed": bool(outcome.get("executed")),
+                "stage": outcome.get("stage"), "tap": outcome.get("tap"),
+                "semantic_verified": bool(outcome.get("ui_responded")),
+                "semantic_reason": outcome.get("reason"),
+            })
+            return {"claim": payload}
         # 来牌从本帧的牌河读数里取（discard_vision 给的是 DiscardState）。
         # 换局没确认过的帧：本帧"来牌"可能是跨局差分出来的，不许进 L2。
         # P0-5: never reuse a prior frame's analysis for claim decisions.
