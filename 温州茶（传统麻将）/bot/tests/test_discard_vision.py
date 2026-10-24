@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 
 import cv2
@@ -30,7 +31,9 @@ from discard_vision import (  # noqa: E402
     RiverTile,
     TableSnapshot,
     evaluate_change,
+    forget_discards,
     read_discards,
+    read_discards_sequential,
     snapshot_table,
 )
 from tile_vision import TILE_IDS  # noqa: E402
@@ -372,3 +375,128 @@ def test_unusable_baseline_row_abstains() -> None:
     state = evaluate_change(current, previous)
     assert state.incoming_tile is None
     assert "不可比对" in state.reason
+
+
+# ---------------------------------------------------------------------------
+# 活循环用的"上一帧"登记处
+# ---------------------------------------------------------------------------
+# ``read_discards_sequential`` 是唯一带状态的函数（登记"上一帧"）。每个用例
+# 都用自己的 key 并在结尾清掉，避免用例之间互相喂基线。
+
+
+@pytest.fixture()
+def registry_key() -> str:
+    """给每个用例一个独立 key，用完即清。"""
+    key = f"test-{uuid.uuid4().hex}"
+    yield key
+    forget_discards(key)
+
+
+def test_sequential_first_frame_withholds_second_reads(registry_key: str) -> None:
+    """登记处的核心承诺：调用方一行不改，第二帧就拿到来牌。"""
+    before = load_frame("20261023_205407_139587_491a9f.png")
+    after = load_frame("20261023_205409_557426_31fea1.png")
+    first = read_discards_sequential(before, key=registry_key)
+    assert first.incoming_tile is None
+    assert "前后两帧" in first.reason, "首帧没有基线，只能给牌河不能给来牌"
+    second = read_discards_sequential(after, key=registry_key)
+    assert second.incoming_tile == 63
+    assert second.incoming_source == SOURCE_OPPONENT
+
+
+def test_sequential_does_not_register_unreadable_frames(registry_key: str) -> None:
+    """广告/结算帧不写进登记处，否则会把下一帧的差分带偏。"""
+    before = load_frame("20261023_205407_139587_491a9f.png")
+    after = load_frame("20261023_205409_557426_31fea1.png")
+    read_discards_sequential(before, key=registry_key)
+    junk = read_discards_sequential(np.zeros((900, 1600, 3), np.uint8),
+                                    key=registry_key)
+    assert junk.incoming_tile is None
+    assert junk.table is not None and not junk.table.opponent.valid
+    # 垃圾帧之后仍与上一张牌桌帧比对，所以来牌照样读得出来。
+    good = read_discards_sequential(after, key=registry_key)
+    assert good.incoming_tile == 63
+
+
+def test_sequential_keys_are_independent(registry_key: str) -> None:
+    """两条流水线（两个会话/两台设备）不能互相喂基线。"""
+    other = f"{registry_key}-other"
+    try:
+        before = load_frame("20261023_205407_139587_491a9f.png")
+        read_discards_sequential(before, key=registry_key)
+        state = read_discards_sequential(
+            load_frame("20261023_205409_557426_31fea1.png"), key=other)
+        assert state.incoming_tile is None, "另一个 key 没有基线，绝不能猜"
+        assert "前后两帧" in state.reason
+    finally:
+        forget_discards(other)
+
+
+def test_forget_discards_clears_the_registry(registry_key: str) -> None:
+    before = load_frame("20261023_205407_139587_491a9f.png")
+    read_discards_sequential(before, key=registry_key)
+    forget_discards(registry_key)
+    state = read_discards_sequential(
+        load_frame("20261023_205409_557426_31fea1.png"), key=registry_key)
+    assert state.incoming_tile is None
+    assert "前后两帧" in state.reason
+
+
+def test_explicit_previous_is_used_instead_of_the_registry(registry_key: str) -> None:
+    """调用方自己管基线时，传进来的那个说话。"""
+    baseline = snapshot_table(load_frame("20261023_205431_651989_577fbe.png"))
+    state = read_discards_sequential(
+        load_frame("20261023_205433_718038_eae185.png"),
+        key=registry_key, previous=baseline)
+    assert state.incoming_tile == 9
+
+
+# ---------------------------------------------------------------------------
+# 端到端：analyze_snapshot -> HandState.incoming_tile
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_snapshot_feeds_hand_state_incoming(tmp_path) -> None:
+    """最后一公里：快照返回体里的 ``discards`` 必须真能填进 ``HandState``。"""
+    assist_tea = pytest.importorskip("assist_tea")
+    action_policy = pytest.importorskip("action_policy")
+
+    frame_dir = tmp_path / "logs"
+    before = assist_tea.analyze_snapshot(
+        SESSION / "20261023_205407_139587_491a9f.png", caishen_label="",
+        confirmed_two_player=True, log_dir=frame_dir)
+    assert "discards" in before, "每个返回分支都必须带 discards"
+    assert before["discards"]["incoming_tile"] is None
+
+    after = assist_tea.analyze_snapshot(
+        SESSION / "20261023_205409_557426_31fea1.png", caishen_label="",
+        confirmed_two_player=True, log_dir=frame_dir)
+    assert after["discards"]["incoming_tile"] == 63
+    assert after["discards"]["incoming_source"] == SOURCE_OPPONENT
+
+    hand = action_policy.HandState.from_analysis(after)
+    assert hand.incoming_tile is not None, "来牌必须真的传到决策闸门，不能是 None"
+    assert hand.incoming_tile in VISION_IDS or hand.incoming_tile >= 61
+
+
+def test_analyze_snapshot_discards_are_jsonable(tmp_path) -> None:
+    """快照结果要落盘成台账（``json.dump``），所以不能夹带 numpy 标量。"""
+    import json
+
+    assist_tea = pytest.importorskip("assist_tea")
+    result = assist_tea.analyze_snapshot(
+        SESSION / "20261023_205431_651989_577fbe.png", caishen_label="",
+        confirmed_two_player=True, log_dir=tmp_path / "logs")
+    json.dumps(result, ensure_ascii=False)
+    assert set(result["discards"]) >= {"incoming_tile", "incoming_source",
+                                       "river_tiles", "reason", "evidence"}
+
+
+def test_four_player_snapshot_does_not_read_the_river(tmp_path) -> None:
+    """牌河几何只在 2 人布局上标定过，4 人局不许假装有来牌。"""
+    assist_tea = pytest.importorskip("assist_tea")
+    result = assist_tea.analyze_snapshot(
+        SESSION / "20261023_205431_651989_577fbe.png", caishen_label="",
+        confirmed_four_player=True, log_dir=tmp_path / "logs")
+    assert result["discards"]["incoming_tile"] is None
+    assert "2 人" in result["discards"]["reason"]

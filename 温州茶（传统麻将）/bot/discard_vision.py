@@ -75,6 +75,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from typing import Any, Mapping
 
 import cv2
@@ -876,3 +877,91 @@ def baseline_of(previous, *, vision=None, template_dir: str | Path | None = None
         return snapshot_table(previous, vision=vision, template_dir=template_dir,
                               require_tea_table=require_tea_table)
     return None
+
+
+# ---------------------------------------------------------------------------
+# 活循环用的"上一帧"登记处
+# ---------------------------------------------------------------------------
+# 活循环每帧只拿到一张图，手上没有"上一帧"这个对象，而 :func:`read_discards`
+# 又必须吃两帧 —— 所以这里给一个**显式、可清空、按 key 隔离**的登记处。
+# 刻意不做隐式全局：谁都能 ``forget_discards()`` 清空，不同会话用不同 key，
+# 免得两条流水线互相喂基线。
+
+_LAST_LOCK = Lock()
+#: key -> 上一帧的牌河读数（只登记"确实看清楚牌桌"的帧）。
+_LAST_TABLES: dict[str, TableSnapshot] = {}
+#: key -> 上一帧的完整结论（供人工复核/排障，不参与判定）。
+_LAST_STATES: dict[str, DiscardState] = {}
+
+
+def forget_discards(key: str | None = None) -> None:
+    """清空登记的"上一帧"。
+
+    换局、换设备、或任何"前后两帧不该再比对"的时刻都要调一次，否则会拿上一局
+    的牌河当基线（后果是弃权，不会误报，但会白丢一轮）。
+
+    Args:
+        key: 只清这一个 key；``None`` 表示全部清空。
+    """
+    with _LAST_LOCK:
+        if key is None:
+            _LAST_TABLES.clear()
+            _LAST_STATES.clear()
+        else:
+            _LAST_TABLES.pop(key, None)
+            _LAST_STATES.pop(key, None)
+
+
+def last_discards(key: str = "default") -> DiscardState | None:
+    """取该 key 上一次登记的完整结论（没有就 ``None``）。"""
+    with _LAST_LOCK:
+        return _LAST_STATES.get(key)
+
+
+def read_discards_sequential(
+    image: np.ndarray,
+    *,
+    key: str = "default",
+    previous=None,
+    vision=None,
+    template_dir: str | Path | None = None,
+    require_tea_table: bool = True,
+) -> DiscardState:
+    """读一帧，并把本帧登记为该 ``key`` 的"上一帧"，供下一帧做时序比对。
+
+    与 :func:`read_discards` 的唯一差别是"上一帧从哪来"：
+
+    * 传了 ``previous`` 就用它（调用方自己管状态，登记处照常更新）；
+    * 没传就用本进程上一次登记的读数 —— 于是"每帧只有一张图"的调用方
+      **一行不改**也能拿到 ``incoming_tile``（首帧只有牌河、没有来牌，
+      ``reason`` 会写明"需要前后两帧"）。
+
+    **只有"确实看清楚牌桌"的帧才登记**：广告、结算、尺寸不对这类帧不写进登记
+    处，下一帧仍与上一张牌桌帧比对。这样中间夹一帧广告不会把差分带偏。
+
+    Args:
+        image: 1600x900 BGR 帧。
+        key: 登记处的键；不同会话/设备用不同 key，互不干扰。
+        previous: 可选的显式上一帧（:class:`DiscardState` /
+            :class:`TableSnapshot` / ``np.ndarray``）。
+        vision: 可注入的识牌器（测试用）。
+        template_dir: 模板目录（仅在没有 ``vision`` 时生效）。
+        require_tea_table: 是否先过"是不是温州茶 2 人牌桌"的门禁。
+
+    Returns:
+        :class:`DiscardState`。读不出来时 ``incoming_tile is None``。
+    """
+    if previous is not None:
+        baseline = baseline_of(previous, vision=vision, template_dir=template_dir,
+                               require_tea_table=require_tea_table)
+    else:
+        with _LAST_LOCK:
+            baseline = _LAST_TABLES.get(key)
+    cur = snapshot_table(image, vision=vision, template_dir=template_dir,
+                         require_tea_table=require_tea_table)
+    state = evaluate_change(cur, baseline)
+    if cur.opponent.valid and cur.own.valid:
+        with _LAST_LOCK:
+            _LAST_TABLES[key] = cur
+            _LAST_STATES[key] = state
+    return state
