@@ -59,12 +59,18 @@
       "cluster_frames": 65
     },
     {
-      "label": "t7",
+      "label": "t6",
       "file": "t6.png",
       "source": "2026-10-15/291755/r05/_ac.png",
       "source_sha256": "ba299bcb456ea8d4c5015776bdab1947f3522187dcc83090887cab83d3e67a02",
       "asset_sha256": "0ab505d6e05cc66f4f8085f1f7d18f359405251f1d82550164fedc5ef7ef3725",
-      "cluster_frames": 4
+      "cluster_frames": 4,
+      "relabel_20261025": {
+        "from": "t7",
+        "to": "t6",
+        "by": "Hark hark/caishen-count",
+        "evidence": "裁框上 2 绿横排+下 4 红=六筒，与本游戏手牌模板 tea_4p_r03_t6 同形；2026-10-15/291755/r05 同帧手牌财角标牌亦为 6筒。旧\"按 label 不按文件名\"的结论把 6/7 弄反了"
+      }
     },
     {
       "label": "w7",
@@ -243,12 +249,18 @@
       "cluster_frames": 8
     },
     {
-      "label": "t6",
+      "label": "t7",
       "file": "t7.png",
       "source": "2026-10-13/207547/r03/_ac.png",
       "source_sha256": "f11b4f39aacbacd74da43afffe36f2ab40f16310057a6c5e4e1f5776ade51a35",
       "asset_sha256": "28021bb122f3726a7fbd7998efb89cad9489c4ca9d1c2548915e2235a4b35e95",
-      "cluster_frames": 58
+      "cluster_frames": 58,
+      "relabel_20261025": {
+        "from": "t6",
+        "to": "t7",
+        "by": "Hark hark/caishen-count",
+        "evidence": "裁框上 3 绿斜排+下 4 红=七筒，与手牌模板 tea_p2a_r05_t7 同形；2026-10-13/207547/r03 同帧手牌财角标牌亦为 7筒"
+      }
     },
     {
       "label": "w6",
@@ -331,40 +343,64 @@
       "visual_check": "8x放大目视核对：财字角标+黑色'八'+红色'萬'，为八萬；主理人核对于2026-10-23 22:47"
     },
     {
-      "label": "s3",
+      "label": "s9",
       "file": "s3_live2.png",
       "source": "assist_sessions/20261023_220643/live/tea_2p\\20261023_220646_775714_eba342.png",
       "source_sha256": "01899ce56b10498d2efdcb08352121fd1fe85c3c43f6796ad7a71e4c6adfa4fc",
       "asset_sha256": "ae4c0b91fba09cba501e5baa2c6031ab61282db3075411b20a68d51ed66d10bd",
       "cluster_frames": 0,
-      "visual_check": "8x目视核对为s3（三条）；主理人核对于2026-10-23 22:53"
+      "visual_check": "8x目视核对为s3（三条）；主理人核对于2026-10-23 22:53",
+      "relabel_20261025": {
+        "from": "s3",
+        "to": "s9",
+        "by": "Hark hark/caishen-count",
+        "evidence": "同帧手牌带\"财\"角标的牌为 9条（20261023_220646/220648），裁框为 3x3 竖条中列红=九条；被误标 s3"
+      }
     },
     {
-      "label": "t2",
+      "label": "t4",
       "file": "t2_live3.png",
       "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223804_580031_20e553.png",
       "source_sha256": "452449b78c4c58d0cd2e3f56e1d68d767d534b5f39981a68476b168f37ccd9ff",
       "asset_sha256": "18f2672942fe712423a373f25200dc898ea4a06cdff3d19615445c1ba371deeb",
       "cluster_frames": 0,
-      "visual_check": "8x目视核对为t2（二筒）；主理人核对于2026-10-23 22:53"
+      "visual_check": "8x目视核对为t2（二筒）；主理人核对于2026-10-23 22:53",
+      "relabel_20261025": {
+        "from": "t2",
+        "to": "t4",
+        "by": "Hark hark/caishen-count",
+        "evidence": "同帧手牌财角标牌为 4筒（20261023_223804），裁框 2x2 圆=四筒；被误标 t2"
+      }
     },
     {
-      "label": "t2",
+      "label": "t4",
       "file": "t2_live4.png",
       "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223830_885292_a0f9bc.png",
       "source_sha256": "4922b39a7d6991e01f19caf9b583cb7faf2e68b0767426ecdec3b79646d08f8c",
       "asset_sha256": "a4087abb2bdbbf4ded1df606ae881ce54e2e296f021300c1581bcfc2b596ddab",
       "cluster_frames": 0,
-      "visual_check": "8x目视核对为t2（二筒斜排）；主理人核对于2026-10-23 22:53"
+      "visual_check": "8x目视核对为t2（二筒斜排）；主理人核对于2026-10-23 22:53",
+      "relabel_20261025": {
+        "from": "t2",
+        "to": "t4",
+        "by": "Hark hark/caishen-count",
+        "evidence": "同帧手牌财角标牌为 4筒（20261023_223830），裁框 2x2 圆=四筒；被误标 t2"
+      }
     },
     {
-      "label": "t4",
+      "label": "t6",
       "file": "t4_live5.png",
       "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223841_216899_40bdc9.png",
       "source_sha256": "b0b2798d4f013ec88b2cf80f5701a127e7339cf53899b468099c2d9bc371bc05",
       "asset_sha256": "c4e19a4483982272a763d4dfa18c695955fd016a3e5310ba05b44a24878418de",
       "cluster_frames": 0,
-      "visual_check": "8x目视核对为t4（四筒）；主理人核对于2026-10-23 22:53"
+      "visual_check": "8x目视核对为t4（四筒）；主理人核对于2026-10-23 22:53",
+      "relabel_20261025": {
+        "from": "t4",
+        "to": "t6",
+        "by": "Hark hark/caishen-count",
+        "evidence": "同帧手牌财角标牌为 6筒（20261023_223841），裁框上 2 绿横排+下 4 红=六筒；被误标 t4"
+      }
     },
     {
       "label": "w7",

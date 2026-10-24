@@ -182,6 +182,72 @@ def caishen_badge(crop):
             and float(np.count_nonzero(gold_mask))/area >= _BADGE_GOLD_FRACTION)
 
 
+# --- 吃碰杠"来源箭头"（claim marker）去遮挡 -------------------------------------
+# 实测（2026-10-23/24 实战帧，wrong_count 弃权的根因）：副露组里被吃/碰的那张牌
+# 顶边正中会叠一个半透明黑圆 + 实心黄色三角箭头。黑圆把牌面上沿压暗到约 0.53 倍，
+# 被签名当作墨迹并入字形外框，三万/二万/四万/二筒等牌分数从 ≥0.94 掉到 0.51-0.78，
+# 整组副露"识牌不完整"，整帧弃权。这里在分类前把黑圆按实测透明度除回去、把黄三角
+# 涂成牌面底色；没有箭头的牌原样返回（同一对象），既有帧的输入与结论逐字节不变。
+_MARKER_BAND = .16          # 箭头只出现在牌面最上沿这一条带内
+_MARKER_MIN_PIXELS = 12     # 黄色三角最少像素（实测 1600x900 下约 110-120）
+
+
+def strip_claim_marker(crop):
+    """Undo the translucent claim-marker disc drawn over a tile's top edge.
+
+    Returns ``(crop, found)``. ``crop`` is the untouched input object when no
+    marker is present, so callers without a marker see identical pixels.
+    """
+    if crop is None or crop.size == 0 or crop.ndim != 3:
+        return crop, False
+    h, w = crop.shape[:2]
+    band_h = max(6, int(round(h*_MARKER_BAND)))
+    if band_h >= h - 4:
+        return crop, False
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[:band_h, :, 0], hsv[:band_h, :, 1], hsv[:band_h, :, 2]
+    yellow = (hue >= 15) & (hue <= 40) & (sat > 110) & (val > 150)
+    ys, xs = np.nonzero(yellow)
+    if len(xs) < max(_MARKER_MIN_PIXELS, int(w*h*.0012)):
+        return crop, False
+    centre = float(xs.mean())
+    # Centred and narrow: rules out the top-left 财 banner and full-width rims.
+    if not (.3*w <= centre <= .7*w) or xs.max() - xs.min() > .3*w:
+        return crop, False
+    background = float(np.percentile(hsv[band_h:, :, 2], 70))
+    if background < 150:
+        return crop, False
+    shade = (val >= background*.40) & (val <= background*.66) & (sat < 70)
+    seed = cv2.dilate(yellow.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    _, labels = cv2.connectedComponents((shade | yellow).astype(np.uint8), connectivity=8)
+    keep = set(np.unique(labels[seed]).tolist()) - {0}
+    if not keep:
+        return crop, False
+    disc = np.isin(labels, list(keep))
+    if np.count_nonzero(disc & shade) < 20:
+        return crop, False
+    dys, dxs = np.nonzero(disc)
+    (cx, cy), radius = cv2.minEnclosingCircle(
+        np.stack([dxs, dys], 1).astype(np.float32))
+    if radius > .32*w:
+        return crop, False
+    factor = float(np.median(val[disc & shade]))/background
+    if not (.35 <= factor <= .75):
+        return crop, False
+    out = crop.copy()
+    yy, xx = np.indices((h, w))
+    inside = (xx-cx)**2 + (yy-cy)**2 <= (radius+1.5)**2
+    out[inside] = np.clip(out[inside].astype(np.float32)/factor, 0, 255).astype(np.uint8)
+    # The opaque triangle hides whatever is below it: paint plain face colour.
+    tri = np.zeros((h, w), bool)
+    tri[:band_h] = cv2.dilate(yellow.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    lower = crop[band_h:]
+    face_pixels = lower[hsv[band_h:, :, 2] >= background*.95]
+    if len(face_pixels):
+        out[tri] = np.median(face_pixels, axis=0).astype(np.uint8)
+    return out, True
+
+
 class TileVision:
     def __init__(self, template_dir=None, min_score=.82, min_margin=.055,
                  caishen_label=None):
@@ -375,6 +441,8 @@ class TileVision:
         """
         self.load_templates()
         marked = caishen_badge(crop)
+        # 副露"来源箭头"遮挡牌面上沿：先去遮挡再算签名（无箭头时 crop 原样）。
+        crop, claim_marker = strip_claim_marker(crop)
         known = caishen_label in TILE_IDS
         # 只有"角标命中 + 本局财神已知"才做亮度补偿并计入：整手压暗是游戏
         # "请出牌"的瞬时状态，财神未知时角标牌也必须按未识别处理，两者都保持
@@ -408,6 +476,8 @@ class TileVision:
         # A known label therefore outranks an ambiguous glyph (九萬/八萬 land at
         # 0.845-0.854 here); the glyph reading is kept for audit.
         result['caishen_marked'] = marked
+        if claim_marker:
+            result['claim_marker'] = True
         if marked and known:
             result.update(tile_id=TILE_IDS[caishen_label], label=caishen_label,
                           accepted=True, reason='caishen_marked',
