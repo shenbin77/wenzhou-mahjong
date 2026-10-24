@@ -1,0 +1,239 @@
+﻿# -*- coding: utf-8 -*-
+"""Read-only live viewer for follow_session.jsonl gate/abstain/decision lines.
+
+Can embed as a compact strip in the assist main window, or open as a
+detached More-menu Toplevel. Never enables claim taps and never writes
+to the session logger — it only tails the existing JSONL.
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, ttk
+
+from action_policy import CLAIM_TAP_CHANNEL_READY
+from session_logger import (
+    FOLLOW_SESSION_FILENAME,
+    read_follow_lines,
+    resolve_follow_session_path,
+)
+
+
+class FollowSessionLog:
+    """Scrollable, read-only panel of the latest follow-session decision lines."""
+
+    REFRESH_MS = 800
+    LINE_LIMIT = 250
+    EMBED_LINE_LIMIT = 80
+    EMBED_TEXT_HEIGHT = 6
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        session_dir: str | Path,
+        *,
+        search_roots: list[str | Path] | None = None,
+        container: tk.Misc | None = None,
+        compact: bool = False,
+    ) -> None:
+        self.session_dir = Path(session_dir)
+        self.search_roots = [Path(p) for p in (search_roots or [])]
+        self.path: Path | None = resolve_follow_session_path(
+            self.session_dir, search_roots=self.search_roots
+        )
+        self.compact = bool(compact or container is not None)
+        self.line_limit = self.EMBED_LINE_LIMIT if self.compact else self.LINE_LIMIT
+        self.follow = tk.BooleanVar(value=True)
+        self.path_var = tk.StringVar(value=self._path_label())
+        self.status_var = tk.StringVar(
+            value="只读尾随 follow_session.jsonl；不会开启吃碰杠点击通道。"
+        )
+        self.timer: str | None = None
+        # Sentinel so first refresh paints empty-state when no jsonl yet.
+        self._last_signature = object()
+        self._detach_callback = None
+        self.window: tk.Toplevel | None
+        self.host: tk.Misc
+
+        if container is not None:
+            self.window = None
+            self.host = container
+            self._build_into(container, detached=False)
+        else:
+            self.window = tk.Toplevel(parent)
+            self.window.title("跟随会话日志 · 只读（门控 / 弃权 / 决策）")
+            self.window.geometry("780x420")
+            self.window.minsize(520, 280)
+            self.host = self.window
+            self._build_into(self.window, detached=True)
+            self.window.protocol("WM_DELETE_WINDOW", self.close)
+
+        self.refresh()
+
+    def _build_into(self, parent: tk.Misc, *, detached: bool) -> None:
+        pad = 4 if self.compact else 6
+        controls = ttk.Frame(parent, padding=pad)
+        controls.pack(fill="x")
+        ttk.Checkbutton(
+            controls, text="跟随最新", variable=self.follow, command=self.refresh
+        ).pack(side="left")
+        ttk.Button(controls, text="刷新", command=self.refresh).pack(side="left", padx=4)
+        if detached or not self.compact:
+            ttk.Button(controls, text="打开会话目录…", command=self.pick_session).pack(
+                side="left", padx=4
+            )
+            ttk.Button(controls, text="清空显示", command=self.clear_view).pack(
+                side="left", padx=4
+            )
+        else:
+            ttk.Button(controls, text="清空", command=self.clear_view).pack(
+                side="left", padx=4
+            )
+            ttk.Button(
+                controls, text="弹出完整窗口", command=self._request_detach
+            ).pack(side="left", padx=4)
+        ttk.Label(
+            controls,
+            text=f"CLAIM通道={CLAIM_TAP_CHANNEL_READY}",
+            foreground="#888888",
+        ).pack(side="right")
+
+        wrap = 720 if self.compact else 760
+        ttk.Label(
+            parent, textvariable=self.path_var, wraplength=wrap, foreground="#555555"
+        ).pack(fill="x", padx=6)
+
+        frame = ttk.Frame(parent, padding=(6, 2))
+        frame.pack(fill="both", expand=True)
+        text_kwargs: dict = dict(
+            wrap="none",
+            state="disabled",
+            font=("Consolas", 9),
+            background="#111111",
+            foreground="#e8e8e8",
+            insertbackground="#e8e8e8",
+            relief="flat",
+        )
+        if self.compact:
+            text_kwargs["height"] = self.EMBED_TEXT_HEIGHT
+        self.text = tk.Text(frame, **text_kwargs)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.text.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        ttk.Label(parent, textvariable=self.status_var, wraplength=wrap).pack(
+            fill="x", padx=6, pady=(0, 4)
+        )
+
+    def set_detach_callback(self, callback) -> None:
+        """Optional: More-menu / 弹出完整窗口 opens the detached viewer."""
+        self._detach_callback = callback
+
+    def _request_detach(self) -> None:
+        if callable(self._detach_callback):
+            self._detach_callback()
+
+    def _path_label(self) -> str:
+        if self.path is None:
+            return f"尚未找到 {FOLLOW_SESSION_FILENAME}（当前会话或自动对局目录）"
+        return f"日志文件：{self.path}"
+
+    def pick_session(self) -> None:
+        chosen = filedialog.askdirectory(
+            title="选择含 follow_session.jsonl 的会话目录",
+            initialdir=str(self.session_dir if self.session_dir.is_dir() else Path.cwd()),
+        )
+        if not chosen:
+            return
+        self.session_dir = Path(chosen)
+        candidate = self.session_dir / FOLLOW_SESSION_FILENAME
+        self.path = candidate if candidate.is_file() else resolve_follow_session_path(
+            self.session_dir, search_roots=self.search_roots
+        )
+        self.path_var.set(self._path_label())
+        self._last_signature = None
+        self.refresh()
+
+    def clear_view(self) -> None:
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.configure(state="disabled")
+        self._last_signature = None
+
+    def _host_alive(self) -> bool:
+        try:
+            return bool(self.host.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def refresh(self) -> None:
+        if not self._host_alive():
+            return
+        if self.path is None or not self.path.is_file():
+            self.path = resolve_follow_session_path(
+                self.session_dir, search_roots=self.search_roots
+            )
+            self.path_var.set(self._path_label())
+        lines = read_follow_lines(self.path, limit=self.line_limit)
+        signature: tuple[int, int] | None = None
+        if self.path is not None and self.path.is_file():
+            try:
+                st = self.path.stat()
+                signature = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                signature = None
+        if signature != self._last_signature:
+            self._last_signature = signature
+            body = "\n".join(lines)
+            self.text.configure(state="normal")
+            self.text.delete("1.0", "end")
+            if body:
+                self.text.insert("1.0", body + "\n")
+            else:
+                self.text.insert(
+                    "1.0",
+                    "（暂无门控/弃权/决策行。开始自动对局或跟随后，"
+                    f"{FOLLOW_SESSION_FILENAME} 有内容时会显示在这里。）\n",
+                )
+            self.text.configure(state="disabled")
+            if self.follow.get():
+                self.text.see("end")
+            count = len(lines)
+            ready = CLAIM_TAP_CHANNEL_READY
+            self.status_var.set(
+                f"已显示最近 {count} 行 · CLAIM_TAP_CHANNEL_READY={ready} · 只读"
+            )
+        if self.timer is not None:
+            try:
+                self.host.after_cancel(self.timer)
+            except tk.TclError:
+                pass
+        try:
+            self.timer = self.host.after(self.REFRESH_MS, self.refresh)
+        except tk.TclError:
+            self.timer = None
+
+    def stop(self) -> None:
+        """Cancel refresh timer without destroying an embedded host frame."""
+        if self.timer is not None:
+            try:
+                self.host.after_cancel(self.timer)
+            except tk.TclError:
+                pass
+            self.timer = None
+
+    def close(self) -> None:
+        self.stop()
+        if self.window is not None:
+            try:
+                if self.window.winfo_exists():
+                    self.window.destroy()
+            except tk.TclError:
+                pass
+            self.window = None
