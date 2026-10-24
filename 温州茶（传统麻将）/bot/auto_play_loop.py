@@ -372,6 +372,13 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001 - 截图失败计入异常预算
             return self._anomaly("capture_failed", f"{exc}", started)
         image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        # 换局判定必须在读牌河**之前**：牌河基线一旦跨局，差分出来的"来牌"
+        # 会是上一局的牌。guard 早退分支（行动行可见）在正式的换局判定之前
+        # 就会用到 _discard_state，所以这里先判一次。本帧结果存下来复用，
+        # 后面不再重复调 _round_key。
+        hud_key, key_caishen = self._probe_round_key(frame_path)
+        if not self.round.same_round(hud_key, key_caishen):
+            self._forget_discards()
         # 每帧喂一次牌河：来牌要前后两帧才认得出，缺了它行动决策只能出"过"。
         self._read_discards(image)
         try:
@@ -406,11 +413,8 @@ class AutoPlayLoop:
             return self._anomaly("analyze_failed", f"{exc}", started)
         # 行动行出现时要用它构造 L2 的局面快照（可能拿不到完整手牌）。
         self._last_result = result if isinstance(result, dict) else None
-        # 门禁二：换局（HUD 指纹 / 财神 label）。
-        try:
-            hud_key, key_caishen = self._round_key(frame_path)
-        except Exception:  # noqa: BLE001 - 换局识别失败按未知处理
-            hud_key, key_caishen = None, None
+        # 门禁二：换局（HUD 指纹 / 财神 label）。指纹在本帧开头已经算过一次
+        # （读牌河之前要先作废跨局基线），这里直接复用，不重复调用。
         if self.enabled and hud_key is None and key_caishen is None:
             return self._stop("gate_round_identity", "房号局数与画面财神都不可读，拒绝自动点击")
         if (self.enabled and self.caishen_label and key_caishen
@@ -508,6 +512,13 @@ class AutoPlayLoop:
     # ------------------------------------------------------------------
     # 牌河/来牌读取（供行动决策取"别家刚打出的那张"）
     # ------------------------------------------------------------------
+    def _probe_round_key(self, frame_path: Path) -> tuple[bytes | None, str | None]:
+        """算本帧的换局指纹；识别失败按未知处理（fail closed）。"""
+        try:
+            return self._round_key(frame_path)
+        except Exception:  # noqa: BLE001 - 换局识别失败按未知处理
+            return None, None
+
     def _read_discards_sequential(self, image: np.ndarray) -> Any:
         """调 ``discard_vision`` 读本帧牌河，并登记为下一帧的基线。"""
         from discard_vision import read_discards_sequential
@@ -523,6 +534,9 @@ class AutoPlayLoop:
             self._discard_state = self._discard(image)
         except Exception:  # noqa: BLE001 - 读牌河失败不影响其它门禁
             self._discard_state = None
+            # 基线也一起作废：异常帧之后不该再拿更早的帧做差分——那样报出的
+            # "来牌"事实可能对，但时效已过（可能早被鸣走）。宁可下一帧弃权一次。
+            self._forget_discards()
 
     def _forget_discards(self) -> None:
         """换局时作废牌河基线（``discard_vision`` 的登记处按 key 隔离）。"""

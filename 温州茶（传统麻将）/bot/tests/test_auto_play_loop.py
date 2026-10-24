@@ -1140,3 +1140,61 @@ def test_discard_reading_can_be_switched_off(tmp_path):
     loop.tick()
 
     assert calls == []
+
+
+def test_round_change_forgets_river_baseline_before_reading(tmp_path):
+    """换局帧：必须先作废牌河基线再读本帧（否则拿上一局的牌河做差分）。
+
+    guard 早退分支在正式换局判定之前就会用 ``_discard_state``，所以顺序
+    只能是 forget → read。
+    """
+    order: list[str] = []
+
+    loop, _shot, _analyzer, _tap, _ = make_loop(
+        tmp_path, frames=[action_row_frame()], action_guard=CLAIM_GUARD,
+        discard_fn=lambda _img: None, hud=[(HUD_B, None)])
+    # 模拟"本局身份是上一帧的正常帧登记的"，本帧 HUD 变成另一局。
+    loop.round.hud_key = HUD_A
+    loop.round.caishen = None
+
+    real_forget = loop._forget_discards
+
+    def spy_forget() -> None:
+        order.append("forget")
+        real_forget()
+
+    loop._forget_discards = spy_forget
+    loop._discard = lambda _img: order.append("read")
+
+    loop.tick()
+
+    assert "read" in order, "牌河必须被读"
+    assert "forget" in order, "换局帧必须先作废基线"
+    assert order.index("forget") < order.index("read")
+
+
+def test_discard_read_failure_forgets_baseline_too(tmp_path):
+    """读牌河抛异常：来牌置空**且**基线作废，异常不许外泄。"""
+    order: list[str] = []
+
+    def boom(_img):
+        raise RuntimeError("牌河读取炸了")
+
+    loop, _shot, _analyzer, _tap, _ = make_loop(
+        tmp_path, frames=[action_row_frame()], action_guard=CLAIM_GUARD,
+        discard_fn=boom)
+
+    real_forget = loop._forget_discards
+
+    def spy_forget() -> None:
+        order.append("forget")
+        real_forget()
+
+    loop._forget_discards = spy_forget
+
+    event = loop.tick()
+
+    assert loop._discard_state is None
+    assert "forget" in order, "异常帧的基线也要作废"
+    assert loop.stopped is False, "读牌河失败不许停机"
+    assert event["claim"]["status"] == "blocked"
