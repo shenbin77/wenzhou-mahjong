@@ -44,8 +44,10 @@ confirmed_actions)``，即默认任何动作都需要人工确认。确认一个
 
 未接线的地方（明确记录，不许假装能用）
 --------------------------------------
-* 来牌（别家打出的那张）当前没有读取链路，:class:`HandState.incoming_tile`
-  默认 ``None``；为 ``None`` 时 L2 无法验证碰/吃/杠/胡，只有"过"可能出手。
+* 来牌（别家打出的那张）由 ``discard_vision.read_discards`` 读取，经返回体的
+  ``discards`` 字段传进来（见 :meth:`HandState.from_analysis`）。**传不进来
+  时** :class:`HandState.incoming_tile` 仍是 ``None``，此时 L2 无法验证
+  碰/吃/杠/胡，只有"过"可能出手 —— 这是默认的安全行为，不是缺口。
 * 吃会弹出二次选择面板（面板里有 ``取消``），本版未接线，
   ``config.chi_enabled`` 默认 ``False``。
 * ``tap_executor`` 的几何白名单只放行手牌 ROI（y ≥ 720），行动圆盘在 y≈600，
@@ -410,6 +412,49 @@ def engine_available() -> bool:
     return _engine() is not None
 
 
+def _incoming_of(result: Mapping[str, Any], vision_to_engine) -> int | None:
+    """从返回体里取"刚打出的那张牌"的引擎编码；取不到或不可信一律 ``None``。
+
+    来牌由 ``discard_vision.read_discards`` 读取，它自己已经保证"读不出来就是
+    ``None``"。这里只负责**转码前的口径校验**，接受两种形状：
+
+    * ``result["discards"]``：:class:`discard_vision.DiscardState` 本体，或它的
+      ``as_dict()``（有 ``incoming_tile`` 键）；
+    * ``result["incoming_tile"]``：直接是一个视觉编码。
+
+    Args:
+        result: ``assist_tea.analyze_snapshot`` 之类的返回体。
+        vision_to_engine: 视觉编码 → 引擎编码的转换函数（白 67→73）。
+
+    Returns:
+        引擎编码；无法确认时 ``None``（此时 L2 只能出"过"）。
+    """
+    from tile_vision import TILE_IDS
+
+    if not isinstance(result, Mapping):
+        return None
+    vision_ids = set(TILE_IDS.values())
+    candidates: list[Any] = []
+    discards = result.get("discards")
+    if isinstance(discards, Mapping):
+        candidates.append(discards.get("incoming_tile"))
+    elif discards is not None:
+        candidates.append(getattr(discards, "incoming_tile", None))
+    candidates.append(result.get("incoming_tile"))
+    for raw in candidates:
+        # bool 是 int 的子类，必须先排掉，否则 True 会被当成牌 1。
+        if isinstance(raw, bool) or not isinstance(raw, (int, np.integer)):
+            continue
+        if int(raw) not in vision_ids:
+            # 不在视觉词汇里：可能是上游错塞了引擎编码（白=73），绝不能硬转。
+            continue
+        try:
+            return vision_to_engine(int(raw))
+        except Exception:  # noqa: BLE001 - 转码失败等于没有来牌
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 手牌状态（L2 输入）
 # ---------------------------------------------------------------------------
@@ -523,7 +568,8 @@ class HandState:
             elif mode == "tea_4p":
                 count = 4
         return cls(concealed=concealed, melds=tuple(melds), caishen=caishen,
-                   incoming_tile=None, player_count=count,
+                   incoming_tile=_incoming_of(result, vision_to_engine),
+                   player_count=count,
                    source="analyze_snapshot")
 
 
