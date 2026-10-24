@@ -97,3 +97,8 @@ _accept_*.json
 _accept_*.log
 *.err
 温州茶（传统麻将）/采集/workbuddy_review_*/
+
+# Hark: 识别模板必须入库
+!温州茶（传统麻将）/bot/templates/
+!温州茶（传统麻将）/bot/templates/**
+!温州茶（传统麻将）/bot/assets/**
