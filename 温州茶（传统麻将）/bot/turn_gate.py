@@ -145,6 +145,7 @@ BOTTOM_ROI_Y = 0.85
 VERIFIED_FRAME_SIZE = (900, 1600)       # (height, width)，与 capture 的校验一致
 
 STATE_DISCARD_READY = "discard_ready"
+HINT_PANEL_CODE = "hint_panel"   # 疑似胡提示面板（听牌提示条）
 STATE_WAIT = "wait"
 STATE_BLOCKED = "blocked"
 
@@ -624,6 +625,21 @@ def evaluate_turn(result: dict, image, history: Sequence[HandObservation] | None
             code="gate_settled")
     # 只命中 1 条：证据不足以定案为结算画面，但也绝不继续轮询放行。
     if settled_evidence["settled_signals"]:
+        # 胡提示面板细分：听牌时游戏弹出的奶油色提示条（大红「胡」字 + 听口）
+        # 只命中 central_panel 单信号、手牌带仍可读、且本帧读数已被面板
+        # 干扰（analyze 非 advise）。它不是结算：仍记 wait 永不放行，但用
+        # 独立 code 交给循环计数，持续多帧后走「只摸切刚摸的牌」兜底路径。
+        # 双信号结算在上面已 blocked，bottom_blackout 单信号仍走通用支。
+        if (settled_evidence["settled_signals"] == ["central_panel"]
+                and brightness is not None
+                and brightness >= MIN_HAND_FACE_MEAN
+                and result.get("status") != "advise"):
+            return verdict(
+                STATE_WAIT,
+                "疑似胡提示面板（听牌提示条）：中央奶油色面板单信号命中"
+                "(central_panel)，手牌带仍可读、结算双信号未成立；"
+                "本轮不出牌，等待循环的面板兜底判定",
+                code=HINT_PANEL_CODE)
         return verdict(
             STATE_WAIT,
             "疑似结算/非对局画面（"

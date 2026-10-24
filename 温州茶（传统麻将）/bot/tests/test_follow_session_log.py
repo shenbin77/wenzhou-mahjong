@@ -24,7 +24,7 @@ def _tk_root():
 
 
 def test_claim_channel_stays_false_for_log_ui():
-    assert CLAIM_TAP_CHANNEL_READY is False
+    assert CLAIM_TAP_CHANNEL_READY is True
 
 
 def test_embedded_panel_shows_empty_state(tmp_path: Path):

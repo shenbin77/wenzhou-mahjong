@@ -114,7 +114,24 @@ def test_period_is_capture_to_capture_not_processing_plus_sleep():
     tracker.record(FrameTiming(capture_ms=100, recognize_ms=50, advise_ms=10,
                                cycle_ms=160), period_ms=1200)
     assert tracker.last_period_ms == pytest.approx(1200)
-    assert tracker.interval_ms >= tracker.base_ms
+    # Target-period contract (rewritten 2026-10-25, cadence repair
+    # line; evidence: _takeover/repair_assist_report.md section 2 and
+    # repair_cadence_report.md).  The old assertion pinned
+    # interval_ms >= base_ms: a full base interval of pure sleep
+    # stacked AFTER processing, which made the live capture-to-capture
+    # period ~= cycle + max(800, cycle*1.2) and the measured live p95
+    # 2126 ms against the 1.5 s gate, while offline processing p95 is
+    # only 337 ms.  record() now returns the wait remaining to reach
+    # the target period, so cycle + wait == target period.
+    # target = max(800, 160 * 1.2) = 800; wait = 800 - 160 = 640.
+    assert tracker.interval_ms == 640
+    assert 160 + tracker.interval_ms == tracker.base_ms
+    # Slow frame: target = max(800, 1000 * 1.2) = 1200, raw wait 200
+    # is floored to min_ms so the poller always keeps an idle gap and
+    # can never busy-spin on fast or degenerate frames.
+    tracker.record(FrameTiming(capture_ms=600, recognize_ms=300, advise_ms=100,
+                               cycle_ms=1000), period_ms=1300)
+    assert tracker.interval_ms == tracker.min_ms
 
 
 def test_window_records_capture_start_and_tk_idle_in_refresh_latency(monkeypatch):
@@ -437,6 +454,20 @@ class _FakeWindow:
         self.refresh = LiveRefreshState()
         self.tracker = LatencyTracker()
         self.confirm_mode = types.SimpleNamespace(get=lambda: True)
+        # start() arms continuous only after the follow pipeline is attached
+        # and follow_session.jsonl exists on disk (the jsonl red line; the
+        # failure paths are covered by test_follow_jsonl_miss). The fake
+        # supplies a real empty log file plus a pipeline placeholder so the
+        # stop/start round-lock semantics can be tested in isolation.
+        import tempfile
+        _fake_log_dir = Path(tempfile.mkdtemp(prefix="spec005_fake_follow_"))
+        self._fake_follow_log = _fake_log_dir / "follow_session.jsonl"
+        self._fake_follow_log.write_text("", encoding="utf-8")
+        self._follow_pipeline = None
+
+    def _attach_follow_pipeline(self):
+        self._follow_pipeline = types.SimpleNamespace(
+            follow_log_path=self._fake_follow_log)
 
     def _ready(self):
         return True

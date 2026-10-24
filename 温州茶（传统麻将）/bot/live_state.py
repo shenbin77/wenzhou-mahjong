@@ -114,8 +114,20 @@ class LatencyTracker:
         if period_ms is not None and period_ms > 0:
             self.last_period_ms = float(period_ms)
             self.periods.append(float(period_ms))
-        target = max(self.base_ms, timing.cycle_ms * 1.2)
-        self.interval_ms = int(max(self.min_ms, min(self.max_ms, target)))
+        # Target-period cadence (changed 2026-10-25; evidence in
+        # _takeover/repair_assist_report.md section 2): interval_ms is
+        # the wait AFTER this frame has been processed, so size it to
+        # what remains of the target period instead of stacking a whole
+        # base interval on top of the processing time.  The old formula
+        # (wait = max(base, cycle*1.2)) pushed the live capture-to-
+        # capture period to ~2.1 s (measured p95 2126 ms) while offline
+        # processing p95 is only 337 ms.  Target period stays
+        # max(base, cycle*1.2); the min clamp keeps a >= MIN_INTERVAL_MS
+        # idle gap after every frame, so the poller can never busy-spin
+        # even on fast or degenerate frames.
+        target_period = max(float(self.base_ms), timing.cycle_ms * 1.2)
+        wait = target_period - timing.cycle_ms
+        self.interval_ms = int(max(self.min_ms, min(self.max_ms, wait)))
         return self.interval_ms
 
     def set_folder(self, label: str, since: float, now: float) -> int:

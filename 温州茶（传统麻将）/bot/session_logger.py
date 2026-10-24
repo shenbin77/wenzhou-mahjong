@@ -120,7 +120,8 @@ def _vision_block(event: Mapping[str, Any], analysis: Mapping[str, Any] | None) 
         "suggestion": event.get("suggestion", source.get("suggestion")),
         "suggestion_id": event.get("suggestion_id", source.get("suggestion_id")),
         "shanten": source.get("shanten"),
-        # Unified follow vision snapshot (read-only; never enables claim taps).
+        # Unified follow vision snapshot stays read-only even though the separate
+        # auto-play claim executor is available.
         "incoming_tile": facts.get("last_discard", source.get("incoming_tile")),
         "incoming_source": facts.get("last_discard_source", source.get("incoming_source")),
         "own_river": facts.get("river_own", source.get("own_river")),
@@ -212,12 +213,8 @@ def build_follow_record(
     analysis: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one follow-session JSONL row from an auto_play ledger event."""
-    if CLAIM_TAP_CHANNEL_READY:
-        # Hard safety: logger must never run while the claim channel is armed
-        # without an explicit audit note. We still record, but stamp a warning.
-        channel_note = "UNEXPECTED_CLAIM_CHANNEL_READY"
-    else:
-        channel_note = "claim_channel_closed"
+    channel_note = ("claim_channel_ready_gated"
+                    if CLAIM_TAP_CHANNEL_READY else "claim_channel_closed")
     record: dict[str, Any] = {
         "schema": FOLLOW_SESSION_SCHEMA,
         "at": event.get("ts") or _now_iso(),

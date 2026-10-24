@@ -367,8 +367,8 @@ class FollowPipeline:
         self.started = False
         self.last_outcome: FollowFrameOutcome | None = None
         if CLAIM_TAP_CHANNEL_READY:
-            # Soft stamp only; never enable clicks from here.
-            self._channel_note = "UNEXPECTED_CLAIM_CHANNEL_READY"
+            # Soft stamp only; this read-only pipeline never enables clicks.
+            self._channel_note = "claim_channel_ready_gated"
         else:
             self._channel_note = "claim_channel_closed"
 
@@ -519,7 +519,13 @@ class FollowPipeline:
             }
             event.update(merged)
             event["claim_tap_channel_ready"] = bool(CLAIM_TAP_CHANNEL_READY)
-        if not self.started:
+        # Lazy start is the live-follow jsonl gate: only a logger-enabled
+        # pipeline may (and must) create follow_session.jsonl here. A
+        # logger-disabled pipeline is the display-only/offline kind built by
+        # assist_window._observe_follow_frame; start() would refuse it with
+        # "refuse live follow without jsonl", which must not veto offline
+        # rendering. Its logger.append below is a no-op when disabled.
+        if not self.started and self.logger.enabled:
             self.start({"mode": facts.mode or self.mode})
         log_path = self.logger.append(
             event,

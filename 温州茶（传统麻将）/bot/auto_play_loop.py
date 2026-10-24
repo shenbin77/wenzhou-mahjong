@@ -12,8 +12,8 @@
   * 前台包必须是 ``com.xm.zjgamecenter``；
   * ``enabled`` 只认显式 True（默认 False → dry_run：只记录不点）；
   * 连续 3 次截图或识牌异常 → 停止；点击异常或点后验证失败立即停止；
-  * 换局信号（HUD 指纹变化或财神 label 变化）→ 跳过该帧，手选财神时停手；
-  * HUD 与画面财神都不可读 → 拒绝真实点击；
+  * 换局/HUD/财神冲突采用连续帧防抖，候选期零点击；自动财神不沿用旧局值；
+  * HUD 与画面财神连续 3 帧都不可读 → 停止；期间拒绝真实点击；
   * 牌墙/房卡读数 ≤ 16 → 停止（P0-5）；不可读记 unknown，不阻断开发局，但绝不点充值；
   * 启用且本帧财神未知 → 停止（P0-5 ``gate_unknown_caishen``）；
   * **回合所有权**（``turn_gate``，dry_run 与真点都要过）：轮到我方、已摸牌、
@@ -26,13 +26,18 @@
     游戏中心永不触碰）。
   * **行动行（吃/碰/杠/胡/过）**：``action_guard`` 判定行动界面可见时，调用
     ``action_policy.decide_action`` 做 L1 几何 + L2 算牌引擎决策，**默认只
-    落台账不点击**（``claim_auto_click=False``，且每个动作还须人工确认）；
-    点击通道本身尚未接线（TapExecutor 白名单不放行动圆盘所在的 y≈600）。
+    落台账不点击**（``claim_auto_click=False``）；显式开启后经独立圆盘白名单
+    单击，并用 L3 盘面迁移验证，失败立即停机。吃的二次选组仍保持关闭。
     来牌由 ``discard_vision`` 每帧读取（``read_discards_sequential``，需要
     前后两帧才认得出，换局会 ``forget_discards``）；读不出时 ``incoming_tile``
     为 ``None``，此时 L2 只能出"过"。
 
-本模块只新增，不修改任何既有文件；识别与点击链路全部 import 复用。
+  * **胡提示面板（听牌提示条）**：``turn_gate`` 判 ``code="hint_panel"``（中央面板
+    单信号、手牌带可读、结算双信号未成立）时只等待并计数；同局内存在面板前
+    advise 好读数且面板持续 ≥3 帧时，兜底摸切「刚摸的牌」（手牌最右分离位，
+    ``locate_drawn_tile`` 校验），目标交 TapExecutor 正常路径；定位不到/读数
+    过期一律继续等待，双信号结算永远 blocked 停手。
+识别与点击链路全部 import 复用；两个设备按 serial 启动独立实例，共用本模块。
 """
 
 from __future__ import annotations
@@ -41,7 +46,10 @@ import json
 import re
 import subprocess
 import time
+import traceback
 import uuid
+from collections import Counter
+from statistics import median
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -54,12 +62,23 @@ from action_guard import ActionGuardResult, detect_action_ui
 from action_policy import (
     CLAIM_TAP_CHANNEL_READY,
     ActionPolicyConfig,
+    BoardState,
     HandState,
     decide_action,
+    recommended_runner_config,
+    validate_runner_config,
+    verify_after_click,
 )
 from claim_vision import read_claims
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE
-from tap_executor import TapAborted, TapExecutor
+from single_bright_cut import SingleBrightCutTracker, detect_single_bright_cut
+from tap_executor import (
+    TapAborted,
+    TapExecutor,
+    TapPrecheckRetryExhausted,
+    TapUnverified,
+    label_for_tile,
+)
 from table_state import WALL_CARDS_STOP_AT, build_table_state
 from follow_pipeline import build_frame_facts, missing_decision_facts
 from session_logger import SessionLogger
@@ -69,6 +88,9 @@ from turn_gate import (
     TurnVerdict,
     evaluate_turn,
     hand_observation,
+    known_caishen_id,
+    HINT_PANEL_CODE,
+    detect_settled_screen,
 )
 
 # 本机实测路径优先，其次回落到 harvest_tea 的默认（两处是同一份 adb）。
@@ -89,6 +111,83 @@ FOCUS_PATTERNS = (
     r"ResumedActivity:.*?\s([A-Za-z0-9_.]+)/",
 )
 
+
+
+# 胡提示面板兜底：面板连续命中至少这么多帧才允许尝试摸切（防一闪误触）。
+HINT_PANEL_MIN_TICKS = 3
+# 兜底尝试节奏：达到门槛后每隔这么多帧再试一次（执行器在面板未消失前
+# 会在点击前中止，反复尝试只会刷证据文件）。
+HINT_PANEL_RETRY_EVERY = 10
+# 换局/财神/HUD 都不再用单帧作决定。未知身份给三帧预算；明确冲突或换局
+# 信号要求连续两帧相同，既挡瞬时坏读，也不沿用旧财神跨局点击。
+ROUND_CHANGE_CONFIRM_TICKS = 2
+ROUND_IDENTITY_UNKNOWN_BUDGET = 3
+MANUAL_CAISHEN_CONFLICT_TICKS = 2
+
+
+def locate_drawn_tile(result: dict, good_hand_ids) -> dict | None:
+    """在面板帧里定位「刚摸的牌」：暗手最右、且处于分离位的那一张。
+
+    Args:
+        result: 本帧（面板帧）的 analyze 结果（只读）。
+        good_hand_ids: 面板出现前最后一帧好读数（advise）的暗手多重集。
+
+    Returns:
+        ``{"tile_id": int, "box": [x0, y0, x1, y1]}``；任一校验不过返回
+        ``None``（fail-closed，调用方继续等待）。
+
+    校验（全部满足才定位）：
+      * 本帧 diagnostics 中 accepted 暗手的多重集与 hand_ids 完全一致；
+      * 与好读数相比，多重集增/删各至多 1 张（实测：面板下缘会遮住中间
+        一张牌的牌框 → 删 1；面板在摸牌前出现时则增 1 = 刚摸的牌）；
+      * 若增 1 张，它必须正是几何最右张；
+      * 最右张与左邻的间距大于其余相邻间距的中位数（摸牌的分离位特征，
+        实测 101px vs 常规 92px）。
+    """
+    items: list[tuple[int, int, list[int]]] = []
+    for entry in result.get("vision_diagnostics") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("region") not in (None, "concealed"):
+            continue
+        if not entry.get("accepted"):
+            continue
+        tile_id = entry.get("tile_id")
+        box = entry.get("box")
+        if not isinstance(tile_id, int) or isinstance(tile_id, bool):
+            continue
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        items.append((int(box[0]), int(tile_id), [int(v) for v in box]))
+    if len(items) < 4:
+        return None
+    items.sort(key=lambda item: item[0])
+    panel_ids = sorted(tile for _x, tile, _box in items)
+    try:
+        hand_ids = sorted(int(tile) for tile in (result.get("hand_ids") or []))
+    except (TypeError, ValueError):
+        return None
+    if panel_ids != hand_ids:
+        return None
+    try:
+        good = sorted(int(tile) for tile in (good_hand_ids or []))
+    except (TypeError, ValueError):
+        return None
+    if not good:
+        return None
+    panel_counter = Counter(panel_ids)
+    good_counter = Counter(good)
+    added = list((panel_counter - good_counter).elements())
+    removed = list((good_counter - panel_counter).elements())
+    if len(added) > 1 or len(removed) > 1:
+        return None
+    rightmost_tile = items[-1][1]
+    if added and added[0] != rightmost_tile:
+        return None
+    diffs = [items[i + 1][0] - items[i][0] for i in range(len(items) - 1)]
+    if diffs[-1] <= median(diffs[:-1]):
+        return None
+    return {"tile_id": rightmost_tile, "box": items[-1][2]}
 
 class GateBlocked(RuntimeError):
     """门禁不放行：立即停止，不计入"连续异常"预算。"""
@@ -208,16 +307,21 @@ class AutoPlayLoop:
         # 目录延迟到第一次真正落盘时才创建：门禁不放行时不留空会话目录。
         self._dirs_ready = False
 
-        # 行动（吃/碰/杠/胡/过）决策闸门。**默认只落证据，不自动点**：
-        # ``claim_auto_click`` 打开也只是把决策标成 ready，真正点击还要等
-        # ``CLAIM_TAP_CHANNEL_READY``（TapExecutor 白名单只放行手牌 ROI y≥720，
-        # 行动圆盘在 y≈600，通道尚未接线）。
+        # 行动（吃/碰/杠/胡/过）决策闸门。默认只落证据；显式打开后仍须
+        # CLAIM_TAP_CHANNEL_READY + 模板/L2/L3 全部通过。行动圆盘使用独立
+        # 白名单，不放宽普通出牌 y>=720 的硬边界。
         self.claim_auto_click = bool(claim_auto_click)
         # Advisory claim ledger may run L2 without button glyphs; auto-click
         # still forces require_template_match inside decide_action (P0-2).
-        self._claim_policy = claim_policy or ActionPolicyConfig(
-            auto_click_enabled=self.claim_auto_click,
-            require_template_match=bool(self.claim_auto_click))
+        self._claim_policy = claim_policy or (
+            recommended_runner_config(auto_click_enabled=True)
+            if self.claim_auto_click else
+            ActionPolicyConfig(auto_click_enabled=False,
+                               require_template_match=False)
+        )
+        config_problems = validate_runner_config(self._claim_policy)
+        if config_problems:
+            raise ValueError("行动策略配置不安全: " + "; ".join(config_problems))
         # 上一帧的识牌结果：行动行出现时用它构造 L2 的局面快照。
         self._last_result: dict | None = None
         # 牌河/来牌读取：行动决策（碰/吃/杠/胡）要拿"别家刚打出的那张"。
@@ -241,6 +345,16 @@ class AutoPlayLoop:
         # 回合所有权门禁的帧历史（只在本局内有效，换局即清空）。
         self.turn_history: list[HandObservation] = []
         self.tick_index = 0
+        # 胡提示面板兜底状态：面板前最后一次 advise 好读数 + 面板连续帧数。
+        self._last_advise_read: dict | None = None
+        self._hint_panel_streak = 0
+        self._hint_panel_round: int | None = None
+        self._single_bright = SingleBrightCutTracker()
+        self._round_candidate: tuple[bytes | None, str | None] | None = None
+        self._round_candidate_ticks = 0
+        self._round_identity_unknown_ticks = 0
+        self._manual_caishen_conflict: str | None = None
+        self._manual_caishen_conflict_ticks = 0
 
     # ------------------------------------------------------------------
     # 只读门禁
@@ -339,6 +453,12 @@ class AutoPlayLoop:
     def _write_event(self, event: dict) -> None:
         """Append one dev-tagged ledger line; header line marks the corpus."""
         self._ensure_dirs()
+        # 双端共用同一套代码时，每一行都必须能独立追溯到设备、玩法、局和帧；
+        # 不依赖读者先找到文件头，方便把两端同一局配对复盘。
+        event.setdefault("device_serial", self.serial)
+        event.setdefault("mode", self.mode)
+        event.setdefault("tick", self.tick_index)
+        event.setdefault("round_seq", self.round.seq)
         if not self._ledger_started:
             header = {
                 "dev": True,
@@ -432,8 +552,13 @@ class AutoPlayLoop:
                     claim_analysis = None
             except Exception:  # noqa: BLE001 - claim path fail-closed
                 claim_analysis = None
-            guard_event.update(self._claim_policy_event(
-                image, frame_path, analysis=claim_analysis))
+            claim_event = self._claim_policy_event(
+                image, frame_path, analysis=claim_analysis)
+            terminal = claim_event.pop("_terminal", None)
+            guard_event.update(claim_event)
+            if terminal:
+                return self._stop(
+                    terminal["gate"], terminal["reason"], guard_event)
             if action_guard.state == "uncertain":
                 return self._anomaly(
                     "action_guard_uncertain", action_guard.reason, started,
@@ -456,13 +581,46 @@ class AutoPlayLoop:
         self._last_result = result if isinstance(result, dict) else None
         # 门禁二：换局（HUD 指纹 / 财神 label）。指纹在本帧开头已经算过一次
         # （读牌河之前要先作废跨局基线），这里直接复用，不重复调用。
-        if self.enabled and hud_key is None and key_caishen is None:
-            return self._stop("gate_round_identity", "房号局数与画面财神都不可读，拒绝自动点击")
-        if (self.enabled and self.caishen_label and key_caishen
-                and key_caishen != self.caishen_label):
-            return self._stop("gate_manual_caishen", "手选财神与当前画面不一致，须重新确认")
         caishen = key_caishen or result.get("caishen")
-        changed_round = not self.round.same_round(hud_key, caishen)
+        round_signal = self._debounce_round_signal(
+            hud_key, key_caishen, caishen)
+        if round_signal["state"] == "identity_unknown":
+            if self.enabled and round_signal["ticks"] >= ROUND_IDENTITY_UNKNOWN_BUDGET:
+                return self._stop(
+                    "gate_round_identity",
+                    f"房号局数与画面财神连续 {round_signal['ticks']} 帧都不可读，拒绝自动点击",
+                    {"round_signal": round_signal, "frame": str(frame_path)},
+                )
+            return self._event({
+                "ts": datetime.now().astimezone().isoformat(),
+                "event": "idle", "round_seq": self.round.seq,
+                "frame": str(frame_path), "round_signal": round_signal,
+                "reason": "局身份单帧不可读，等待有界重拍",
+            })
+        if round_signal["state"] == "manual_conflict":
+            if round_signal["ticks"] >= MANUAL_CAISHEN_CONFLICT_TICKS:
+                return self._stop(
+                    "gate_manual_caishen",
+                    f"手选财神与画面连续 {round_signal['ticks']} 帧不一致，须重新确认",
+                    {"round_signal": round_signal, "frame": str(frame_path)},
+                )
+            return self._event({
+                "ts": datetime.now().astimezone().isoformat(),
+                "event": "idle", "round_seq": self.round.seq,
+                "frame": str(frame_path), "round_signal": round_signal,
+                "reason": "财神单帧冲突，等待连续帧确认",
+            })
+        if round_signal["state"] == "round_suspect":
+            self.turn_history.clear()
+            self._single_bright.reset()
+            return self._event({
+                "ts": datetime.now().astimezone().isoformat(),
+                "event": "idle", "round_seq": self.round.seq,
+                "frame": str(frame_path), "caishen": caishen,
+                "round_signal": round_signal,
+                "reason": "检测到单帧换局信号，等待第二帧确认；期间禁止点击",
+            })
+        changed_round = round_signal["state"] == "round_changed"
         if changed_round:
             self.round.seq += 1
             self.round.hud_key = hud_key
@@ -472,6 +630,7 @@ class AutoPlayLoop:
             # 牌河基线也要作废：拿上一局的牌河做差分会白丢一轮（后果是弃权，
             # 不会误报，但没必要）。
             self._forget_discards()
+            self._single_bright.reset()
             self._write_event({
                 "ts": datetime.now().astimezone().isoformat(),
                 "event": "round_reset", "round_seq": self.round.seq,
@@ -489,6 +648,7 @@ class AutoPlayLoop:
             "status": result.get("status"), "suggestion": result.get("suggestion"),
             "suggestion_id": result.get("suggestion_id"),
             "caishen": result.get("caishen"),
+            "round_signal": round_signal,
         }
         # P0-5: refresh unified TableState from THIS frame before decide/discard.
         incoming_tile = None
@@ -543,12 +703,34 @@ class AutoPlayLoop:
             # 台账统一记 gate="gate_turn"；具体归类在 turn_gate.code
             # （如 "gate_settled"），同一行即可看出"其实是牌局结束了"。
             return self._stop("gate_turn", verdict.reason, base)
+        bright = self._single_bright.feed(
+            image, result, caishen_label=caishen, mode=self.mode)
+        base["single_bright_cut"] = bright.ledger()
+        # 胡提示面板：维护兜底所需状态（换局帧一律作废，面板帧绝不进快照）。
+        if changed_round:
+            self._last_advise_read = None
+            self._hint_panel_streak = 0
+            self._hint_panel_round = None
+        else:
+            self._track_hint_panel_state(result, verdict)
         if changed_round:
             if self.enabled and self.caishen_label:
                 return self._stop("gate_manual_caishen", "检测到换局；手选财神须重新确认",
                                   base)
             return self._event({**base, "event": "idle", "reason": "换局帧跳过，等待下一张清晰画面"})
         # 无建议/弃权 → 只等待，绝不兜底点击。
+        if verdict.code == HINT_PANEL_CODE:
+            fallback_event = self._hint_panel_fallback(
+                result, verdict, base, started)
+            if fallback_event is not None:
+                return fallback_event
+            return self._event({**base, "event": "idle",
+                                "reason": verdict.reason})
+        if bright.confirmed:
+            bright_event = self._single_bright_fallback(
+                result, bright, base, started)
+            if bright_event is not None:
+                return bright_event
         if result.get("status") != "advise" or not result.get("suggested_boxes"):
             return self._event({**base, "event": "idle",
                                 "reason": result.get("reason") or "无可执行建议"})
@@ -594,15 +776,343 @@ class AutoPlayLoop:
             self._stop("tap_unverified", "点击后手牌数量未验证，停止自动点击", base)
         return event
 
+    def _analyze_fresh_image(self, image: np.ndarray, tag: str) -> dict:
+        """把 TapExecutor 的 fresh 帧送回同一分析链，且保留可审计原图。"""
+        ok, encoded = cv2.imencode(".png", image)
+        if not ok:
+            raise TapAborted("点击前 fresh 帧 PNG 编码失败")
+        raw = encoded.tobytes()
+        path = self._save_frame(raw, tag)
+        result = self._analyze(raw, path)
+        if not isinstance(result, dict):
+            raise TapAborted("点击前 fresh 分析没有返回结构化结果")
+        return result
+
+    @staticmethod
+    def _synthetic_discard(result: dict, tile_id: int, box,
+                           *, before_count: int | None = None) -> dict:
+        synthetic = dict(result)
+        synthetic.update({
+            "status": "advise",
+            "suggestion": label_for_tile(tile_id),
+            "suggestion_id": int(tile_id),
+            "suggested_boxes": [[int(v) for v in box]],
+            "_locked_tile": True,
+        })
+        if before_count is not None:
+            synthetic["_locked_before_count"] = int(before_count)
+        return synthetic
+
+    def _single_bright_fallback(self, result: dict, bright, base: dict,
+                                started: float) -> dict | None:
+        """连续两帧单亮态只摸切该亮牌；fresh 帧必须再次独立命中。"""
+        marker = base.setdefault("single_bright_cut", bright.ledger())
+        if bright.tile_id is None or bright.bright_box is None:
+            marker["outcome"] = "tile_identity_unknown"
+            return None
+        synthetic = self._synthetic_discard(
+            result, bright.tile_id, bright.bright_box,
+            before_count=(bright.evidence or {}).get("expected_concealed"))
+        if self.actions_done >= self.max_actions:
+            return self._stop("max_actions",
+                              f"达到 --max-actions={self.max_actions}", base)
+        if self.dry_run:
+            try:
+                plan = self._tap.plan(synthetic)
+            except TapAborted as exc:
+                marker["outcome"] = "plan_aborted"
+                marker["reason"] = str(exc)
+                return None
+            self.actions_done += 1
+            marker["outcome"] = "dry_run_plan"
+            return self._event({
+                **base, "event": "dry_run_plan", "tap": [plan.x, plan.y],
+                "box": list(plan.box), "verified": None,
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+
+        expected_tile = int(bright.tile_id)
+        expected_point = tuple(int(v) for v in bright.tap_point)
+
+        def validate_fresh(fresh_image: np.ndarray, _original: dict) -> dict:
+            fresh_result = self._analyze_fresh_image(fresh_image, "preclick_bright")
+            fresh = detect_single_bright_cut(
+                fresh_image, fresh_result,
+                caishen_label=self.round.caishen or result.get("caishen"),
+                mode=self.mode)
+            if not fresh.hit or fresh.tile_id != expected_tile or fresh.bright_box is None:
+                raise TapAborted("fresh 帧不再是同一张单亮牌")
+            if (fresh.tap_point is None
+                    or abs(fresh.tap_point[0] - expected_point[0]) > 20
+                    or abs(fresh.tap_point[1] - expected_point[1]) > 20):
+                raise TapAborted("fresh 帧单亮牌位置漂移，拒绝点击")
+            return self._synthetic_discard(
+                fresh_result, expected_tile, fresh.bright_box,
+                before_count=(fresh.evidence or {}).get("expected_concealed"))
+
+        marker["outcome"] = "attempt"
+        try:
+            outcome = self._tap.execute(synthetic, fresh_validator=validate_fresh)
+        except TapPrecheckRetryExhausted as exc:
+            marker["outcome"] = "precheck_retry_exhausted"
+            return self._anomaly("single_bright_precheck", str(exc), started, base)
+        except TapUnverified as exc:
+            return self._stop("tap_aborted", f"单亮摸切点击后无法验证：{exc}", base)
+        except TapAborted as exc:
+            return self._stop("tap_aborted", f"单亮摸切被执行器拒绝：{exc}", base)
+        except Exception as exc:  # noqa: BLE001
+            return self._stop("tap_failed", f"单亮摸切结果未知：{exc}", base)
+        self.actions_done += 1
+        self._single_bright.reset()
+        marker["outcome"] = "verified"
+        return self._event({
+            **base, "event": "action", "tap": outcome.get("tap"),
+            "box": outcome.get("box"),
+            "before_count": outcome.get("before_count"),
+            "after_count": outcome.get("after_count"),
+            "verified": bool(outcome.get("executed") and
+                             outcome.get("after_count") ==
+                             (outcome.get("before_count") or 0) - 1),
+            "elapsed_ms": round((self._clock() - started) * 1000, 1),
+        })
+
     # ------------------------------------------------------------------
     # 牌河/来牌读取（供行动决策取"别家刚打出的那张"）
     # ------------------------------------------------------------------
+    def _track_hint_panel_state(self, result: dict, verdict: TurnVerdict) -> None:
+        """维护胡提示面板兜底的状态：面板连续帧计数 + 面板前 advise 快照。
+
+        快照只收「有完整建议的好读数」（status=advise 且带建议框）：它证明
+        面板出现前确实轮到我方出牌。面板帧本身（code=hint_panel）只计数、
+        绝不更新快照；任何非面板帧都把连续计数清零。
+        """
+        if verdict.code == HINT_PANEL_CODE:
+            if self._hint_panel_round != self.round.seq:
+                self._hint_panel_round = self.round.seq
+                self._hint_panel_streak = 0
+            self._hint_panel_streak += 1
+            return
+        self._hint_panel_streak = 0
+        if (result.get("status") == "advise" and result.get("suggested_boxes")
+                and result.get("hand_ids")):
+            try:
+                hand_ids = sorted(int(tile) for tile in result["hand_ids"])
+            except (TypeError, ValueError):
+                return
+            self._last_advise_read = {
+                "hand_ids": hand_ids,
+                "caishen_id": known_caishen_id(result),
+                "round_seq": self.round.seq,
+                "tick": self.tick_index,
+                "actions_done": self.actions_done,
+            }
+
+    def _hint_panel_fallback(self, result: dict, verdict: TurnVerdict,
+                             base: dict, started: float) -> dict | None:
+        """胡提示面板持续多帧时的兜底：只摸切「刚摸的牌」，其余一律等待。
+
+        触发条件（缺一不可）：面板连续 ≥ HINT_PANEL_MIN_TICKS 帧（之后每
+        HINT_PANEL_RETRY_EVERY 帧重试一次）；存在同局、未过期（期间无任何
+        已执行动作）、财神一致的面板前 advise 快照；本帧行动圆盘不可见；
+        locate_drawn_tile 能在本帧定位刚摸的牌。
+
+        摸切目标以合成 advise 结果交给 TapExecutor 正常路径（重定位+验证）。
+        注意执行器的 fresh 复核会重跑 analyze：面板未消失前必然弃权并在
+        **点击前**中止（离线夹具实测）——这类 TapAborted 只记台账、继续
+        等待，绝不能按常规路径停机；TapUnverified（点击后无法验证）则与
+        常规路径同口径立即停手。
+
+        Returns:
+            本帧的事件 dict（已落台账）；``None`` = 本帧不尝试/尝试未发出
+            点击，调用方按面板 wait 记录 idle。
+        """
+        marker: dict = {"streak": self._hint_panel_streak}
+        base["hint_panel"] = marker
+        streak = self._hint_panel_streak
+        if (streak < HINT_PANEL_MIN_TICKS
+                or (streak - HINT_PANEL_MIN_TICKS) % HINT_PANEL_RETRY_EVERY):
+            marker["outcome"] = "waiting_streak"
+            return None
+        snapshot = self._last_advise_read
+        if snapshot is None:
+            marker["outcome"] = "no_prior_advise_read"
+            return None
+        if (snapshot["round_seq"] != self.round.seq
+                or snapshot["actions_done"] != self.actions_done
+                or snapshot["caishen_id"] != known_caishen_id(result)):
+            marker["outcome"] = "prior_advise_read_stale"
+            return None
+        action_ui = (verdict.evidence or {}).get("action_ui") or {}
+        if action_ui.get("action_discs_seen"):
+            marker["outcome"] = "action_ui_visible"
+            return None
+        located = locate_drawn_tile(result, snapshot["hand_ids"])
+        if located is None:
+            marker["outcome"] = "drawn_tile_not_located"
+            return None
+        marker.update({
+            "outcome": "attempt",
+            "drawn_tile_id": located["tile_id"],
+            "box": located["box"],
+            "prior_advise_tick": snapshot["tick"],
+        })
+        synthetic = dict(result)
+        synthetic.update({
+            "status": "advise",
+            "suggestion": label_for_tile(located["tile_id"]),
+            "suggestion_id": located["tile_id"],
+            "suggested_boxes": [list(located["box"])],
+        })
+        if self.actions_done >= self.max_actions:
+            return self._stop("max_actions",
+                              f"达到 --max-actions={self.max_actions}", base)
+        if self.dry_run:
+            try:
+                plan = self._tap.plan(synthetic)
+            except TapAborted as exc:
+                marker["outcome"] = "plan_aborted"
+                marker["reason"] = str(exc)
+                return None
+            self.actions_done += 1
+            marker["outcome"] = "dry_run_plan"
+            return self._event({
+                **base, "event": "dry_run_plan",
+                "tap": [plan.x, plan.y], "box": list(plan.box),
+                "verified": None,
+                "elapsed_ms": round((self._clock() - started) * 1000, 1)})
+        expected_tile = int(located["tile_id"])
+        expected_point = ((int(located["box"][0]) + int(located["box"][2])) // 2,
+                          (int(located["box"][1]) + int(located["box"][3])) // 2)
+
+        def validate_fresh(fresh_image: np.ndarray, _original: dict) -> dict:
+            fresh_result = self._analyze_fresh_image(fresh_image, "preclick_hint")
+            settled, settled_evidence = detect_settled_screen(fresh_image)
+            signals = settled_evidence.get("settled_signals") or []
+            if settled or signals != ["central_panel"]:
+                raise TapAborted("fresh 帧不再是单信号胡提示面板")
+            fresh_guard = self._action_guard(fresh_image)
+            if fresh_guard.blocks_discard:
+                raise TapAborted("fresh 帧出现行动圆盘/未知控件，禁止摸切")
+            if known_caishen_id(fresh_result) != snapshot["caishen_id"]:
+                raise TapAborted("fresh 帧财神与面板前快照不一致")
+            fresh_located = locate_drawn_tile(fresh_result, snapshot["hand_ids"])
+            if fresh_located is None or int(fresh_located["tile_id"]) != expected_tile:
+                raise TapAborted("fresh 帧未定位到同一张刚摸牌")
+            fresh_box = fresh_located["box"]
+            fresh_point = ((int(fresh_box[0]) + int(fresh_box[2])) // 2,
+                           (int(fresh_box[1]) + int(fresh_box[3])) // 2)
+            if (abs(fresh_point[0] - expected_point[0]) > 20
+                    or abs(fresh_point[1] - expected_point[1]) > 20):
+                raise TapAborted("fresh 帧刚摸牌位置漂移，拒绝点击")
+            return self._synthetic_discard(
+                fresh_result, expected_tile, fresh_box,
+                before_count=len(snapshot["hand_ids"]))
+
+        try:
+            outcome = self._tap.execute(synthetic, fresh_validator=validate_fresh)
+        except TapPrecheckRetryExhausted as exc:
+            marker["outcome"] = "precheck_retry_exhausted"
+            return self._anomaly("hint_panel_precheck", str(exc), started, base)
+        except TapUnverified as exc:
+            return self._stop("tap_aborted",
+                              f"胡提示面板兜底点击后无法验证：{exc}", base)
+        except TapAborted as exc:
+            marker["outcome"] = "executor_aborted_pre_tap"
+            marker["reason"] = str(exc)
+            return None
+        except Exception as exc:  # noqa: BLE001 - 未预期异常与常规路径同口径停手
+            return self._stop("tap_failed", f"点击结果未知：{exc}", base)
+        self.actions_done += 1
+        after_path = None
+        try:
+            after_raw = self._shot()
+            after_path = str(self._save_frame(after_raw, "after"))
+        except Exception as exc:  # noqa: BLE001 - 台阶账不影响已验证的点击
+            after_path = f"<截图失败: {exc}>"
+        event = self._event({
+            **base, "event": "action", "after_frame": after_path,
+            "tap": outcome.get("tap"), "box": outcome.get("box"),
+            "before_count": outcome.get("before_count"),
+            "after_count": outcome.get("after_count"),
+            "verified": bool(outcome.get("executed") and outcome.get("after_count")
+                             == (outcome.get("before_count") or 0) - 1),
+            "elapsed_ms": round((self._clock() - started) * 1000, 1),
+        })
+        self._last_advise_read = None
+        self._hint_panel_streak = 0
+        if not event["verified"]:
+            self._stop("tap_unverified", "点击后手牌数量未验证，停止自动点击", base)
+        return event
+
     def _probe_round_key(self, frame_path: Path) -> tuple[bytes | None, str | None]:
         """算本帧的换局指纹；识别失败按未知处理（fail closed）。"""
         try:
             return self._round_key(frame_path)
         except Exception:  # noqa: BLE001 - 换局识别失败按未知处理
             return None, None
+
+    @staticmethod
+    def _same_round_candidate(
+        first: tuple[bytes | None, str | None] | None,
+        second: tuple[bytes | None, str | None],
+    ) -> bool:
+        if first is None:
+            return False
+        first_hud, first_caishen = first
+        second_hud, second_caishen = second
+        hud_same = ((first_hud is None and second_hud is None)
+                    or (first_hud is not None and second_hud is not None
+                        and _same_hud(first_hud, second_hud)))
+        return hud_same and first_caishen == second_caishen
+
+    def _debounce_round_signal(
+        self,
+        hud_key: bytes | None,
+        visual_caishen: str | None,
+        resolved_caishen: str | None,
+    ) -> dict:
+        """连续帧确认局身份；任何不稳定期只等待，绝不沿用旧财神点击。"""
+        if hud_key is None and visual_caishen is None:
+            self._round_identity_unknown_ticks += 1
+            self._round_candidate = None
+            self._round_candidate_ticks = 0
+            return {"state": "identity_unknown",
+                    "ticks": self._round_identity_unknown_ticks}
+        self._round_identity_unknown_ticks = 0
+
+        if (self.caishen_label and visual_caishen
+                and visual_caishen != self.caishen_label):
+            if self._manual_caishen_conflict == visual_caishen:
+                self._manual_caishen_conflict_ticks += 1
+            else:
+                self._manual_caishen_conflict = visual_caishen
+                self._manual_caishen_conflict_ticks = 1
+            return {"state": "manual_conflict",
+                    "ticks": self._manual_caishen_conflict_ticks,
+                    "expected": self.caishen_label,
+                    "observed": visual_caishen}
+        self._manual_caishen_conflict = None
+        self._manual_caishen_conflict_ticks = 0
+
+        if self.round.hud_key is None and self.round.caishen is None:
+            self._round_candidate = None
+            self._round_candidate_ticks = 0
+            return {"state": "same", "ticks": 1, "initial": True}
+        if self.round.same_round(hud_key, resolved_caishen):
+            self._round_candidate = None
+            self._round_candidate_ticks = 0
+            return {"state": "same", "ticks": 1}
+
+        candidate = (hud_key, resolved_caishen)
+        if self._same_round_candidate(self._round_candidate, candidate):
+            self._round_candidate_ticks += 1
+        else:
+            self._round_candidate = candidate
+            self._round_candidate_ticks = 1
+        state = ("round_changed" if self._round_candidate_ticks
+                 >= ROUND_CHANGE_CONFIRM_TICKS else "round_suspect")
+        return {"state": state, "ticks": self._round_candidate_ticks,
+                "caishen": resolved_caishen}
 
     def _read_discards_sequential(self, image: np.ndarray) -> Any:
         """调 ``discard_vision`` 读本帧牌河，并登记为下一帧的基线。"""
@@ -640,12 +1150,7 @@ class AutoPlayLoop:
     # ------------------------------------------------------------------
     def _claim_policy_event(self, image: np.ndarray, frame_path: Path,
                              analysis: dict | None = None) -> dict:
-        """行动行可见时跑一次 ``action_policy.decide_action``，只落证据。
-
-        默认**不点击**：``claim_auto_click=False`` 时每个动作都还要人工确认；
-        即便确认过，``TapExecutor`` 的几何白名单只放行手牌 ROI（y≥720），
-        行动圆盘在 y≈600，点击通道尚未接线，所以这里最多记一条
-        ``auto_click`` 意向，绝不发 ADB 命令。
+        """行动行可见时决策；显式启用后走独立圆盘通道并做 L3 语义验证。
 
         Args:
             image: 本帧 BGR 图（已确认 1600x900）。
@@ -681,15 +1186,76 @@ class AutoPlayLoop:
                              "ready" if decision.executable else
                              "awaiting_human_confirm")
         payload["claim_reason"] = claim_state.reason
-        if decision.executable and self.claim_auto_click:
-            payload["auto_click"] = {
-                "requested": True,
-                "executed": False,
-                "channel_ready": CLAIM_TAP_CHANNEL_READY,
-                "reason": ("点击通道未接线：TapExecutor 几何白名单只放行手牌 "
-                           "ROI（y≥720），行动圆盘在 y≈600"
-                           if not CLAIM_TAP_CHANNEL_READY else "通道已接线，待实机验证"),
-            }
+        if not (decision.executable and self.claim_auto_click):
+            return {"claim": payload}
+        payload["auto_click"] = {
+            "requested": True, "executed": False,
+            "channel_ready": CLAIM_TAP_CHANNEL_READY,
+        }
+        if not CLAIM_TAP_CHANNEL_READY:
+            payload["auto_click"]["reason"] = "行动圆盘点击通道未启用"
+            return {"claim": payload}
+
+        before = BoardState.from_hand_state(
+            hand, claim_buttons=len(claim_state.buttons), settled=False,
+            note="行动点击前同帧状态")
+        try:
+            outcome = self._tap.execute_claim(
+                decision.tap_point, action=decision.action, image=image,
+                session_dir=self.session_dir)
+        except TapAborted as exc:
+            payload["auto_click"].update({"reason": str(exc), "stage": "aborted"})
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_tap_aborted",
+                "reason": f"行动 {decision.action} 点击未通过：{exc}",
+            }}
+        except Exception as exc:  # noqa: BLE001
+            payload["auto_click"].update({"reason": str(exc), "stage": "failed"})
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_tap_failed",
+                "reason": f"行动 {decision.action} 点击结果未知：{exc}",
+            }}
+        payload["auto_click"].update({
+            "executed": bool(outcome.get("executed")),
+            "stage": outcome.get("stage"), "tap": outcome.get("tap"),
+        })
+        if self.dry_run:
+            payload["auto_click"]["semantic_verified"] = None
+            return {"claim": payload}
+
+        try:
+            after_raw = self._shot()
+            after_path = self._save_frame(after_raw, "after_claim")
+            after_image = cv2.imdecode(
+                np.frombuffer(after_raw, np.uint8), cv2.IMREAD_COLOR)
+            after_result = self._analyze(after_raw, after_path)
+            after_claims = read_claims(after_image)
+            settled, settled_evidence = detect_settled_screen(after_image)
+            after_hand = HandState.from_analysis(after_result)
+            after = BoardState.from_hand_state(
+                after_hand, claim_buttons=len(after_claims.buttons),
+                settled=settled, note="行动点击后 fresh 状态")
+            verified, verify_reason = verify_after_click(
+                before, after, decision.action)
+            payload["auto_click"].update({
+                "semantic_verified": verified,
+                "semantic_reason": verify_reason,
+                "after_frame": str(after_path),
+                "settled_evidence": settled_evidence,
+            })
+        except Exception as exc:  # noqa: BLE001
+            verified = False
+            verify_reason = f"行动点击后语义复核异常：{exc}"
+            payload["auto_click"].update({
+                "semantic_verified": False,
+                "semantic_reason": verify_reason,
+            })
+        if not verified:
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_unverified",
+                "reason": verify_reason,
+            }}
+        self.actions_done += 1
         return {"claim": payload}
 
     # ------------------------------------------------------------------
@@ -771,7 +1337,15 @@ class AutoPlayLoop:
         self.check_gates()
         began = self._clock()
         while not self.stopped:
-            self.tick()
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001 - 先落台账，再保留原异常语义
+                self._stop(
+                    "unhandled_exception",
+                    f"循环未捕获异常：{type(exc).__name__}: {exc}",
+                    {"traceback": traceback.format_exc()},
+                )
+                raise
             if self.stopped:
                 break
             if self.actions_done >= self.max_actions:

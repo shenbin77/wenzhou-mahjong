@@ -27,7 +27,7 @@ from table_state import build_table_state  # noqa: E402
 
 
 def test_claim_tap_stays_false():
-    assert CLAIM_TAP_CHANNEL_READY is False
+    assert CLAIM_TAP_CHANNEL_READY is True
 
 
 def test_decision_and_display_fact_names():
@@ -85,7 +85,7 @@ def test_observe_writes_follow_session_and_abstains(tmp_path):
     assert outcome.abstain is True
     assert outcome.event["status"] == "abstain"
     assert outcome.event["suggestion_id"] is None
-    assert outcome.event["claim_tap_channel_ready"] is False
+    assert outcome.event["claim_tap_channel_ready"] is True
     assert "table_state" in outcome.event
     assert "frame_facts" in outcome.event
     for key in DISPLAY_FACTS:
@@ -93,8 +93,8 @@ def test_observe_writes_follow_session_and_abstains(tmp_path):
 
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert rows[0]["kind"] == "session_header"
-    assert rows[0]["claim_tap_channel_ready"] is False
-    assert rows[-1]["decision"]["claim_tap_channel_ready"] is False
+    assert rows[0]["claim_tap_channel_ready"] is True
+    assert rows[-1]["decision"]["claim_tap_channel_ready"] is True
     assert rows[-1]["vision"]["status"] == "abstain"
 
 
@@ -174,7 +174,7 @@ def test_window_start_attaches_pipeline(tmp_path, monkeypatch):
     assist_window.TeaAssistWindow._attach_follow_pipeline(window)
     assert window._follow_pipeline is not None
     assert window._follow_pipeline.follow_log_path.is_file()
-    assert CLAIM_TAP_CHANNEL_READY is False
+    assert CLAIM_TAP_CHANNEL_READY is True
 
     class _State:
         status = "advise"
@@ -240,7 +240,7 @@ def test_extra_event_cannot_overwrite_safety_fields(tmp_path):
     assert outcome.event["suggestion"] != "HACKED"
     assert outcome.event["suggestion_id"] == 4
     assert outcome.event["safety"] != "opened"
-    assert outcome.event["claim_tap_channel_ready"] is False
+    assert outcome.event["claim_tap_channel_ready"] is True
     assert outcome.event["pipeline"] == "follow_pipeline/v1"
     assert outcome.event["note_from_caller"] == "ok-extra"
 

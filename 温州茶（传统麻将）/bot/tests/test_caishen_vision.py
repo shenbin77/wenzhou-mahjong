@@ -244,3 +244,38 @@ def test_match_fail_exposes_candidate_diagnostic_not_as_label():
         assert observed.label is None
         assert observed.candidate is not None
         assert observed.score < .98 or (observed.score - observed.runner_up) < .02
+
+
+# 2026-10-25 凌晨实机（房间 951441 第 2-4 局 + 新对局 014353 第 1 局）：
+# t5/bai 此前只有回放源模板，实机渲染下分数只有 0.9128/0.9322（t5 对 t4
+# 的边距仅 0.0177），被 0.98/0.02 严格门禁挡下，循环只能手动指定财神。
+# 补 live 变体模板后必须读对。裁片已目视复核：t5 为四角绿点+中心红点
+# 的五筒（不是四筒），bai 为白板；两簇裁片在源会话内逐字节一致
+# （bai 簇 629 帧、t5 簇 22 帧）。
+LIVE_SESSION_1025 = CAPTURES / "assist_sessions" / "20261025_0126_takeover" / "live" / "tea_2p"
+
+
+@pytest.mark.parametrize(("frame", "expected"), [
+    ("20261025_012647_598849_before_2b9c49.png", "t5"),
+    ("20261025_012647_548377_before_c3a80d.png", "t5"),
+    ("20261025_013635_417390_before_b65005.png", "bai"),
+    ("20261025_013635_437453_before_c71eb0.png", "bai"),
+    ("round1_5556.png", "bai"),
+])
+def test_20261025_live_variant_frames_clear_strict_thresholds(frame, expected):
+    if not (LIVE_SESSION_1025 / frame).exists():
+        pytest.skip("实战截屏样本已不在此机器上")
+    observed = detect_caishen(
+        _read(f"assist_sessions/20261025_0126_takeover/live/tea_2p/{frame}"))
+    assert observed.label == expected
+    assert observed.score >= .98
+    assert observed.score - observed.runner_up >= .02
+
+
+def test_20261025_back_to_lobby_frame_abstains():
+    frame = "settle_emulator-5556.png"
+    if not (LIVE_SESSION_1025 / frame).exists():
+        pytest.skip("实战截屏样本已不在此机器上")
+    observed = detect_caishen(
+        _read(f"assist_sessions/20261025_0126_takeover/live/tea_2p/{frame}"))
+    assert observed.label is None

@@ -555,6 +555,24 @@
       "heldout_witness_hash": "397715733283c28f3d658bcbcbe3936015a0ed936fef4d7817f920ba885fcd7c",
       "heldout_reason": "independent same-round live frame 20261024_225500_432052_b46480.png score=1.0000",
       "suggested_label": null
+    },
+    {
+      "label": "bai",
+      "file": "bai_live.png",
+      "source": "_takeover/play3_5556/frames/20261025_013635_417390_before_b65005.png",
+      "source_sha256": "fbfa30ddb0339d860293ef1e3381cb972983296241bb3b4d6c3a175f8d1bd716",
+      "asset_sha256": "fe15440d2874ca754d7eadb4c9ad842d010dbbc70fccd16b34c0fa3f2446bcbd",
+      "cluster_frames": 629,
+      "visual_check": "2026-10-25 目视复核：白板（空白牌面+红财角标）；play3 双端 631 帧中 629 帧裁片逐字节一致，跨对局 round1/now2 裁片亦一致"
+    },
+    {
+      "label": "t5",
+      "file": "t5_live.png",
+      "source": "_takeover/live_5556/frames/20261025_012647_598849_before_2b9c49.png",
+      "source_sha256": "0422686be78df3198d674788488576b8d2dc9c197aea3ac32ac3547b6977e530",
+      "asset_sha256": "95d20a23516c09f4d8761569867f221cab15c768322ce6d27ab51e8bcb55d513",
+      "cluster_frames": 22,
+      "visual_check": "2026-10-25 目视复核：五筒（四角绿点+中心红点）；live 双端 22 帧裁片逐字节一致"
     }
   ],
   "note": "Provisional visual labels; source frames retained. Entries sourced under assist_sessions/*/live are lossless ADB screenshots so real-play frames clear _MIN_SCORE without relaxing it. A label may own several templates; detection keeps the best score per label. Every label was verified by eye on an 8x crop (live entries by the operator on the table, then re-checked here) — never by cluster majority vote."

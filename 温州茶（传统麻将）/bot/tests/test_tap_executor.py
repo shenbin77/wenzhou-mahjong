@@ -148,7 +148,8 @@ def test_enabled_taps_center_of_hand_box_after_fresh_screenshot(analysis, monkey
     fake = FakeAdb([png, raise_tile(png, box), erase_tile(png, box)])
     monkeypatch.setattr(subprocess, "run", fake)
     executor = TapExecutor(enabled=True, adb_path="fake-adb",
-                           serial="emulator-test", verify_delay=0)
+                           serial="emulator-test", verify_delay=0,
+                           fresh_retry_attempts=1)
     outcome = executor.execute(analysis)
 
     assert outcome["executed"] is True and outcome["dry_run"] is False
@@ -179,10 +180,35 @@ def test_enabled_aborts_with_zero_taps_when_suggestion_missing_on_fresh_frame(
     fake = FakeAdb([fresh])
     monkeypatch.setattr(subprocess, "run", fake)
     executor = TapExecutor(enabled=True, adb_path="fake-adb",
-                           serial="emulator-test", verify_delay=0)
+                           serial="emulator-test", verify_delay=0,
+                           fresh_retry_attempts=1)
     with pytest.raises(TapAborted, match="新截图无可执行建议|新截图识牌不完整"):
         executor.execute(analysis)
     assert fake.tap_commands() == []
+
+
+def test_preclick_single_bad_frame_retries_then_executes(
+        analysis, monkeypatch, tmp_path):
+    """首帧坏读不杀循环：第二帧同建议通过后才允许发送点击。"""
+    png = frame_png()
+    box = [int(v) for v in analysis["suggested_boxes"][0]]
+    fake = FakeAdb([png, png, raise_tile(png, box), erase_tile(png, box)])
+    executor = _executor(monkeypatch, fake, tmp_path)
+    executor.fresh_retry_interval = 0
+    calls = {"count": 0}
+
+    def validate(_image, original):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TapAborted("模拟单帧坏读")
+        return dict(original)
+
+    outcome = executor.execute(analysis, fresh_validator=validate)
+    assert outcome["executed"] is True
+    assert calls["count"] == 2
+    assert len(fake.tap_commands()) == 2
+    evidence = _read_evidence(tmp_path)
+    assert [row["ok"] for row in evidence["preclick_attempts"]] == [False, True]
 
 
 def test_fresh_check_rejects_changed_hand_even_if_target_tile_is_still_present(
@@ -385,6 +411,7 @@ def test_abort_before_first_tap_dumps_only_before_frame(
     stale["hand_ids"][0] = 64 if stale["hand_ids"][0] != 64 else 63
     fake = FakeAdb([png])
     executor = _executor(monkeypatch, fake, tmp_path)
+    executor.fresh_retry_attempts = 1
     with pytest.raises(TapAborted, match="牌面、财神或建议已变化"):
         executor.execute(stale)
     assert fake.tap_commands() == []  # 零点击
@@ -398,7 +425,7 @@ def test_abort_before_first_tap_dumps_only_before_frame(
     assert data["frames"]["before"] == "before.png"
     assert data["frames"]["selected"] is None
     assert data["frames"]["after"] is None
-    assert data["outcome"] == "TapAborted"
+    assert data["outcome"] == "TapPrecheckRetryExhausted"
     assert data["after_count"] is None
 
 
@@ -672,7 +699,7 @@ def test_claim_switch_off_means_execute_claim_sends_no_commands(
     ``enabled=False`` 的 execute_claim 是只读路径——一个 adb 命令都不发。
     """
     import action_policy
-    assert action_policy.CLAIM_TAP_CHANNEL_READY is False
+    assert action_policy.CLAIM_TAP_CHANNEL_READY is True
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("开关关闭时不允许任何 adb 调用")

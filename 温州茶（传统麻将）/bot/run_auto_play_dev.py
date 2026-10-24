@@ -72,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="允许真实点击（必须与 --no-dry-run 同时使用）")
     parser.add_argument("--no-dry-run", dest="no_dry_run", action="store_true",
                         help="关闭 dry_run（必须与 --enable 同时使用）")
+    parser.add_argument(
+        "--claim-auto-click", action="store_true",
+        help="启用吃碰杠胡过执行通道（仍须 --enable + --no-dry-run，吃默认关闭）",
+    )
     parser.add_argument("--max-actions", type=int, default=20,
                         help="本次最多出牌次数（dry_run 下为最多记录的计划数）")
     parser.add_argument("--duration", type=float, default=600.0,
@@ -140,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             max_actions=args.max_actions,
             duration_s=args.duration,
             interval_s=args.interval,
+            claim_auto_click=args.claim_auto_click,
         )
     except (TypeError, ValueError) as exc:
         print(f"[FAIL] 参数不合法：{exc}")

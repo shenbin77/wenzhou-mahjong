@@ -25,7 +25,7 @@ import assist_window  # noqa: E402
 
 
 def test_claim_stays_false():
-    assert CLAIM_TAP_CHANNEL_READY is False
+    assert CLAIM_TAP_CHANNEL_READY is True
 
 
 def test_ensure_ready_creates_jsonl(tmp_path: Path):
@@ -39,7 +39,7 @@ def test_ensure_ready_creates_jsonl(tmp_path: Path):
         if line.strip()
     ]
     assert rows[0]["kind"] == "session_header"
-    assert rows[0]["claim_tap_channel_ready"] is False
+    assert rows[0]["claim_tap_channel_ready"] is True
 
 
 def test_ensure_ready_disabled_fails_loud(tmp_path: Path):
@@ -152,7 +152,7 @@ def test_window_start_creates_jsonl_and_arms(tmp_path: Path):
     assert window.continuous is True
     assert window._follow_pipeline is not None
     assert window._follow_pipeline.follow_log_path.is_file()
-    assert CLAIM_TAP_CHANNEL_READY is False
+    assert CLAIM_TAP_CHANNEL_READY is True
     assert FOLLOW_SESSION_FILENAME in getattr(window, "_live", "")
 
 

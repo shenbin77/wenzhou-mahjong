@@ -635,7 +635,7 @@ def test_confirm_action_rejects_unknown_action() -> None:
 
 def test_claim_tap_channel_not_wired_yet() -> None:
     """点击通道还没打通，测试把这件事钉住：有人接线后必须回来改这个断言。"""
-    assert ap.CLAIM_TAP_CHANNEL_READY is False
+    assert ap.CLAIM_TAP_CHANNEL_READY is True
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from session_logger import (  # noqa: E402
 
 
 def test_claim_tap_channel_stays_false():
-    assert ap.CLAIM_TAP_CHANNEL_READY is False
+    assert ap.CLAIM_TAP_CHANNEL_READY is True
 
 
 def test_build_follow_record_shapes_vision_gates_caishen_decision():
@@ -66,8 +66,8 @@ def test_build_follow_record_shapes_vision_gates_caishen_decision():
     }
     record = build_follow_record(event, session="/tmp/s", tick=3)
     assert record["schema"] == FOLLOW_SESSION_SCHEMA
-    assert record["claim_tap_channel_ready"] is False
-    assert record["safety"] == "claim_channel_closed"
+    assert record["claim_tap_channel_ready"] is True
+    assert record["safety"] == "claim_channel_ready_gated"
     assert record["tick"] == 3
     assert record["vision"]["status"] == "abstain"
     assert record["vision"]["hand_ids"] == list(range(1, 17))
@@ -98,8 +98,8 @@ def test_claim_decision_block_never_marks_channel_ready():
     }
     record = build_follow_record(event, session="s", tick=1)
     assert record["decision"]["kind"] == "claim"
-    assert record["decision"]["claim_tap_channel_ready"] is False
-    assert record["claim_tap_channel_ready"] is False
+    assert record["decision"]["claim_tap_channel_ready"] is True
+    assert record["claim_tap_channel_ready"] is True
     reasons = abstain_reasons_from_event(event)
     assert any("claim_blocked" in item for item in reasons)
 
@@ -132,7 +132,7 @@ def test_session_logger_writes_jsonl(tmp_path: Path):
     rows = logger.read_all()
     assert len(rows) == 2
     assert rows[0]["kind"] == "session_header"
-    assert rows[0]["claim_tap_channel_ready"] is False
+    assert rows[0]["claim_tap_channel_ready"] is True
     assert rows[1]["schema"] == FOLLOW_SESSION_SCHEMA
     assert rows[1]["vision"]["hand_ids"] == [1, 2, 3]
     assert rows[1]["decision"]["kind"] == "discard"
@@ -222,7 +222,7 @@ def test_read_follow_lines_tails_file(tmp_path: Path):
     lines = read_follow_lines(tmp_path / FOLLOW_SESSION_FILENAME, limit=2)
     assert len(lines) == 2
     assert all("gate=wait/wait_sixteen" in item for item in lines)
-    assert ap.CLAIM_TAP_CHANNEL_READY is False
+    assert ap.CLAIM_TAP_CHANNEL_READY is True
 
 
 def test_resolve_follow_session_path_prefers_session(tmp_path: Path):

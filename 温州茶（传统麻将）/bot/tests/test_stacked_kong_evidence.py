@@ -21,7 +21,7 @@ SESSION = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261024_005400"
            / "live" / "tea_2p")
 
 
-def test_west_kong_remains_visible_evidence_when_advice_abstains(tmp_path):
+def test_west_kong_remains_visible_evidence_while_waiting_for_draw(tmp_path):
     frame = SESSION / "20261024_005700_684588_0ae39a.png"
     if not frame.is_file():
         pytest.skip("西杠实战帧缺失")
@@ -29,7 +29,8 @@ def test_west_kong_remains_visible_evidence_when_advice_abstains(tmp_path):
         result = analyze_snapshot(
             frame, caishen_label="s8", confirmed_two_player=True,
             log_dir=tmp_path / "logs")
-    assert result["status"] == "abstain"
+    assert result["status"] == "wait"
+    assert "等待摸牌" in result["reason"]
     assert not result.get("suggested_boxes")
     assert result["stacked_kongs"][0]["label"] == "xi"
     assert result["stacked_kongs"][0]["logical_count"] == 4

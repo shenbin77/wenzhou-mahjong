@@ -79,7 +79,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 import cv2
 import numpy as np
@@ -179,6 +179,10 @@ class TapAborted(RuntimeError):
     """安全中止基类：一旦中止就停止，绝不重试。"""
 
 
+class TapPrecheckRetryExhausted(TapAborted):
+    """点击前连续重拍仍无法得到稳定证据；保证尚未发送任何点击。"""
+
+
 class TapRejected(TapAborted):
     """目标坐标没有通过几何白名单（疑似充值/按钮/弹窗区域）。"""
 
@@ -247,6 +251,8 @@ class _TapEvidence:
     raised_candidates: dict | None = None
     # 第一次点击后的手牌复核（审计 B 的闸门结果）：只写盘，不参与判定。
     selected_gate: dict | None = None
+    # 点击前完整复核/专用锁定器的每次尝试。只记录，不参与判定。
+    preclick_attempts: list[dict] = field(default_factory=list)
     # 行动行点击（execute_claim）专用：动作名、期望/实测圆盘种类、点击前后
     # 的圆盘列表。**只写盘，不参与任何判定**。
     claim: dict | None = None
@@ -338,6 +344,7 @@ class _TapEvidence:
                 "hand_boxes_after": self.hand_boxes_after,
                 "raised_candidates": self.raised_candidates,
                 "selected_gate": self.selected_gate,
+                "preclick_attempts": self.preclick_attempts,
                 "claim": self.claim,
                 "frames": written,
                 "outcome": outcome,
@@ -385,6 +392,10 @@ class TapExecutor:
         template_dir: str | Path | None = None,
         select_delay: float = 0.35,
         verify_delay: float = 1.5,
+        settle_deadline: float = 3.0,
+        settle_interval: float = 0.4,
+        fresh_retry_attempts: int = 3,
+        fresh_retry_interval: float = 0.4,
         screenshot_timeout: float = 30.0,
         session_dir: str | Path | None = None,
     ) -> None:
@@ -411,6 +422,10 @@ class TapExecutor:
         self.template_dir = Path(template_dir) if template_dir else Path(_TEMPLATE_DIR)
         self.select_delay = max(0.0, float(select_delay))
         self.verify_delay = max(0.0, float(verify_delay))
+        self.settle_deadline = max(0.0, float(settle_deadline))
+        self.settle_interval = max(0.0, float(settle_interval))
+        self.fresh_retry_attempts = max(1, int(fresh_retry_attempts))
+        self.fresh_retry_interval = max(0.0, float(fresh_retry_interval))
         self.screenshot_timeout = float(screenshot_timeout)
         # 是否由调用方显式指定过落盘目录：行动行入口拿它挡住缺省目录。
         # 直接写 _session_dir，绕开 setter —— 缺省分支不算"显式指定"。
@@ -855,7 +870,12 @@ class TapExecutor:
     # ------------------------------------------------------------------
     # 执行入口
     # ------------------------------------------------------------------
-    def execute(self, analysis: dict) -> dict:
+    def execute(
+        self,
+        analysis: dict,
+        *,
+        fresh_validator: Callable[[np.ndarray, dict], dict] | None = None,
+    ) -> dict:
         """Run one safety-gated tap cycle and return a machine-readable outcome.
 
         dry_run（enabled=False）：只返回坐标，零 adb 调用。
@@ -878,17 +898,16 @@ class TapExecutor:
         try:
             self._require_game_foreground()
             fresh = self._screenshot()
-            evidence.before = fresh
-            action_guard = detect_action_ui(fresh)
-            evidence.action_guard_before = _action_guard_record(action_guard)
-            if action_guard.blocks_discard:
-                raise TapAborted(
-                    f"点击前{action_guard.reason}；框={list(action_guard.boxes)}")
-            fresh_analysis = self._reanalyze_fresh(fresh, analysis)
+            fresh, fresh_analysis = self._validate_fresh_with_retry(
+                fresh, analysis, evidence, fresh_validator=fresh_validator)
             located = self._locate_suggested_tile(
                 fresh, tap_plan.tile_id, fresh_analysis["suggested_boxes"][0],
                 caishen_label=fresh_analysis.get("caishen"),
+                require_complete=not bool(fresh_analysis.get("_locked_tile")),
             )
+            locked_before = fresh_analysis.get("_locked_before_count")
+            if locked_before is not None:
+                located["before_count"] = int(locked_before)
             x, y = located["x"], located["y"]
             self.validate_target((x, y), located["concealed_boxes"], fresh.shape)
             before = located["before_count"]
@@ -916,8 +935,20 @@ class TapExecutor:
             # 再点第二下（会点到空牌位或别的控件）。这里多跑一次 count_tiles、
             # 拉长两击间隔是**有意**的安全代价，不再沿用"诊断推迟到点击链
             # 结束"的旧约定（_fill_selected_diagnostics 只剩失败路径兜底）。
+            # 落定修正（2026-10-25 实机三次误杀）：第一击已出牌时，
+            # selected 帧（第一击后 select_delay）正卡在出牌动画/手牌
+            # 重排中，单帧计数少数 2 张被误判成“状态异常”。先进
+            # _await_settled_hand 等计数落定再过闸；未落定一律
+            # fail-closed，绝不发第二击。
+            settled_image, count_samples, settled = self._await_settled_hand(
+                selected_image, before)
+            if not settled:
+                raise TapUnverified(
+                    f"第一次点击后手牌计数在 {self.settle_deadline:.1f}s 内"
+                    f"未落定（样本 {count_samples}），状态未知，禁止第二击")
             gate = self._selected_hand_gate(
-                selected_image, located["box"], before)
+                settled_image, located["box"], before)
+            gate["count_samples"] = count_samples
             evidence.selected_gate = gate
             evidence.hand_boxes_selected = gate["boxes"]
             evidence.raised_candidates = self._gate_raised_record(gate)
@@ -975,6 +1006,55 @@ class TapExecutor:
         evidence.dump("verified", outcome["reason"])
         return outcome
 
+    def _validate_fresh_with_retry(
+        self,
+        first_image: np.ndarray,
+        original: dict,
+        evidence: "_TapEvidence",
+        *,
+        fresh_validator: Callable[[np.ndarray, dict], dict] | None = None,
+    ) -> tuple[np.ndarray, dict]:
+        """点击前最多重拍三帧；只有同一建议稳定通过才继续。
+
+        失败发生在任何 ``input tap`` 之前。行动圆盘/未知弹窗属于硬阻断，
+        不重试；仅识牌、编码、建议一致性这类瞬时失败进入有界重拍。
+        """
+        image = first_image
+        last: Exception | None = None
+        for attempt in range(1, self.fresh_retry_attempts + 1):
+            evidence.before = image
+            guard = detect_action_ui(image)
+            evidence.action_guard_before = _action_guard_record(guard)
+            if guard.blocks_discard:
+                raise TapAborted(
+                    f"点击前{guard.reason}；框={list(guard.boxes)}")
+            try:
+                current = (fresh_validator(image, original)
+                           if fresh_validator is not None
+                           else self._reanalyze_fresh(image, original))
+                if not isinstance(current, dict):
+                    raise TapAborted("点击前复核未返回结构化结果")
+                evidence.preclick_attempts.append({
+                    "attempt": attempt, "ok": True,
+                    "status": current.get("status"),
+                    "suggestion_id": current.get("suggestion_id"),
+                })
+                return image, current
+            except TapAborted as exc:
+                last = exc
+                evidence.preclick_attempts.append({
+                    "attempt": attempt, "ok": False,
+                    "error": str(exc)[:500],
+                })
+                if attempt >= self.fresh_retry_attempts:
+                    break
+                if self.fresh_retry_interval:
+                    time.sleep(self.fresh_retry_interval)
+                self._require_game_foreground()
+                image = self._screenshot()
+        raise TapPrecheckRetryExhausted(
+            f"点击前连续 {self.fresh_retry_attempts} 帧复核失败，未发送点击：{last}")
+
     def _fill_selected_diagnostics(self, evidence: "_TapEvidence") -> None:
         """把 selected 帧的抬牌诊断补进证据（只剩失败路径兜底）。
 
@@ -989,6 +1069,55 @@ class TapExecutor:
         evidence.hand_boxes_selected = [
             item["box"] for item in
             (evidence.raised_candidates.get("boxes") or [])]
+
+    def _await_settled_hand(
+        self,
+        first_image: np.ndarray,
+        before_count: int,
+    ) -> tuple[np.ndarray, list, bool]:
+        """第一击后等手牌计数落定，返回 ``(落定帧, 计数样本, 是否落定)``。
+
+        实机三次误杀（2026-10-25）证明：第一击真正出牌时，出牌动画与手牌
+        重排未落定的帧上 ``count_tiles`` 会少数 2 张（11→9 / 14→12 /
+        17→15），拿单帧计数直接判「状态异常」是把动画当成了事故。所以进
+        :meth:`_selected_hand_gate` 之前先等计数落定：
+
+        * 首帧计数已是决定性读数（``== before_count`` 或
+          ``== before_count - 1``）时直接采用首帧、**不多截屏**——与审计 B
+          的原时序完全一致，落定轮询只在首帧含糊时才启动；
+        * 首帧含糊（其它任何值，或数不出来）→ 每隔
+          :attr:`settle_interval` 重截一帧计数，直到**连续两次计数一致**
+          （落定）或 :attr:`settle_deadline` 到期；
+        * 到期仍未落定 → ``settled=False``，调用方 fail-closed 中止，
+          绝不拿未落定的帧去判第二击。
+
+        样本序列（含首帧）原样返回，随闸门结果写进证据供复核。
+        """
+        vision = self._make_vision()
+        samples: list[int | None] = []
+
+        def _count(image) -> int | None:
+            try:
+                count, _boxes = vision.count_tiles(image)
+                return int(count)
+            except Exception:  # noqa: BLE001 — 数不出来记 None，不外抛
+                return None
+
+        first = _count(first_image)
+        samples.append(first)
+        if first is not None and first in (before_count, before_count - 1):
+            return first_image, samples, True
+        image = first_image
+        deadline = time.monotonic() + self.settle_deadline
+        while time.monotonic() < deadline:
+            if self.settle_interval > 0:
+                time.sleep(self.settle_interval)
+            image = self._screenshot()
+            current = _count(image)
+            samples.append(current)
+            if current is not None and current == samples[-2]:
+                return image, samples, True
+        return image, samples, False
 
     def _selected_hand_gate(
         self,
@@ -1188,6 +1317,7 @@ class TapExecutor:
         reference_box,
         *,
         caishen_label: str | None,
+        require_complete: bool = True,
     ) -> dict:
         """Re-identify the suggested tile on a FRESH frame by face, not pixels.
 
@@ -1203,7 +1333,7 @@ class TapExecutor:
             vision.recognize_hand(image, caishen_label=label)
         except (ValueError, RuntimeError) as exc:
             raise TapAborted(f"新截图识别失败，中止点击: {exc}") from exc
-        if not vision.last_complete:
+        if require_complete and not vision.last_complete:
             raise TapAborted("新截图识牌不完整，中止点击")
         concealed = [item for item in vision.diagnostics
                      if item.get("region") == "concealed"]

@@ -15,7 +15,7 @@ from assist_hud import (
 
 
 def test_claim_stays_false():
-    assert CLAIM_TAP_CHANNEL_READY is False
+    assert CLAIM_TAP_CHANNEL_READY is True
 
 
 def test_format_wall_cards_unknown_and_value():

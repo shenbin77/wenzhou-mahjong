@@ -40,6 +40,7 @@ from auto_play_loop import (  # noqa: E402
     hud_fingerprint,
 )
 from action_guard import ActionGuardResult  # noqa: E402
+from action_policy import ACTION_PASS, ActionDecision  # noqa: E402
 from harvest_tea import EXPECTED_PACKAGE  # noqa: E402
 from tap_executor import TapPlan, TapRejected  # noqa: E402
 
@@ -185,6 +186,7 @@ class FakeTap:
         self.execute_error = execute_error
         self.plan_calls: list[dict] = []
         self.execute_calls: list[dict] = []
+        self.execute_claim_calls: list[dict] = []
 
     def plan(self, analysis):
         self.plan_calls.append(analysis)
@@ -192,11 +194,16 @@ class FakeTap:
             raise self.plan_error
         return self.plan_result
 
-    def execute(self, analysis):
+    def execute(self, analysis, **_kwargs):
         self.execute_calls.append(analysis)
         if self.execute_error is not None:
             raise self.execute_error
         return dict(self.execute_result)
+
+    def execute_claim(self, point, **kwargs):
+        self.execute_claim_calls.append({"point": point, **kwargs})
+        return {"executed": True, "dry_run": False, "stage": "clicked",
+                "tap": list(point), "ui_responded": True}
 
 
 def increasing_clock(step: float = 0.01):
@@ -520,6 +527,21 @@ def test_check_gates_rejects_launcher_and_missing_adb(tmp_path):
     assert report["adb_exists"] is True
 
 
+def test_run_ledgers_unhandled_exception_before_reraising(tmp_path, monkeypatch):
+    loop, *_ = make_loop(tmp_path, enabled=False)
+
+    def explode():
+        raise RuntimeError("boom-for-ledger")
+
+    monkeypatch.setattr(loop, "tick", explode)
+    with pytest.raises(RuntimeError, match="boom-for-ledger"):
+        loop.run()
+    stop = events_of(loop, "stop")[-1]
+    assert stop["gate"] == "unhandled_exception"
+    assert "RuntimeError: boom-for-ledger" in stop["traceback"]
+    assert stop["device_serial"] == "emulator-test"
+
+
 # ----------------------------------------------------------------------
 # 6. 换局重置
 # ----------------------------------------------------------------------
@@ -527,12 +549,16 @@ def test_hud_change_resets_round_state(tmp_path):
     loop, _shot, _analyzer, _tap, _ = make_loop(
         tmp_path, enabled=False,
         analyses=[advise(status="wait", suggested_boxes=[])],
-        hud=[(HUD_A, None), (HUD_B, None)])
+        hud=[(HUD_A, None), (HUD_B, None), (HUD_B, None)])
 
     assert loop.tick()["event"] == "idle"
     assert loop.round.hud_key == HUD_A
     assert loop.round.seq == 1                 # 会话第一局从 1 起
 
+    suspect = loop.tick()
+    assert suspect["event"] == "idle"
+    assert suspect["round_signal"]["state"] == "round_suspect"
+    assert loop.round.hud_key == HUD_A
     assert loop.tick()["event"] == "idle"
     assert loop.round.hud_key == HUD_B
     assert loop.round.seq == 2
@@ -542,9 +568,11 @@ def test_hud_change_resets_round_state(tmp_path):
 
 def test_hud_change_with_advice_skips_the_change_frame(tmp_path):
     loop, _shot, _analyzer, tap, _ = make_loop(
-        tmp_path, enabled=True, hud=[(HUD_A, None), (HUD_A, None), (HUD_B, None)])
+        tmp_path, enabled=True,
+        hud=[(HUD_A, None), (HUD_A, None), (HUD_B, None), (HUD_B, None)])
     settle(loop)
     assert loop.tick()["event"] == "action"
+    assert loop.tick()["event"] == "idle"
     assert loop.tick()["event"] == "idle"
     assert loop.round.seq == 2
     assert len(tap.execute_calls) == 1
@@ -554,9 +582,10 @@ def test_hud_change_with_advice_skips_the_change_frame(tmp_path):
 def test_manual_caishen_round_change_requires_new_confirmation(tmp_path):
     loop, _shot, _analyzer, tap, _ = make_loop(
         tmp_path, enabled=True, caishen_label="w1",
-        hud=[(HUD_A, None), (HUD_A, None), (HUD_B, None)])
+        hud=[(HUD_A, None), (HUD_A, None), (HUD_B, None), (HUD_B, None)])
     settle(loop)
     assert loop.tick()["event"] == "action"
+    assert loop.tick()["event"] == "idle"
     event = loop.tick()
     assert event["event"] == "stop"
     assert event["gate"] == "gate_manual_caishen"
@@ -565,16 +594,20 @@ def test_manual_caishen_round_change_requires_new_confirmation(tmp_path):
 
 def test_unknown_round_identity_refuses_real_tap(tmp_path):
     loop, _shot, _analyzer, tap, _ = make_loop(
-        tmp_path, enabled=True, hud=[(None, None)])
+        tmp_path, enabled=True, hud=[(None, None), (None, None), (None, None)])
+    assert loop.tick()["event"] == "idle"
+    assert loop.tick()["event"] == "idle"
     event = loop.tick()
     assert event["event"] == "stop"
     assert event["gate"] == "gate_round_identity"
     assert tap.execute_calls == []
 
 
-def test_manual_caishen_conflict_on_first_frame_stops_before_tap(tmp_path):
+def test_manual_caishen_conflict_requires_two_frames_before_stop(tmp_path):
     loop, _shot, _analyzer, tap, _ = make_loop(
-        tmp_path, enabled=True, caishen_label="s1", hud=[(None, "t1")])
+        tmp_path, enabled=True, caishen_label="s1",
+        hud=[(None, "t1"), (None, "t1")])
+    assert loop.tick()["event"] == "idle"
     event = loop.tick()
     assert event["event"] == "stop"
     assert event["gate"] == "gate_manual_caishen"
@@ -604,13 +637,15 @@ def test_default_round_key_uses_visible_caishen_with_occluded_hud(tmp_path):
 def test_caishen_change_resets_round_state(tmp_path):
     loop, _shot, _analyzer, _tap, _ = make_loop(
         tmp_path, enabled=False,
-        analyses=[advise(caishen="w1"), advise(caishen="t9")],
+        analyses=[advise(caishen="w1"), advise(caishen="t9"),
+                  advise(caishen="t9")],
         hud=[(HUD_A, None)])
 
     loop.tick()
     assert loop.round.caishen == "w1"
     assert loop.round.seq == 1                   # 首个 advise 周期即 1
 
+    assert loop.tick()["round_signal"]["state"] == "round_suspect"
     loop.tick()
     assert loop.round.caishen == "t9"
     assert loop.round.seq == 2
@@ -1112,8 +1147,8 @@ def test_claim_row_without_incoming_tile_stays_blocked(tmp_path):
     assert tap.execute_calls == []
 
 
-def test_claim_auto_click_switch_does_not_tap_before_channel_is_wired(tmp_path):
-    """``claim_auto_click=True`` 也不许发点击：通道还没接线。"""
+def test_claim_auto_click_abstains_when_template_gate_has_no_glyph(tmp_path):
+    """通道已接线，但合成纯色圆盘没有字形模板证据，仍须零点击。"""
     loop, _shot, _analyzer, tap, _ = make_loop(
         tmp_path, enabled=True, frames=[action_row_frame()],
         action_guard=CLAIM_GUARD, claim_auto_click=True)
@@ -1124,6 +1159,37 @@ def test_claim_auto_click_switch_does_not_tap_before_channel_is_wired(tmp_path):
     assert event["claim"]["status"] in ("blocked", "awaiting_human_confirm", "abstain")
     assert event["claim"].get("auto_click") is None
     assert tap.execute_calls == [] and tap.plan_calls == []
+
+
+def test_claim_auto_click_executes_and_l3_verifies_pass(tmp_path, monkeypatch):
+    """循环接线回归：可执行决策 → execute_claim → fresh L3 语义验证。"""
+    import auto_play_loop as apl
+
+    def decide_pass(state, _hand, _config, image=None):
+        button = next(button for button in state.buttons if button.kind == "pass")
+        return ActionDecision(
+            action=ACTION_PASS, confidence=1.0,
+            l1_evidence={"template_status": "matched"},
+            l2_reason="测试：安全过", needs_human_confirm=False,
+            button=button, tap_point=button.center,
+        )
+
+    monkeypatch.setattr(apl, "decide_action", decide_pass)
+    tap = FakeTap()
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True,
+        frames=[action_row_frame(), make_frame()],
+        analyses=[CLAIM_HAND_ANALYSIS, CLAIM_HAND_ANALYSIS],
+        action_guard=CLAIM_GUARD, claim_auto_click=True, tap=tap)
+
+    event = loop.tick()
+
+    assert event["event"] == "idle"
+    assert event["claim"]["auto_click"]["executed"] is True
+    assert event["claim"]["auto_click"]["semantic_verified"] is True
+    assert len(tap.execute_claim_calls) == 1
+    assert tap.execute_claim_calls[0]["action"] == ACTION_PASS
+    assert loop.actions_done == 1
 
 
 def test_claim_row_uses_discard_vision_incoming_tile(tmp_path):
@@ -1261,10 +1327,10 @@ def test_round_change_frame_never_feeds_discards_to_l2(tmp_path):
     assert event["claim"]["tap_point"] is None
     assert tap.execute_calls == []
 
-def test_follow_session_jsonl_dual_writes_without_claim_channel(tmp_path):
-    """Structured follow_session.jsonl mirrors actions.jsonl; CLAIM stays False."""
+def test_follow_session_jsonl_dual_writes_with_claim_channel_ready(tmp_path):
+    """Structured follow_session.jsonl mirrors actions.jsonl and records channel state."""
     import action_policy as ap
-    assert ap.CLAIM_TAP_CHANNEL_READY is False
+    assert ap.CLAIM_TAP_CHANNEL_READY is True
     loop, _shot, _analyzer, tap, _ = make_loop(
         tmp_path,
         analyses=[advise(caishen="w1"), advise(caishen="w1")],
@@ -1281,13 +1347,13 @@ def test_follow_session_jsonl_dual_writes_without_claim_channel(tmp_path):
         if line.strip()
     ]
     assert rows[0].get("kind") == "session_header"
-    assert rows[0]["claim_tap_channel_ready"] is False
+    assert rows[0]["claim_tap_channel_ready"] is True
     body = [
         row for row in rows
         if row.get("schema") == "follow_session/v1" and row.get("kind") != "session_header"
     ]
     assert body, (first, second, rows)
     for row in body:
-        assert row["claim_tap_channel_ready"] is False
+        assert row["claim_tap_channel_ready"] is True
         assert "vision" in row and "gates" in row and "caishen" in row and "decision" in row
 

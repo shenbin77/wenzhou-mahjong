@@ -26,7 +26,7 @@ from follow_pipeline import DISPLAY_FACTS, FollowPipeline  # noqa: E402
 
 
 def test_claim_stays_false():
-    assert CLAIM_TAP_CHANNEL_READY is False
+    assert CLAIM_TAP_CHANNEL_READY is True
 
 
 def test_display_facts_include_new_keys():
@@ -210,7 +210,7 @@ def test_pipeline_observe_writes_vision_snapshot(tmp_path):
         turn_actionable=True,
     )
     assert outcome.abstain is False
-    assert outcome.event["claim_tap_channel_ready"] is False
+    assert outcome.event["claim_tap_channel_ready"] is True
     assert "vision_snapshot" in outcome.event
     snap = outcome.event["vision_snapshot"]
     assert snap["read_only"] is True

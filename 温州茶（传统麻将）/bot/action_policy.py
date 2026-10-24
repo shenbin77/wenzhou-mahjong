@@ -20,7 +20,9 @@
   若引擎判定只有一种可能，就认那一种；多于一种仍然弃权。
 * **L3 点击后状态迁移**——:func:`verify_after_click` 校验暗手张数、副露组数、
   按钮消失、胡牌进入结算画面、倒计时转移。任一不符返回 ``False`` 与原因，
-  调用方必须立即停机并落证据。
+  调用方必须立即停机并落证据。按钮消失必须**实测为 0**：圆盘数量读不到
+  （``None``）按证据不足判失败（fail closed）；吃的校验另带候选面板残留
+  否决（:attr:`BoardState.selection_panel` 测得仍在画面上即判吃未完成）。
 
 fail-closed
 -----------
@@ -52,11 +54,13 @@ confirmed_actions)``，即默认任何动作都需要人工确认。确认一个
     或任何不在 :data:`CLAIMABLE_INCOMING_SOURCES` 里的字符串，一律不许
     吃/碰/杠/胡——行动行有时是在自家出牌之后刷出来的，没有这道闸就会拿
     自己的弃牌去碰。归属未标注（``None``）时不拦，只用来牌本身判定。
-* 吃会弹出二次选择面板（面板里有 ``取消``），本版未接线，
-  ``config.chi_enabled`` 默认 ``False``。
-* ``tap_executor`` 的几何白名单只放行手牌 ROI（y ≥ 720），行动圆盘在 y≈600，
-  因此**点击通道尚未打通**：自动点击开关打开后本模块会给出
-  ``tap_point``，实际点击仍需 tap_executor 侧接线（见 :data:`CLAIM_TAP_CHANNEL_READY`）。
+* 吃会弹出二次选择面板（面板里有 ``取消``）。面板选组的纯决策已经就绪
+  （:func:`choose_chi_panel_option`：不劣化向听才选、同分取保留搭子多者，
+  证据不足弃权），但循环侧「点吃圆盘 → 等面板 → 点选组」的连点编排尚未
+  集成，``config.chi_enabled`` 默认仍为 ``False``。
+* 行动圆盘已接入 ``TapExecutor.execute_claim`` 的独立几何白名单，并由
+  :data:`CLAIM_TAP_CHANNEL_READY` 标记。它不放宽普通出牌的手牌 ROI；调用方
+  必须显式打开自动总闸，并在点击后完成 L3 语义验证。
 """
 
 from __future__ import annotations
@@ -101,15 +105,19 @@ __all__ = [
     "ActionPolicyConfig",
     "BLACKLISTED_LABELS",
     "BoardState",
+    "ChiPanelChoice",
     "CLAIM_TAP_CHANNEL_READY",
     "COST_BUTTONS",
     "CLAIMABLE_INCOMING_SOURCES",
     "HandState",
     "INCOMING_SOURCE_OPPONENT",
     "INCOMING_SOURCE_SELF",
+    "RECOMMENDED_CONFIRMED_ACTIONS",
+    "RECOMMENDED_CONFIRMED_ACTIONS_WITH_CHI",
     "TEMPLATE_MARGIN_MIN",
     "TEMPLATE_TOP1_MIN",
     "blacklist_hit",
+    "choose_chi_panel_option",
     "confirm_action",
     "decide_action",
     "engine_available",
@@ -120,7 +128,10 @@ __all__ = [
     "never_tap",
     "read_and_decide",
     "read_sparkle_sides",
+    "recommended_runner_config",
     "resolve_incoming",
+    "validate_runner_config",
+    "verified_claim_templates",
     "verify_after_click",
 ]
 
@@ -206,9 +217,10 @@ BLACKLISTED_LABELS: frozenset[str] = frozenset(COST_BUTTONS) | frozenset(NEVER_T
 #: "尚未实测"，此时黑名单只按标签（模板名/调用方传入的 label）生效。
 DEFAULT_FORBIDDEN_BOXES: tuple[tuple[int, int, int, int], ...] = ()
 
-#: 点击通道是否打通。``tap_executor`` 的几何白名单只放行手牌 ROI（y≥720），
-#: 行动圆盘在 y≈600，所以当前为 False：本模块只给决策与 tap_point，不点击。
-CLAIM_TAP_CHANNEL_READY: bool = False
+#: 点击通道是否打通。行动圆盘使用 ``TapExecutor.execute_claim`` 的独立
+#: y∈[560,660] 白名单；调用方仍必须显式打开 auto-click、通过模板/L2 门禁，
+#: 并在点击后调用 :func:`verify_after_click` 做 L3 语义验证。
+CLAIM_TAP_CHANNEL_READY: bool = True
 
 
 def never_tap(label: str | None) -> bool:
@@ -259,6 +271,19 @@ def blacklist_hit(
 #: 模板目录。当前目录不存在（还没有碰/吃/杠/胡的字形样本），此时模板层
 #: 报 ``no_templates`` 而不是猜。
 CLAIM_TEMPLATE_DIR: Path = Path(__file__).resolve().parent / "templates" / "claim"
+# 已有的原生 ADB 行动按钮裁图。它们比圆盘连通域略大，所以 runner 只取
+# 中央 35% 字形作为模板；该比例已在两张原生实战帧上逐按钮回放验证：
+# hu/kong/peng/pass/chi top1 均 >= .977，次名间隔均远大于 .08。
+VERIFIED_CLAIM_UI_DIR: Path = (
+    Path(__file__).resolve().parent.parent / "采集" / "templates" / "ui")
+VERIFIED_CLAIM_UI_FILES: Mapping[str, str] = {
+    ACTION_CHI: "btn_chi.png",
+    ACTION_PENG: "btn_peng.png",
+    ACTION_KONG: "btn_gang.png",
+    ACTION_HU: "btn_hu.png",
+    ACTION_PASS: "btn_guo.png",
+}
+VERIFIED_CLAIM_INNER_RATIO: float = 0.35
 
 TEMPLATE_TOP1_MIN: float = 0.94
 TEMPLATE_MARGIN_MIN: float = 0.08
@@ -312,6 +337,23 @@ def load_claim_templates(
                 loaded[str(name)] = array.astype(np.uint8)
         return loaded
     return {name: image for name, image in _default_templates()}
+
+
+@lru_cache(maxsize=1)
+def verified_claim_templates() -> dict[str, np.ndarray]:
+    """从既有原生按钮样本派生中央字形模板；缺任一文件就不返回半套。"""
+    found: dict[str, np.ndarray] = {}
+    for action, filename in VERIFIED_CLAIM_UI_FILES.items():
+        image = _imread_gray(VERIFIED_CLAIM_UI_DIR / filename)
+        if image is None:
+            return {}
+        height, width = image.shape[:2]
+        crop_w = max(8, int(width * VERIFIED_CLAIM_INNER_RATIO))
+        crop_h = max(8, int(height * VERIFIED_CLAIM_INNER_RATIO))
+        x0 = (width - crop_w) // 2
+        y0 = (height - crop_h) // 2
+        found[action] = image[y0:y0 + crop_h, x0:x0 + crop_w].copy()
+    return found
 
 
 def match_button_glyph(
@@ -860,6 +902,10 @@ class BoardState:
         claim_buttons: 画面上行动圆盘的数量（``claim_vision`` 口径）。
         settled: 是否进入结算画面。
         turn_owner: 倒计时归谁：``"me"`` / ``"opponent"``。
+        selection_panel: 吃的候选选择面板是否还在画面上。只用于吃的 L3
+            否决：测得 ``True`` 即判吃未完成；``None``（不可测）不单独
+            否决，吃改由圆盘实测为 0 + 副露 +1 组 + 暗手 −2 三项正证据
+            判定（与本类「不可测不参与判定」的既有契约一致）。
         note: 备注，写进台账。
     """
 
@@ -868,6 +914,7 @@ class BoardState:
     claim_buttons: int | None = None
     settled: bool | None = None
     turn_owner: str | None = None
+    selection_panel: bool | None = None
     note: str = ""
 
     @property
@@ -895,6 +942,7 @@ class BoardState:
         claim_buttons: int | None = None,
         settled: bool | None = None,
         turn_owner: str | None = None,
+        selection_panel: bool | None = None,
         note: str = "",
     ) -> "BoardState":
         """把手牌状态包装成 L3 需要的盘面快照。"""
@@ -904,6 +952,7 @@ class BoardState:
             claim_buttons=claim_buttons,
             settled=settled,
             turn_owner=turn_owner,
+            selection_panel=selection_panel,
             note=note,
         )
 
@@ -995,7 +1044,9 @@ class ActionPolicyConfig:
         caishen_substitutes_for_claim: 财神是否可替代吃碰杠的实体牌；
             默认 ``False``（未实测，按不替代处理＝少碰也不误碰）。
         chi_enabled: 是否启用"吃"；默认 ``False``——吃会弹二次选择面板
-            （面板含 ``取消``），本版未接线。
+            （面板含 ``取消``），面板选组纯函数已就绪
+            （:func:`choose_chi_panel_option`），循环连点编排未集成前
+            默认关闭。
         chi_player_counts: 允许吃的人数集合；默认 ``{4}``（2 人局无上家）。
         allow_pass_without_claim: 只有"过"而没有金/红盘时是否出手；
             默认 ``False``（与已验证口径"过从不单独出现"不符，弃权）。
@@ -1038,6 +1089,73 @@ def confirm_action(config: ActionPolicyConfig, action: str) -> ActionPolicyConfi
         raise ValueError(f"未知动作: {action!r}")
     return replace(config,
                    confirmed_actions=frozenset(set(config.confirmed_actions) | {action}))
+
+
+# ---------------------------------------------------------------------------
+# runner 推荐配置（给循环集成用）
+# ---------------------------------------------------------------------------
+
+#: 首版放行的已确认动作：胡/碰/杠/过——都是单次点击即完成、且 L3
+#: （:func:`verify_after_click`）能做语义级验证的动作。
+RECOMMENDED_CONFIRMED_ACTIONS: frozenset[str] = frozenset({
+    ACTION_HU, ACTION_PENG, ACTION_KONG, ACTION_PASS,
+})
+
+#: 吃的面板选组（:func:`choose_chi_panel_option`）就绪后的放行集合。
+RECOMMENDED_CONFIRMED_ACTIONS_WITH_CHI: frozenset[str] = (
+    RECOMMENDED_CONFIRMED_ACTIONS | {ACTION_CHI}
+)
+
+
+def recommended_runner_config(*, auto_click_enabled: bool = False,
+                              include_chi: bool = False) -> ActionPolicyConfig:
+    """runner 的推荐配置样例。
+
+    返回的仍是普通 :class:`ActionPolicyConfig`，不改任何默认值语义：
+    ``auto_click_enabled`` 默认仍为 ``False``——要真自动点击，调用方必须
+    显式传 ``auto_click_enabled=True``，这一步就是人工闸，不许绕过。
+
+    Args:
+        auto_click_enabled: 是否打开自动点击总闸（调用方显式决定）。
+        include_chi: 是否把吃一并放行（同时打开 ``chi_enabled``，面板
+            选组走 :func:`choose_chi_panel_option`）。
+    """
+    return ActionPolicyConfig(
+        auto_click_enabled=bool(auto_click_enabled),
+        confirmed_actions=(RECOMMENDED_CONFIRMED_ACTIONS_WITH_CHI
+                           if include_chi else RECOMMENDED_CONFIRMED_ACTIONS),
+        chi_enabled=bool(include_chi),
+        require_template_match=True,
+        template_provider=verified_claim_templates,
+    )
+
+
+def validate_runner_config(config: ActionPolicyConfig) -> tuple[str, ...]:
+    """校验 runner 配置是否自洽；返回问题列表，空 tuple 表示通过。
+
+    只查配置层面的自相矛盾，不查盘面：确认了未知动作、确认了吃却没开
+    ``chi_enabled``（确认永远不会生效）、开自动点击却关模板匹配、开总闸
+    却一个动作都没确认（总闸等于没开）。
+    """
+    problems: list[str] = []
+    confirmed = set(config.confirmed_actions or ())
+    unknown = sorted(confirmed - set(ALL_ACTIONS))
+    if unknown:
+        problems.append(
+            f"confirmed_actions 含未知动作 {unknown}（只认 {sorted(ALL_ACTIONS)}）")
+    if ACTION_CHI in confirmed and not config.chi_enabled:
+        problems.append(
+            "chi 已列入 confirmed_actions 但 chi_enabled=False："
+            "吃永远不会被决策，这份确认不会生效")
+    if config.auto_click_enabled and not config.require_template_match:
+        problems.append(
+            "auto_click_enabled=True 时 require_template_match 必须为 True"
+            "（decide_action 虽会强制改写，runner 不应依赖改写）")
+    if config.auto_click_enabled and not confirmed:
+        problems.append(
+            "auto_click_enabled=True 但 confirmed_actions 为空："
+            "每个动作仍会逐个要求人工确认，总闸等于没开")
+    return tuple(problems)
 
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1214,236 @@ def _shanten_of(engine: Mapping[str, Any], concealed: Sequence[int],
     except Exception:  # noqa: BLE001 - 引擎拒答即视为不可判定
         return None
     return int(value)
+
+
+# ---------------------------------------------------------------------------
+# 吃的二次选择面板：选哪一组顺子
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ChiPanelChoice:
+    """候选牌面板上选哪一组顺子的纯决策结果。
+
+    ``group is None`` 表示弃权（不点任何候选组；调用方应走 ``过`` 或
+    ``取消`` 的既有安全路径，切勿乱点面板）。
+
+    Attributes:
+        group: 选中的顺子（3 张引擎牌 ID，升序）；弃权时 ``None``。
+        candidate_index: ``group`` 在调用方给的候选序列里的下标。
+        hand_tiles: 要从闭手里出示的 2 张（``group`` 去掉来牌）。
+        incoming_tile: 本次吃的来牌（引擎牌 ID）。
+        shanten_before: 吃前向听；引擎拒答时 ``None``。
+        shanten_after: 选中组吃后的向听。
+        kept_shapes: 选中组吃后剩余闭手的「保留搭子」张数，见
+            :func:`_kept_shape_tiles`。
+        evaluated: 逐候选的评估明细（台账用）：下标、组、是否合法、
+            需出示的牌、向听、保留搭子、不可用的原因。
+        reason: 中文说明，选中与弃权都给。
+    """
+
+    group: tuple[int, int, int] | None = None
+    candidate_index: int | None = None
+    hand_tiles: tuple[int, int] = ()
+    incoming_tile: int | None = None
+    shanten_before: int | None = None
+    shanten_after: int | None = None
+    kept_shapes: int | None = None
+    evaluated: tuple[dict[str, Any], ...] = ()
+    reason: str = ""
+
+    @property
+    def chosen(self) -> bool:
+        """是否选出了一组（``False`` = 弃权）。"""
+        return self.group is not None
+
+    def ledger(self) -> dict[str, Any]:
+        """台账友好的字典（全部 JSON 可序列化）。"""
+        return {
+            "group": list(self.group) if self.group is not None else None,
+            "candidate_index": self.candidate_index,
+            "hand_tiles": list(self.hand_tiles),
+            "incoming_tile": self.incoming_tile,
+            "shanten_before": self.shanten_before,
+            "shanten_after": self.shanten_after,
+            "kept_shapes": self.kept_shapes,
+            "evaluated": [dict(row) for row in self.evaluated],
+            "reason": self.reason,
+        }
+
+
+def _kept_shape_tiles(concealed: Sequence[int], caishen: int | None) -> int:
+    """剩余闭手里「有伴」的张数，作为同向听时的择优口径（保留搭子）。
+
+    一张牌算「有伴」：同值有 ≥2 张（对子/刻子的一员），或同花色 ±1/±2
+    内有牌（顺子搭/嵌张），或它本身就是财神（万能牌）。只数张数不判
+    牌型——精确优劣由引擎向听负责，这里只做同分时的形状保留度粗排。
+    """
+    counts: dict[int, int] = {}
+    for value in concealed:
+        tile = int(value)
+        counts[tile] = counts.get(tile, 0) + 1
+    kept = 0
+    for tile, copies in counts.items():
+        if copies >= 2 or (caishen is not None and tile == caishen):
+            kept += copies
+            continue
+        suit = _suit_of(tile)
+        if suit is None:
+            continue
+        low, high = suit
+        for neighbour in (tile - 2, tile - 1, tile + 1, tile + 2):
+            if low <= neighbour <= high and counts.get(neighbour, 0) >= 1:
+                kept += copies
+                break
+    return kept
+
+
+def choose_chi_panel_option(
+    hand: HandState | None,
+    candidates: Sequence[Sequence[int]] | None,
+    config: ActionPolicyConfig | None = None,
+    *,
+    incoming_tile: int | None = None,
+) -> ChiPanelChoice:
+    """吃点下去、候选牌面板弹出后，选哪一组顺子（纯函数，不读像素不点击）。
+
+    选组规则（BOSS 口径）：
+
+    1. 只考虑**合法候选**：恰 3 张互不相同、同花色连续、恰含来牌一次，
+       且要出示的 2 张必须真实在闭手里（财神不替代顺子——与
+       :func:`_chi_options` / :func:`evaluate_claim_candidates` 同一口径）；
+    2. 只选**不劣化向听**的组（吃后向听 ≤ 吃前向听，引擎判定）；
+    3. 同向听取**保留搭子多**者（:func:`_kept_shape_tiles`），再同分取
+       面板上靠前的一组（输入顺序，确定性）。
+
+    证据不足一律弃权（fail closed）：吃未启用、人数未确认或不在
+    ``chi_player_counts`` 内、手牌张数不守恒、来牌未知、来牌归属不可
+    claim、引擎不可用或拒答、无候选、候选全不合法或全都劣化向听。
+    弃权时 ``group is None`` 且 ``reason`` 说明原因，调用方不得点面板。
+
+    Args:
+        hand: 当前手牌状态（来牌/归属/人数从这里取）。
+        candidates: 面板上的候选顺子组（视觉层读出的组，或合成组）。
+        config: 策略配置；``None`` 用默认配置（``chi_enabled=False``
+            → 弃权）。
+        incoming_tile: 来牌覆盖值（视觉层另行确认来牌时传）；缺省用
+            ``hand.incoming_tile``。
+    """
+    cfg = config if config is not None else ActionPolicyConfig()
+
+    if not cfg.chi_enabled:
+        return ChiPanelChoice(reason="吃未启用（chi_enabled=False），面板选组弃权")
+    if not isinstance(hand, HandState):
+        return ChiPanelChoice(reason="手牌状态缺失，面板选组弃权")
+    if not hand.is_valid:
+        return ChiPanelChoice(
+            reason=(f"手牌张数不守恒（闭手 {len(hand.concealed)}、副露 "
+                    f"{len(hand.melds)} 组），面板选组弃权"))
+    if hand.player_count is None:
+        return ChiPanelChoice(reason="人数未确认，面板选组弃权")
+    if int(hand.player_count) not in {int(n) for n in cfg.chi_player_counts}:
+        return ChiPanelChoice(
+            reason=f"{hand.player_count} 人局不在吃评估范围，面板选组弃权")
+    tile = incoming_tile if incoming_tile is not None else hand.incoming_tile
+    if tile is None:
+        return ChiPanelChoice(reason="来牌未知，面板选组弃权")
+    tile = int(tile)
+    if (hand.incoming_source is not None
+            and hand.incoming_source not in CLAIMABLE_INCOMING_SOURCES):
+        return ChiPanelChoice(
+            incoming_tile=tile,
+            reason=f"来牌归属为 {hand.incoming_source!r}，不可吃，面板选组弃权")
+    engine = _engine()
+    if engine is None:
+        return ChiPanelChoice(incoming_tile=tile,
+                              reason="算牌引擎不可用，面板选组弃权")
+    if not candidates:
+        return ChiPanelChoice(incoming_tile=tile,
+                              reason="面板上没有候选顺子，选组弃权")
+
+    counts = hand.counts()
+    melds = [list(group) for group in hand.melds]
+    before = _shanten_of(engine, hand.concealed, melds, hand.caishen)
+    if before is None:
+        return ChiPanelChoice(incoming_tile=tile,
+                              reason="引擎拒答当前手牌向听，面板选组弃权")
+
+    evaluated: list[dict[str, Any]] = []
+    usable: list[dict[str, Any]] = []
+    for index, raw in enumerate(candidates):
+        row: dict[str, Any] = {"index": index, "group": None, "valid": False,
+                               "hand_tiles": [], "shanten_after": None,
+                               "kept_shapes": None, "why": ""}
+        try:
+            group = tuple(sorted(int(v) for v in raw))
+        except (TypeError, ValueError):
+            row["why"] = "候选组不是牌 ID 序列"
+            evaluated.append(row)
+            continue
+        row["group"] = list(group)
+        if len(group) != 3 or len(set(group)) != 3:
+            row["why"] = "候选组不是 3 张互不相同的牌"
+            evaluated.append(row)
+            continue
+        if tile not in group:
+            row["why"] = "候选组不含来牌"
+            evaluated.append(row)
+            continue
+        suit = _suit_of(group[0])
+        if (suit is None or _suit_of(group[1]) != suit
+                or _suit_of(group[2]) != suit or group[2] - group[0] != 2):
+            row["why"] = "候选组不是同花色顺子"
+            evaluated.append(row)
+            continue
+        partners = [v for v in group if v != tile]
+        row["hand_tiles"] = partners
+        if any(counts.get(partner, 0) < 1 for partner in partners):
+            row["why"] = "闭手里缺候选组要出示的实体牌（财神不替代顺子）"
+            evaluated.append(row)
+            continue
+        pool = list(partners)
+        remaining: list[int] = []
+        for value in hand.concealed:
+            current = int(value)
+            if current in pool:
+                pool.remove(current)
+                continue
+            remaining.append(current)
+        after = _shanten_of(engine, remaining, melds + [list(group)],
+                            hand.caishen)
+        if after is None:
+            row["why"] = "引擎拒答该组成吃后的向听"
+            evaluated.append(row)
+            continue
+        row["valid"] = True
+        row["shanten_after"] = int(after)
+        row["kept_shapes"] = _kept_shape_tiles(remaining, hand.caishen)
+        evaluated.append(row)
+        if int(after) <= before:
+            usable.append(row)
+
+    if not usable:
+        return ChiPanelChoice(
+            incoming_tile=tile, shanten_before=before,
+            evaluated=tuple(evaluated),
+            reason="没有不劣化向听的合法候选顺子，面板选组弃权")
+    usable.sort(key=lambda r: (r["shanten_after"], -int(r["kept_shapes"]),
+                               int(r["index"])))
+    best = usable[0]
+    group = tuple(int(v) for v in best["group"])
+    return ChiPanelChoice(
+        group=group,
+        candidate_index=int(best["index"]),
+        hand_tiles=tuple(int(v) for v in best["hand_tiles"]),
+        incoming_tile=tile,
+        shanten_before=before,
+        shanten_after=int(best["shanten_after"]),
+        kept_shapes=int(best["kept_shapes"]),
+        evaluated=tuple(evaluated),
+        reason=(f"选第 {best['index']} 组 {list(group)}：向听 "
+                f"{before}→{best['shanten_after']} 不劣化，"
+                f"剩余闭手保留搭子 {best['kept_shapes']} 张"),
+    )
 
 
 def evaluate_claim_candidates(hand: HandState,
@@ -1624,6 +1972,12 @@ def verify_after_click(
     * 胡：进入结算画面，或至少行动圆盘消失；
     * 过：暗手与副露不变、行动圆盘消失、倒计时转到我方。
 
+    证据口径（fail closed）：行动圆盘消失必须由 ``after.claim_buttons``
+    实测为 0 来证明——该字段为 ``None``（不可测）时，碰/吃/杠/过一律判
+    未证实。吃另查 ``after.selection_panel``：测得仍在画面上即判吃未
+    完成；不可测时不单独否决，靠圆盘/副露/暗手三项正证据兜底。胡的口径
+    不变：结算画面或圆盘消失任一成立即可，两者都不可测时判未证实。
+
     Args:
         before_state: 点击前的盘面快照。
         after_state: 点击后的盘面快照。
@@ -1663,6 +2017,15 @@ def _verify_common(before: BoardState, after: BoardState,
     return True, ""
 
 
+def _discs_gone(after: BoardState, action: str) -> tuple[bool, str]:
+    """行动圆盘必须被**实测**为 0；读不到（``None``）按证据不足判失败。"""
+    if after.claim_buttons is None:
+        return False, f"{action} 后行动圆盘数量不可测，无法验证（fail closed）"
+    if after.claim_buttons != 0:
+        return False, f"{action} 后行动圆盘仍有 {after.claim_buttons} 个，预期消失"
+    return True, ""
+
+
 def _melds_grew(before: BoardState, after: BoardState,
                 *, group_delta: int, tile_delta: int) -> tuple[bool, str]:
     """副露是否按 ``组数 +group_delta``、``张数 +tile_delta`` 增长。"""
@@ -1687,7 +2050,7 @@ def _melds_grew(before: BoardState, after: BoardState,
 
 def _verify_simple_claim(before: BoardState, after: BoardState,
                          action: str) -> tuple[bool, str]:
-    """碰/吃：暗手 −2、副露 +1 组 / +3 张、按钮消失。"""
+    """碰/吃：暗手 −2、副露 +1 组 / +3 张、圆盘实测消失；吃另查面板残留。"""
     if before.concealed_count is None or after.concealed_count is None:
         return False, "暗手张数不可测（点击前后都应有完整识牌）"
     gap = after.concealed_count - before.concealed_count
@@ -1696,8 +2059,11 @@ def _verify_simple_claim(before: BoardState, after: BoardState,
     ok, why = _melds_grew(before, after, group_delta=1, tile_delta=3)
     if not ok:
         return False, why
-    if after.claim_buttons is not None and after.claim_buttons != 0:
-        return False, f"{action} 后行动圆盘仍有 {after.claim_buttons} 个，预期消失"
+    if action == ACTION_CHI and after.selection_panel is True:
+        return False, "吃后候选选择面板仍在画面上，吃未完成"
+    ok, why = _discs_gone(after, action)
+    if not ok:
+        return False, why
     if before.total is not None and after.total is not None:
         if after.total - before.total != 1:
             return False, f"{action} 后总张数 {before.total}→{after.total}，预期 +1"
@@ -1723,8 +2089,9 @@ def _verify_kong(before: BoardState, after: BoardState) -> tuple[bool, str]:
     else:
         return False, (f"杠后暗手 {before.concealed_count}→{after.concealed_count}，"
                        f"预期 −3（明杠）或 −1（加杠）")
-    if after.claim_buttons is not None and after.claim_buttons != 0:
-        return False, f"杠后行动圆盘仍有 {after.claim_buttons} 个，预期消失"
+    ok, why = _discs_gone(after, ACTION_KONG)
+    if not ok:
+        return False, why
     if before.total is not None and after.total is not None:
         if after.total - before.total != expected_total:
             return False, (f"杠后总张数 {before.total}→{after.total}，"
@@ -1745,7 +2112,7 @@ def _verify_hu(before: BoardState, after: BoardState) -> tuple[bool, str]:
 
 
 def _verify_pass(before: BoardState, after: BoardState) -> tuple[bool, str]:
-    """过：暗手/副露不变、圆盘消失、倒计时转到我方。"""
+    """过：暗手/副露不变、圆盘实测消失、倒计时转到我方（归属查在共用判据）。"""
     if before.concealed_count is not None and after.concealed_count is not None:
         if after.concealed_count != before.concealed_count:
             return False, (f"过后暗手 {before.concealed_count}→{after.concealed_count}，"
@@ -1754,8 +2121,9 @@ def _verify_pass(before: BoardState, after: BoardState) -> tuple[bool, str]:
             and before.meld_group_count != after.meld_group_count):
         return False, (f"过后副露组数 {before.meld_group_count}→{after.meld_group_count}，"
                        f"预期不变")
-    if after.claim_buttons is not None and after.claim_buttons != 0:
-        return False, f"过后行动圆盘仍有 {after.claim_buttons} 个，预期消失"
+    ok, why = _discs_gone(after, ACTION_PASS)
+    if not ok:
+        return False, why
     if before.total is not None and after.total is not None:
         if after.total != before.total:
             return False, f"过后总张数 {before.total}→{after.total}，预期不变"
