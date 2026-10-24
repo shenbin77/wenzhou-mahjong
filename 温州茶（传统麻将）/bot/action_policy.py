@@ -54,9 +54,11 @@ confirmed_actions)``，即默认任何动作都需要人工确认。确认一个
     自己的弃牌去碰。归属未标注（``None``）时不拦，只用来牌本身判定。
 * 吃会弹出二次选择面板（面板里有 ``取消``），本版未接线，
   ``config.chi_enabled`` 默认 ``False``。
-* ``tap_executor`` 的几何白名单只放行手牌 ROI（y ≥ 720），行动圆盘在 y≈600，
-  因此**点击通道尚未打通**：自动点击开关打开后本模块会给出
-  ``tap_point``，实际点击仍需 tap_executor 侧接线（见 :data:`CLAIM_TAP_CHANNEL_READY`）。
+* ``tap_executor`` 的行动行通道（:meth:`TapExecutor.execute_claim`）已接线，
+  :data:`CLAIM_TAP_CHANNEL_READY` 为 ``True``：本模块给出决策与 ``tap_point``
+  后可以真的发点击。它走的是**独立**的行动行几何白名单（并要求落点在
+  ``claim_vision.read_claims`` 实测的圆盘连通域框内），出牌用的那条
+  ``y ≥ 720`` 白名单没有放宽。**尚未在真实设备上验证过一次落点。**
 """
 
 from __future__ import annotations
@@ -181,9 +183,10 @@ BLACKLISTED_LABELS: frozenset[str] = frozenset(COST_BUTTONS) | frozenset(NEVER_T
 #: "尚未实测"，此时黑名单只按标签（模板名/调用方传入的 label）生效。
 DEFAULT_FORBIDDEN_BOXES: tuple[tuple[int, int, int, int], ...] = ()
 
-#: 点击通道是否打通。``tap_executor`` 的几何白名单只放行手牌 ROI（y≥720），
-#: 行动圆盘在 y≈600，所以当前为 False：本模块只给决策与 tap_point，不点击。
-CLAIM_TAP_CHANNEL_READY: bool = False
+#: 点击通道是否打通。``tap_executor`` 有一条**独立**的行动行入口
+#: ``TapExecutor.execute_claim``（自带 y∈[560,660] / x∈[740,1520] 白名单，
+#: 出牌那道 y≥720 的闸一点没放宽），所以现在可以真点了。
+CLAIM_TAP_CHANNEL_READY: bool = True
 
 
 def never_tap(label: str | None) -> bool:

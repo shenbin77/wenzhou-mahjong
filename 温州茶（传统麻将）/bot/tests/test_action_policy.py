@@ -614,9 +614,30 @@ def test_confirm_action_rejects_unknown_action() -> None:
         confirm_action(ActionPolicyConfig(), "洗牌")
 
 
-def test_claim_tap_channel_not_wired_yet() -> None:
-    """点击通道还没打通，测试把这件事钉住：有人接线后必须回来改这个断言。"""
-    assert ap.CLAIM_TAP_CHANNEL_READY is False
+def test_claim_tap_channel_is_wired_and_refuses_dangerous_points() -> None:
+    """点击通道已打通（tap_executor.execute_claim），测试把两件事钉住：
+
+    1. 开关确实是 ``True``（有人把通道拆了必须回来改这个断言）；
+    2. ``True`` 背后真的有一条**独立的**行动行入口：它能接住行动圆盘的
+       坐标，同时把充值/游戏中心/开始游戏这类点一个都不放行——也就是这个
+       开关说"能点"绝不等于"放宽了出牌白名单"。
+    """
+    assert ap.CLAIM_TAP_CHANNEL_READY is True
+
+    from tap_executor import TapExecutor, TapRejected
+
+    executor = TapExecutor(session_dir="unused")
+    assert callable(getattr(executor, "execute_claim", None))
+    # 独立几何白名单：行动行的圆盘坐标接得住。
+    assert executor.validate_claim_point((1431, 610)) == (1431, 610)
+    # 危险点一个都不放行（此刻还没发任何 adb 命令）。
+    for point in ((800, 120), (1480, 60), (800, 430)):
+        with pytest.raises(TapRejected):
+            executor.validate_claim_point(point)
+    # 出牌白名单没有被连带放宽：这些点仍然被它拒绝。
+    for point in ((800, 120), (1480, 60), (800, 430), (1431, 610)):
+        with pytest.raises(TapRejected):
+            executor.validate_target(point, [], (900, 1600, 3))
 
 
 # ---------------------------------------------------------------------------
