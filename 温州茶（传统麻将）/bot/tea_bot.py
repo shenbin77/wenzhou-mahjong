@@ -122,10 +122,14 @@ class TeaBot:
         vision_fn: Optional[Callable[[bytes], list[int]]] = None,
         # 可注入的离线截图函数：() -> PNG字节
         shot_fn: Optional[Callable[[], bytes]] = None,
+        player_count: int = 2,
     ):
         if not dry_run:
             raise ValueError("茶 Bot 尚未通过实机定位和回读验证，只允许 dry_run=True")
+        if player_count not in (2, 4):
+            raise ValueError("茶玩法人数只能是 2 或 4")
         self.dry_run = dry_run
+        self.player_count = player_count
         self.caishen_id = caishen_id  # 引擎编码；None=无财神/未知
         self.vision_fn = vision_fn or self._default_vision
         self._vision = None
@@ -140,6 +144,10 @@ class TeaBot:
 
         self.round_no = 0
         self.step_no = 0
+        self.meld_count = 0
+        self.meld_groups: list[list[int]] = []
+        # 最近一帧的按钮区 + 玩法门禁证据（看门狗用的可观测出口）。
+        self.last_action_ui: dict = {}
 
     def _setup_logger(self):
         self.logger = logging.getLogger(f"TeaBot-{id(self)}")
@@ -163,6 +171,59 @@ class TeaBot:
             return self.shot_fn()
         raise RuntimeError("未提供离线截图；请传 screenshot 或注入 shot_fn")
 
+    def _read_player_count(self, image, detect_fn) -> tuple[Optional[int], dict]:
+        """读本帧玩法人数，返回 ``(players, action_ui)``。
+
+        优先走 ``mode_vision`` 的粘滞门禁：玩法在一局内不变，确认过一次就锁存，
+        后续帧复用。按钮圆盘压住规则文字、本帧逐帧判定给不出结论时，锁存的结论
+        仍然有效 —— 这正是修掉"按钮一出现整帧弃权"的那一步。
+
+        ``assist_tea.analyze_snapshot`` 每帧 new 一个 TeaBot，所以粘滞状态放在
+        ``mode_vision.MODE_LATCH``（进程级，带换房/换局重置），不放在 self 上。
+
+        fail-closed 不变：粘滞给不出结论时一律退回逐帧口径的 ``detect_fn``。
+        换句话说，粘滞只会**补**上"读不出但其实早确认过"的帧，永远不会把
+        "没确认过"的画面变成 2 人局。
+
+        兼容：部分测试用 ``SimpleNamespace`` 顶替整个 ``mode_vision`` 模块
+        （只有 ``detect_tea_player_count`` 一个函数），那时取不到粘滞门禁，
+        就老实走 ``detect_fn``，行为与修改前完全一致。
+
+        Args:
+            image: 已解出的 BGR 帧。
+            detect_fn: 逐帧判定函数，也是粘滞不可用/无结论时的事实来源。
+
+        Returns:
+            ``(players, action_ui)``；``players`` 为 2/4 或 ``None``（必须弃权）。
+        """
+        raw = detect_fn(image)
+        action_ui: dict = {"action_discs_seen": False, "action_disc_count": 0,
+                           "action_discs": [], "claim_decision": None,
+                           "claim_reason": "未走玩法粘滞门禁（模块被替身或门禁不可用）",
+                           "action_gold_pixel_ratio": None,
+                           "mode_score": 0.0, "mode_margin": 0.0,
+                           "mode_score_min": 0.92, "mode_margin_min": 0.08,
+                           "mode_raw_players": raw, "mode_players": raw,
+                           "mode_source": "per_frame", "mode_latched": False,
+                           "mode_latch_resets": 0, "mode_latch_age_frames": 0,
+                           "mode_latch_age_s": 0.0}
+        try:
+            from mode_vision import MODE_LATCH
+        except Exception:  # noqa: BLE001 - 模块被替身顶掉：按逐帧口径走
+            return raw, action_ui
+        try:
+            reading = MODE_LATCH.observe(image)
+        except Exception as exc:  # noqa: BLE001 - 粘滞出错不许拖垮整帧
+            action_ui["claim_reason"] = f"玩法粘滞门禁异常，退回逐帧：{exc}"
+            action_ui["mode_players"] = raw
+            return raw, action_ui
+        action_ui = dict(reading.action_ui)
+        action_ui["mode_raw_players"] = raw
+        # 粘滞给不出结论时按逐帧口径走：两者此刻都理应是 None（lint 兜底另算）。
+        players = reading.players if reading.players is not None else raw
+        action_ui["mode_players"] = players
+        return players, action_ui
+
     def _default_vision(self, png: bytes) -> list[int]:
         """对采集截图做保守识别；任何漏牌、明牌组或未知牌均停止。"""
         import cv2
@@ -172,23 +233,170 @@ class TeaBot:
         if bot_dir not in sys.path:
             sys.path.insert(0, bot_dir)
         from tile_vision import TileVision
-        from mode_vision import detect_tea_player_count
+        from mode_vision import detect_tea_no_zhong_fa, detect_tea_player_count
 
         image = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("截图不是有效 PNG 图像")
-        players = detect_tea_player_count(image)
-        if players != 2:
-            raise ValueError("画面为茶 4 人局，停止 2 人决策" if players == 4
-                             else "画面未确认茶 2 人局，停止决策")
+        # 玩法门禁：走 mode_vision 的粘滞结论；action_ui 是本帧按钮区 + 门禁
+        # 的分值/是否走粘滞，供看门狗逐帧留证。
+        players, action_ui = self._read_player_count(image, detect_tea_player_count)
+        self.last_action_ui = action_ui
+        self.log(f"[mode] players={players} source={action_ui.get('mode_source')} "
+                 f"score={action_ui.get('mode_score')} "
+                 f"latched={action_ui.get('mode_latched')} "
+                 f"discs={action_ui.get('action_disc_count')}")
+        if players != self.player_count:
+            raise ValueError(
+                f"画面为茶 {players} 人局，停止 {self.player_count} 人决策"
+                if players in (2, 4) else
+                f"画面未确认茶 {self.player_count} 人局，停止决策"
+            )
+        if not detect_tea_no_zhong_fa(image):
+            raise ValueError("未确认无中发规则，当前茶牌集停止决策")
         if self._vision is None:
             self._vision = TileVision(template_dir=_TEMPLATE_DIR)
+        # 本局财神已知时告诉识别器：带"财"角标的那张牌可以按财神计入闭手。
+        # caishen_id 为 None（未确认财神）时不传 label，角标牌仍按未识别处理。
+        caishen_label = None
+        if self.caishen_id is not None:
+            from tile_vision import TILE_IDS
+            want = engine_to_vision(self.caishen_id)
+            caishen_label = next((name for name, tid in TILE_IDS.items()
+                                  if tid == want), None)
+        self._vision.caishen_label = caishen_label
         recognized = self._vision.recognize_hand(image)
         if not self._vision.last_complete:
             raise ValueError("识牌不完整，停止决策")
+        self.meld_count = 0
+        self.meld_groups = []
         if self._vision.last_meld_boxes:
-            raise ValueError("检测到明牌组，茶向听引擎尚不支持该局面")
+            melds = getattr(self._vision, "last_melds", [])
+            ids = [row[0] for row in melds]
+            boxes = [tuple(int(v) for v in box)
+                     for box in self._vision.last_meld_boxes]
+            if len(ids) < 3 or len(ids) != len(boxes) \
+                    or any(tid is None for tid in ids):
+                raise ValueError("明牌组不完整，停止决策")
+            sizes = list((getattr(self._vision, "detection_diagnostics", {}) or {})
+                         .get("meld_groups") or [])
+            if sizes:
+                hand_left = (min(int(row[1]) for row in recognized)
+                             if recognized else None)
+                self.meld_groups = self._meld_groups_by_geometry(
+                    ids, boxes, sizes, hand_left=hand_left)
+            else:
+                # 视觉层没发布组边界（只可能出现在测试替身或旧适配器上）：
+                # 退回旧的全组搜索，同时记一行日志，便于发现真正缺字段的适配器。
+                self.log("[meld] 视觉层未发布组边界，退回全组搜索")
+                self.meld_groups = self._meld_groups_by_global_partition(ids)
+            self.meld_count = len(self.meld_groups)
+            self.log(f"[meld] groups={self.meld_groups} geometry={sizes}")
         return [row[0] for row in recognized]
+
+    # -- 副露分组：几何组边界是硬约束，组内只判 3 张还是 4 张 --
+    @staticmethod
+    def _meld_group_shape_ok(group: Sequence[int]) -> bool:
+        """副露组牌型：同牌 3/4 张（碰/杠），或同花色连续三张（吃）。"""
+        if len(set(group)) == 1:
+            return len(group) in (3, 4)
+        if len(group) != 3 or len(set(group)) != 3:
+            return False
+        suits = (range(1, 10), range(21, 30), range(41, 50))
+        return any(all(tile in suit for tile in group) for suit in suits) \
+            and max(group) - min(group) == 2
+
+    @staticmethod
+    def _stacked_kong_center(boxes: Sequence[Sequence[int]]) -> bool:
+        """Three face positions with a full middle tile stacked one tile up.
+
+        The 005400 native frames contain both flat 西碰 and stacked 西杠.
+        A label triplet alone cannot distinguish them; require the complete
+        middle tile to translate vertically while both neighbours stay level.
+        """
+        if len(boxes) != 3:
+            return False
+        left, middle, right = boxes
+        heights = [box[3] - box[1] for box in boxes]
+        widths = [box[2] - box[0] for box in boxes]
+        height = min(heights)
+        width = min(widths)
+        if height <= 0 or width <= 0:
+            return False
+        rise = min(left[3], right[3]) - middle[3]
+        tolerance = max(4.0, height * 0.05)
+        return (abs(left[3] - right[3]) <= tolerance
+                and rise >= max(16.0, height * 0.15)
+                and abs((left[1] - middle[1]) - rise) <= tolerance
+                and abs((right[1] - middle[1]) - rise) <= tolerance
+                and max(widths) - width <= width * 0.15
+                and 0 <= middle[0] - left[2] <= width * 0.15
+                and 0 <= right[0] - middle[2] <= width * 0.15)
+
+    @classmethod
+    def _meld_groups_by_geometry(cls, ids: Sequence[int],
+                                 boxes: Sequence[Sequence[int]],
+                                 sizes: Sequence[int],
+                                 hand_left: Optional[int] = None) -> list[list[int]]:
+        """按视觉层组边界逐组判定，禁止跨组自由组合。
+
+        视觉层 `_split_exposed_prefix` 已按组间间隙把台面切好（组内相邻约 4px、
+        组间约 15px、台面到手中断 21-30px），`meld_groups` 就是每组的框数。
+        这里只回答"这一组是 3 张还是 4 张、牌型合不合法"，不做全局重排，
+        所以同一张牌的多份副本不会被拆到不同组，也不会拼出"3+1"这类非法重组。
+
+        组内张数不是 3/4、或牌型非法时一律停止决策：这种形态说明视觉层漏了
+        或错切了牌（例如副露组只有 2 张），宁可弃权也不补一张不存在的牌。
+        `hand_left` 是闭手最左框的 x，用来在弃权理由里报出"台面到手中断"的
+        真实间距——漏检一张牌时这个间距会比正常值多出约一个牌宽，运维一眼可查。
+        """
+        if sum(sizes) != len(ids):
+            raise ValueError(
+                f"明牌组边界{sizes}与识别张数{len(ids)}不符，停止决策")
+        groups: list[list[int]] = []
+        cursor = 0
+        for index, size in enumerate(sizes, start=1):
+            left = boxes[cursor][0] if cursor < len(boxes) else -1
+            last = cursor + size - 1
+            right = boxes[last][2] if 0 <= last < len(boxes) else -1
+            chunk = [int(t) for t in ids[cursor:cursor + size]]
+            group_boxes = boxes[cursor:cursor + size]
+            cursor += size
+            if size not in (3, 4):
+                detail = ""
+                if index == len(sizes) and hand_left is not None and right >= 0:
+                    detail = (f"，台面到手间隙{hand_left - right}px，正常 21-30px")
+                raise ValueError(
+                    f"明牌第{index}组仅{size}张（x≈{left}..{right}{detail}），"
+                    f"疑似漏检，停止决策")
+            if not cls._meld_group_shape_ok(chunk):
+                raise ValueError(f"明牌第{index}组牌型非法{chunk}，停止决策")
+            if (size == 3 and len(set(chunk)) == 1
+                    and cls._stacked_kong_center(group_boxes)):
+                # The fourth physical tile is under the raised middle tile:
+                # account for it in the rule engine, not as a fabricated box.
+                chunk.append(chunk[0])
+            groups.append(chunk)
+        return groups
+
+    @classmethod
+    def _meld_groups_by_global_partition(cls, ids: Sequence[int]) -> list[list[int]]:
+        """旧路径：全组自由搜索，仅当视觉层不发布组边界时兜底使用。"""
+        def partitions(offset):
+            if offset == len(ids):
+                return {()}
+            found = set()
+            for width in (3, 4):
+                group = ids[offset:offset + width]
+                if len(group) == width and cls._meld_group_shape_ok(group):
+                    found.update((tuple(group),) + rest
+                                 for rest in partitions(offset + width))
+            return found
+
+        possible = partitions(0)
+        if len(possible) != 1:
+            raise ValueError("明牌组数量或牌型未确认，停止决策")
+        return [list(group) for group in possible.pop()]
 
     # -- see: 截图→识别→转码 --
     def see(self, screenshot: Optional[bytes] = None) -> list[int]:
@@ -199,9 +407,14 @@ class TeaBot:
         png = screenshot if screenshot is not None else self._shot()
         vision_ids = self.vision_fn(png)
         engine_ids = vision_hand_to_engine(vision_ids)
-        if len(engine_ids) not in (16, 17):
-            raise ValueError(f"闭手应为16或17张，识别到{len(engine_ids)}张")
-        validate_tiles(engine_ids, caishen_id=self.caishen_id)
+        # 张数守恒：暗手 + 副露实际张数（吃/碰3张、杠4张）∈ {16,17}。
+        # 用各组真实张数而不是 3×组数，明杠/暗杠才不会被误拒。
+        meld_total = sum(len(g) for g in self.meld_groups)
+        expected = (16 - meld_total, 17 - meld_total)
+        if len(engine_ids) not in expected:
+            raise ValueError(f"暗手应为{expected[0]}或{expected[1]}张，识别到{len(engine_ids)}张")
+        validate_tiles(engine_ids, caishen_id=self.caishen_id,
+                       melds=self.meld_groups)
         self.log(f"[see] vision={hand_str(vision_ids)} → engine={hand_str(engine_ids)}")
         return engine_ids
 
@@ -212,15 +425,23 @@ class TeaBot:
         result = ThinkResult(hand=list(hand), n_tiles=n, shanten=99,
                              is_hu=False)
 
-        if n not in (16, 17):
-            raise ValueError(f"闭手应为16或17张，得到{n}张")
-        validate_tiles(hand, caishen_id=self.caishen_id)
-        hu_info = _pa_analyze(hand, caishen_id=self.caishen_id) if n == 17 else {}
+        meld_total = sum(len(g) for g in self.meld_groups)
+        concealed_wait = 16 - meld_total
+        concealed_turn = concealed_wait + 1
+        if n not in (concealed_wait, concealed_turn):
+            raise ValueError(f"暗手应为{concealed_wait}或{concealed_turn}张，得到{n}张")
+        validate_tiles(hand, caishen_id=self.caishen_id,
+                       melds=self.meld_groups)
+        hu_info = (_pa_analyze(hand, caishen_id=self.caishen_id)
+                   if n == 17 and not self.meld_groups else {})
         result.hu_info = hu_info
 
-        sh = calc_shanten(hand, caishen_id=self.caishen_id)
+        sh = calc_shanten(hand, caishen_id=self.caishen_id,
+                          melds=self.meld_groups)
         result.shanten = sh
-        if n == 17 and bool(hu_info.get("hu", False)) != (sh == -1):
+        if self.meld_groups and sh == -1:
+            raise RuntimeError("副露胡牌尚未独立验收，停止决策")
+        if not self.meld_groups and n == 17 and bool(hu_info.get("hu", False)) != (sh == -1):
             raise RuntimeError("胡牌分析器与向听引擎结论不一致，停止决策")
         result.is_hu = n == 17 and bool(hu_info.get("hu", False))
 
@@ -234,15 +455,16 @@ class TeaBot:
             return result
 
         # 2. 听牌时算进张
-        if n == 16 and sh == 0:
+        if n == concealed_wait and sh == 0:
             result.ting_tiles = sorted(
-                calc_ting_tiles(hand, caishen_id=self.caishen_id)
+                calc_ting_tiles(hand, caishen_id=self.caishen_id,
+                                melds=self.meld_groups)
             )
 
-        # 3. 打牌决策（17张：刚摸牌，打一张）
-        if n == 17:
+        # 3. 打牌决策（刚摸牌：打一张）
+        if n == concealed_turn:
             cands = best_discard_by_efficiency(
-                hand, caishen_id=self.caishen_id
+                hand, caishen_id=self.caishen_id, melds=self.meld_groups
             )
             result.discard_candidates = cands
             if cands:
@@ -256,11 +478,20 @@ class TeaBot:
                 )
             else:
                 result.reason = f"向听{sh}，无候选（异常）"
-        elif n == 16:
-            ting = ",".join(tile_name(t) for t in result.ting_tiles)
-            result.reason = f"向听{sh}（听牌），进张[{ting}]，等待摸牌"
+        elif n == concealed_wait:
+            if sh == 0:
+                ting = ",".join(tile_name(t) for t in result.ting_tiles)
+                result.reason = f"向听0（听牌），进张[{ting}]，等待摸牌"
+            else:
+                result.reason = f"向听{sh}，等待摸牌"
         else:
             result.reason = f"张数异常{n}，向听{sh}"
+
+        # 副露局面的胡牌/计分判定未经验收：显式标注，绝不静默当成"没胡"。
+        if self.meld_groups and not result.is_hu:
+            result.reason += "；副露局面胡牌判定未验证"
+            if sh == -1:
+                result.reason = "疑似胡牌（副露局面胡牌判定未验证，不计分）"
 
         result.elapsed_ms = (time.time() - t0) * 1000
         self.log(
@@ -367,12 +598,14 @@ def offline_replay_test(
     caishen_id: Optional[int] = None,
     max_files: int = 0,
     log_dir: str = "logs",
+    player_count: int = 2,
 ) -> dict:
     """
     用已采集的截图做离线测试（不碰模拟器）。
 
     screenshot_dir: 截图目录（递归找*.png）
     vision_fn: 截图字节 → vision编码牌ID列表；省略时使用茶模板识别
+    player_count: 目标茶局人数，仅支持 2 或 4；画面规则必须与之相符
     返回统计报告。
     """
     shot_dir = Path(screenshot_dir)
@@ -382,6 +615,7 @@ def offline_replay_test(
 
     bot = TeaBot(dry_run=True, caishen_id=caishen_id,
                  vision_fn=vision_fn, log_dir=log_dir,
+                 player_count=player_count,
                  shot_fn=lambda: b"")  # 不用真实截图
 
     stats = {
