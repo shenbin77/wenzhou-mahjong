@@ -135,8 +135,13 @@ def test_xigang_dev_frame_separates_three_meld_groups():
     assert count + len(vision.last_meld_boxes) == 16
 
 
-def test_xigang_dev_frame_still_abstains_on_weak_faces():
-    """几何修复后，真实弱牌面仍然弃权（安全契约不动）。"""
+def test_xigang_dev_frame_claim_markers_no_longer_force_abstain():
+    """几何修复 + claim-marker 去遮挡后，该帧副露高分可读且完整。
+
+    旧断言要求 weak low_score/ambiguous 仍弃权；那些弱面其实是顶边黄三角
+    半透明黑圆遮挡导致的掉分，不是阈值过松。strip_claim_marker 恢复牌面后
+    分数回到阈值之上（仍用原 .82/.055，不放宽）。
+    """
     need(XIGANG_FRAME)
     vision = make_vision()
     img = cv2.imdecode(np.fromfile(str(XIGANG_FRAME), np.uint8), cv2.IMREAD_COLOR)
@@ -144,11 +149,13 @@ def test_xigang_dev_frame_still_abstains_on_weak_faces():
     # 西杠三张全部按西读出（牌面证据，而非几何断言）。
     xi = [d for d in vision.meld_diagnostics if d.get("label") == "xi"]
     assert len(xi) == 3 and all(d["accepted"] for d in xi)
-    # 其余弱面仍按既有阈值弃权，不放宽。
+    # 遮挡剥除后不应再出现低分/歧义弃权；整帧应完整。
     weak = [d for d in vision.meld_diagnostics
             if d.get("reason") in ("low_score", "ambiguous")]
-    assert weak and all(not d["accepted"] for d in weak)
-    assert vision.last_complete is False
+    assert weak == []
+    assert all(d["accepted"] for d in vision.meld_diagnostics)
+    assert any(d.get("claim_marker") for d in vision.meld_diagnostics)
+    assert vision.last_complete is True
 
 
 def test_true_peng_frame_result_unchanged():
