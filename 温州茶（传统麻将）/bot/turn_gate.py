@@ -408,8 +408,9 @@ def action_ui_evidence(image) -> dict:
         "action_discs": [],
         "claim_decision": None,
         "claim_reason": "",
-        "countdown_status": "unknown",
+        "countdown_status": "absent",
         "countdown_seconds": None,
+        "countdown_evidence": {},
         "action_gold_pixel_ratio": None,
         "mode_latched": False,
         "mode_players": None,
@@ -449,6 +450,18 @@ def action_ui_evidence(image) -> dict:
                 record["claim_reason"] = str(state.reason)
                 ratios = (state.evidence or {}).get("pixel_ratio") or {}
                 record["action_gold_pixel_ratio"] = _as_float(ratios.get("gold"))
+    # P0-3: real countdown detector (never leave the permanent unknown stub).
+    try:
+        from countdown_vision import detect_countdown
+        reading = detect_countdown(image if isinstance(image, np.ndarray) else None)
+        record["countdown_status"] = reading.status
+        record["countdown_seconds"] = reading.seconds
+        record["countdown_evidence"] = dict(reading.evidence)
+    except Exception as exc:  # noqa: BLE001 - detector failure => unreadable
+        record["countdown_status"] = "unreadable"
+        record["countdown_seconds"] = None
+        record["countdown_evidence"] = {"error": f"{exc}"}
+
     try:
         from mode_vision import DECK_LATCH, DECK_SCORE_MIN, MODE_LATCH
     except Exception:  # noqa: BLE001 - 门禁不可用时如实标注
@@ -652,13 +665,21 @@ def evaluate_turn(result: dict, image, history: Sequence[HandObservation] | None
         return verdict(STATE_WAIT,
                        f"画面尚未稳定（连续一致 {streak} 帧 < {STABLE_FRAMES} 帧，"
                        "可能在摸牌/发牌动画中）")
-    # P0-3: claim row visible => do not discard; countdown detector still unknown.
+    # P0-3: claim row visible => do not discard.
+    # Countdown low/expired/unreadable => urgency note (still wait, never tap).
     if action_ui.get("action_discs_seen"):
+        cd = str(action_ui.get("countdown_status") or "unreadable")
+        sec = action_ui.get("countdown_seconds")
+        if cd in {"low", "expired", "unreadable"}:
+            detail = f"倒计时{cd}" + (f"={sec}s" if sec is not None else "")
+            return verdict(
+                STATE_WAIT,
+                f"行动圆盘可见且{detail}：本帧只许弃权/过，不出牌",
+                code="gate_claim_ui_urgent")
+        extra = f"（倒计时{cd}" + (f"={sec}s）" if sec is not None else "）")
         return verdict(
             STATE_WAIT,
-            "行动圆盘可见：本帧先处理吃碰杠胡/过，不出牌"
-            + ("（倒计时未接线，不假设还有时间）"
-               if action_ui.get("countdown_status") == "unknown" else ""),
+            "行动圆盘可见：本帧先处理吃碰杠胡/过，不出牌" + extra,
             code="gate_claim_ui")
     return verdict(STATE_DISCARD_READY,
                    f"轮到我方出牌：暗手 {physical} 张 + 副露 {melds_used} 张 = 17，"

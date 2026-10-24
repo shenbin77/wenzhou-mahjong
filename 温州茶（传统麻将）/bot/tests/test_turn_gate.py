@@ -706,7 +706,7 @@ def test_claim_discs_block_discard_ready(monkeypatch):
             "action_discs": [{"kind": "gold", "box": [1, 2, 3, 4], "center": [2, 3]}],
             "claim_decision": None,
             "claim_reason": "test",
-            "countdown_status": "unknown",
+            "countdown_status": "absent",
             "countdown_seconds": None,
             "mode_source": "unavailable",
             "deck_source": "unavailable",

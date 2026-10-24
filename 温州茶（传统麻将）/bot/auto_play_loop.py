@@ -14,7 +14,8 @@
   * 连续 3 次截图或识牌异常 → 停止；点击异常或点后验证失败立即停止；
   * 换局信号（HUD 指纹变化或财神 label 变化）→ 跳过该帧，手选财神时停手；
   * HUD 与画面财神都不可读 → 拒绝真实点击；
-  * 房卡读数为 0 → 停止；不可读记 unknown，不阻断开发局，但绝不点充值；
+  * 牌墙/房卡读数 ≤ 16 → 停止（P0-5）；不可读记 unknown，不阻断开发局，但绝不点充值；
+  * 启用且本帧财神未知 → 停止（P0-5 ``gate_unknown_caishen``）；
   * **回合所有权**（``turn_gate``，dry_run 与真点都要过）：轮到我方、已摸牌、
     张数守恒（17 = 暗手 + 副露）、画面连续两帧一致、手牌未被压暗；
     ``wait`` 只等待并记 ``idle``，``blocked``（证据自相矛盾）立即停手；
@@ -59,6 +60,7 @@ from action_policy import (
 from claim_vision import read_claims
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE
 from tap_executor import TapAborted, TapExecutor
+from table_state import WALL_CARDS_STOP_AT, build_table_state
 from turn_gate import (
     MAX_HISTORY as TURN_HISTORY_LIMIT,
     HandObservation,
@@ -422,10 +424,14 @@ class AutoPlayLoop:
                     guard_event,
                 )
             return self._event(guard_event)
+        wall_cards = None
         if self._card_reader is not None:
-            cards = self._read_card_count(image)
-            if cards is not None and cards <= 0:
-                return self._stop("card_exhausted", f"房卡={cards}，停止开桌")
+            wall_cards = self._read_card_count(image)
+            if wall_cards is not None and wall_cards <= WALL_CARDS_STOP_AT:
+                return self._stop(
+                    "card_exhausted",
+                    f"牌墙/房卡={wall_cards}≤{WALL_CARDS_STOP_AT}，停止代打",
+                )
         try:
             result = self._analyze(raw, frame_path)
         except Exception as exc:  # noqa: BLE001 - 识牌异常计入异常预算
@@ -468,6 +474,29 @@ class AutoPlayLoop:
             "suggestion_id": result.get("suggestion_id"),
             "caishen": result.get("caishen"),
         }
+        # P0-5: refresh unified TableState from THIS frame before decide/discard.
+        incoming_tile = None
+        incoming_source = None
+        if self._discard_state is not None and self._discard_trusted:
+            incoming_tile = getattr(self._discard_state, "incoming_tile", None)
+            incoming_source = getattr(self._discard_state, "incoming_source", None)
+        result_for_table = dict(result)
+        if caishen:
+            result_for_table["caishen"] = caishen
+        table = build_table_state(
+            result_for_table, image,
+            wall_cards=wall_cards,
+            discards_trusted=bool(self._discard_trusted),
+            incoming_tile=incoming_tile,
+            incoming_source=incoming_source,
+        )
+        base["table_state"] = table.ledger()
+        if self.enabled and table.should_stop_for_unknown_caishen:
+            return self._stop(
+                "gate_unknown_caishen",
+                "本帧财神未知：停止代打（P0-5）",
+                base,
+            )
         # 门禁三：回合所有权。dry_run 与真点都必须先过这一关，台账逐帧留证。
         verdict = self._evaluate_turn_gate(
             result, image, record=not changed_round)

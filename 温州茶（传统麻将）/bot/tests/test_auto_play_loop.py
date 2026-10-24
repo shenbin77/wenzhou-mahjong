@@ -661,6 +661,44 @@ def test_card_zero_stops_the_loop_without_tapping(tmp_path):
     assert tap.execute_calls == []
 
 
+
+
+def test_wall_cards_at_16_stops_without_tapping(tmp_path):
+    """P0-5: 牌墙/房卡 ≤ 16 → card_exhausted 停机，不点。"""
+    loop, shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True, cards=[16])
+    event = loop.tick()
+    assert event["event"] == "stop"
+    assert event["gate"] == "card_exhausted"
+    assert loop.stopped is True
+    assert loop.card_count == 16
+    assert analyzer.calls == 0
+    assert tap.execute_calls == []
+
+
+def test_wall_cards_above_16_does_not_trip_wall_stop(tmp_path):
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True, cards=[17])
+    settle(loop)
+    event = loop.tick()
+    assert event.get("gate") != "card_exhausted"
+    assert loop.stopped is False or event.get("gate") != "card_exhausted"
+    assert tap.execute_calls or event["event"] in {"action", "dry_run_plan", "idle", "stop"}
+
+
+def test_unknown_caishen_stops_when_enabled(tmp_path):
+    """P0-5: enabled + 本帧财神未知 → gate_unknown_caishen。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True,
+        analyses=[advise(caishen=None)],
+        hud=[(b"hud-ok", None)],
+    )
+    event = loop.tick()
+    assert event["event"] == "stop"
+    assert event["gate"] == "gate_unknown_caishen"
+    assert tap.execute_calls == []
+    assert "table_state" in event
+    assert event["table_state"]["caishen_known"] is False
+
+
 def test_card_unknown_does_not_block_and_never_clicks_recharge(tmp_path):
     def broken_reader(_image):
         raise RuntimeError("房卡区域读不到")
