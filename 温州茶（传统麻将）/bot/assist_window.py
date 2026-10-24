@@ -281,6 +281,10 @@ class TeaAssistWindow:
         self.preview_flags = tk.StringVar(value="可先点“离线预检”检查所选玩法；预检使用旧截图，不能用于当前对局。")
         self.preview_meta = tk.StringVar(value="绿色=识牌预测；橙色=未识别；红色=建议牌。")
         self.offline_notice = tk.StringVar(value="")
+        self.hud_wall = tk.StringVar(value="余牌：未识别")
+        self.hud_countdown = tk.StringVar(value="倒计时：未识别")
+        self.hud_turn = tk.StringVar(value="当前行动：未识别")
+        self.hud_river = tk.StringVar(value="牌河：未识别")
         self.display_source: str | None = None
         self._build()
         self.recorder_timer = root.after(500, self._poll_recorder)
@@ -354,6 +358,26 @@ class TeaAssistWindow:
             sidebar, textvariable=self.offline_notice, foreground="#c62828",
             font=("Microsoft YaHei UI", 9, "bold"), wraplength=380,
         ).pack(fill="x", padx=6)
+
+        # Read-only table HUD (余牌 / 倒计时 / 当前行动 / 牌河) — never invents values.
+        self.hud_panel = ttk.Frame(sidebar, padding=(6, 2))
+        self.hud_panel.pack(fill="x")
+        ttk.Label(
+            self.hud_panel, textvariable=self.hud_wall,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor="w")
+        ttk.Label(
+            self.hud_panel, textvariable=self.hud_countdown,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor="w")
+        ttk.Label(
+            self.hud_panel, textvariable=self.hud_turn,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            self.hud_panel, textvariable=self.hud_river,
+            font=("Microsoft YaHei UI", 9), wraplength=380,
+        ).pack(anchor="w")
 
         self.advice_label = ttk.Label(
             sidebar, textvariable=self.suggestion, foreground="#146c2e",
@@ -1319,6 +1343,7 @@ class TeaAssistWindow:
         if set_notice is not None:
             set_notice()
         self.caishen_title.set(self._caishen_title(state))
+        self._update_follow_hud(result, state)
         self._update_latency_bar()
         initial = self.actual_choice.get() == ""
         self.actual_choice["values"] = sorted(
@@ -1368,6 +1393,24 @@ class TeaAssistWindow:
         image.thumbnail((width, height), Image.Resampling.LANCZOS)
         self.images["preview"] = self._to_tk(image)
         picture.configure(image=self.images["preview"], text="")
+
+    def _update_follow_hud(self, result: dict, state) -> None:
+        """Refresh read-only 余牌/倒计时/行动/牌河 labels (CLAIM stays off)."""
+        from assist_hud import build_follow_hud, load_result_bgr
+
+        image = load_result_bgr(result)
+        hud = build_follow_hud(
+            result,
+            image=image,
+            status=getattr(state, "status", None),
+            actionable=bool(getattr(state, "actionable", False)),
+            wall_cards=result.get("wall_cards"),
+            run_countdown=True,
+        )
+        self.hud_wall.set(hud.wall)
+        self.hud_countdown.set(hud.countdown)
+        self.hud_turn.set(hud.turn)
+        self.hud_river.set(hud.river)
 
     def _refresh_view(self, state=None) -> None:
         state = state or self.refresh.state
