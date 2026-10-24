@@ -197,6 +197,73 @@ def test_previous_state_can_be_reused_as_baseline() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 长牌河不能被解析窗裁掉（踩过的坑）
+# ---------------------------------------------------------------------------
+# 两条河都从锚定边按 56.15px 节距往外铺，一局最多铺满 16 格
+# （16×56.15 = 898 = 两条锚定边 1249-351 的距离）。早先按"当时见过的最长"
+# 把窗收成对手 x≥520 / 自己 x≤1170，长牌河时最外一张被窗裁掉，外缘对账判成
+# "没读全"，整帧弃权 —— 偏偏是牌局后段最需要鸣牌的时候。
+
+
+def test_sixteen_tile_opponent_river_is_readable() -> None:
+    """实帧：对手铺满 16 格（20261024_142252），窗必须容得下第 16 格。"""
+    path = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261024_140818"
+            / "live" / "tea_2p" / "20261024_142252_363407_ada05d.png")
+    if not path.is_file():
+        pytest.skip(f"真局语料缺失：{path}")
+    image = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+    table = snapshot_table(image)
+    assert table.opponent.valid is True
+    assert table.opponent.count == 16
+    assert table.opponent.slots == 16
+
+
+def test_fifteen_tile_own_river_is_readable() -> None:
+    """实帧：自己牌河铺到第 15 格（20261024_140930，右边缘 x=1192）。"""
+    path = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261024_140818"
+            / "live" / "tea_2p" / "20261024_140930_962063_159bfb.png")
+    if not path.is_file():
+        pytest.skip(f"真局语料缺失：{path}")
+    image = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+    table = snapshot_table(image)
+    assert table.own.valid is True
+    assert table.own.count == 15
+
+
+def test_narrow_ui_sliver_beyond_the_river_does_not_invalidate() -> None:
+    """自己牌河右外侧有个浮动按钮，只在牌面带里露十几列 —— 不能当成"还有一张牌"。
+
+    实帧证据：20261023_205433 改前判"最外一张没读全（牌面外缘 1252 vs 网格 574）"，
+    改后正常读出 4 张。
+    """
+    frame = _synthetic_table(self_tiles=3, sliver=(1140, 1150))
+    table = snapshot_table(frame, require_tea_table=False)
+    assert table.own.valid is True
+    assert table.own.count == 3, table.own.reason
+
+
+def test_wide_blob_beyond_the_river_still_abstains() -> None:
+    """反面对照：宽到能当牌（≥27px）的奶油块仍然算"网格外面还有一张"，必须弃权。"""
+    frame = _synthetic_table(self_tiles=3, sliver=(1120, 1180))
+    table = snapshot_table(frame, require_tea_table=False)
+    assert table.own.valid is False
+    assert "没读全" in table.own.reason
+
+
+def _synthetic_table(self_tiles: int, sliver: tuple[int, int]) -> np.ndarray:
+    """造一帧：绿桌面 + 自己牌河前 ``self_tiles`` 格 + 右外侧一条奶油色窄块。"""
+    green = (60, 120, 60)
+    face = (215, 225, 235)
+    frame = np.zeros((900, 1600, 3), np.uint8)
+    frame[:, :] = green
+    for slot in range(self_tiles):
+        x0 = int(round(351 + 56.15 * slot))
+        frame[485:560, x0:x0 + 55] = face
+    frame[520:560, sliver[0]:sliver[1]] = face
+    return frame
+
+
+# ---------------------------------------------------------------------------
 # 纯函数分支：手工构造读数，把每条弃权都走一遍
 # ---------------------------------------------------------------------------
 

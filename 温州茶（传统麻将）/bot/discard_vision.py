@@ -94,14 +94,25 @@ FRAME_HEIGHT = 900
 # 两条牌河的解析窗 (x0, y0, x1, y1)，单位是原生像素。
 # y 带 = 牌面 + 底部金边；x 窗按"实测最长牌河 + 余量"裁，把窗外的 UI 直接切掉：
 #   * 左侧「起 +591」气泡实测 x=12..145, y=482..534（在 330 以左）
-#   * 右侧浮动活动按钮（金橙色光圈）实测从 x≈1180 起、y≈525 起，会压进自己
-#     牌河的下缘 —— 所以自己牌河的右界收在 1170（刚好切在按钮左侧），实测最长
-#     自己牌河也只到 x1=1081，留够余量；网格万一还是撞到右界则收尾不弃权
-#     （少算一张只是漏一次可鸣机会，不会产生错误来牌；对手那条河相反，一律弃权）
 #   * 「无序/2人」文字实测在 y≈200..222，在对手牌河上界 225 之上
-# 实测最长牌河：对手到槽位 11（x0=576），自己到槽位 12（x1=1081）。
-_OPPONENT_BAND = (520, 225, 1260, 315)
-_SELF_BAND = (330, 470, 1170, 560)
+#   * 右侧活动按钮（限时免费求财运 / 招募 / 福利任务）实测都在 x≥1400，
+#     不在这两条 y 带里（下面 x1=1252 留了 200px 余量）
+#
+# **x 窗必须覆盖到第 16 格，这是踩过的坑。** 两条河都从各自的锚定边起按
+# 56.15px 节距往外铺，一局最多铺到 16 张（手牌 16 张全打出去）：
+#   对手：锚定 1249 向左，第 15 格 = x 350..406
+#   自己：锚定 351 向右，第 15 格 = x 1193..1248
+# 早先把窗收在 x=520 / 1170（按"当时见过的最长牌河"定的），结果长牌河时最外
+# 一张被窗裁掉，外缘对账判成"没读全"→ 整帧弃权。实测（201640 324 帧 +
+# 140818 500 帧）两条河都出现过 15 张：对手最长到第 15 格（x0=350）、自己最长
+# 到第 15 格（x1=1192）。
+#
+# 自己牌河右界留 1198 而不是 1252：右侧有个浮动活动按钮（金环，实测 x≈1180 起、
+# y≈530 起，只覆盖牌面下缘 30 行）。窗到 1198 时按钮在窗内只剩 18px 宽的渣，
+# 会被 `_MIN_TILE_RUN` 的"窄条不算牌"过滤掉；而第 15 张牌的右缘 1192 在窗内，
+# 两张同时出现时它们的牌面列是连续的（1139..1197），对账差 5px 仍在容差里。
+_OPPONENT_BAND = (345, 225, 1260, 315)
+_SELF_BAND = (330, 470, 1198, 560)
 
 SOURCE_OPPONENT = "opponent"
 SOURCE_SELF = "self"
@@ -122,8 +133,11 @@ _ANCHOR_TOLERANCE = 4
 # 单格实测尺寸：牌面宽 55px，节距 56.15px，牌面高 75px（见下方 _FACE_Y）。
 _TILE_WIDTH = 55.0
 _TILE_PITCH = 56.15
-#: 网格向外最多走这么多格；实测最长 13 格，留一倍余量。
-_MAX_SLOTS_PER_RIVER = 24
+#: 网格向外最多走这么多格。**16 是布局的物理上限**：两条河的锚定边相距
+#: 1249-351=898px，正好 16 个节距（16×56.15=898），第 17 格就会压到对面的
+#: 锚定边上。实测也确实见过 16 张（对手，20261024_142252 起）。写成 24 会
+#: 让网格走到根本不存在牌的窗口里，反而把"越出解析窗"当成异常。
+_MAX_SLOTS_PER_RIVER = 16
 #: 连续这么多格空着就判定"牌河在这里断了"，不再往外走（实测连续空洞最多 1 格）。
 _MAX_HOLE_RUN = 2
 #: 网格外缘与实测牌面外缘的最大允许偏差。对不上说明最外面那张没读全
@@ -139,6 +153,10 @@ _FACE_MIN_VAL = 170
 _COL_MIN_FACE_ROWS = 12
 #: 一个格子里至少这个比例的列是牌面列，才算"这里真有牌"（空洞与真牌的区别）。
 _SLOT_MIN_FACE_RATIO = 0.55
+#: 一条连通的"牌面列"至少要这么宽才算牌（一张牌 55px；UI 碎渣通常 3~20px）。
+#: 低于这个宽度的列一律当碎渣丢掉，不参与外缘对账 —— 否则浮动按钮的一角会被
+#: 当成"网格外面还有一张牌"，把整帧判成"最外一张没读全"。
+_MIN_TILE_RUN = 27
 #: 某一行的奶油像素要占该格宽的这个比例以上，才算这一行的牌面还在。
 #: 取 0.32 而不是 0.5：最新一张牌的上方常压着一个金色菱形闪光标（实测会在
 #: 牌顶盖住约 20 列、10 行），用 0.5 会把这张牌判成"只有 46 行高"从而丢掉最新
@@ -409,6 +427,34 @@ def _face_mask(band: np.ndarray) -> np.ndarray:
     return ((val > _FACE_MIN_VAL) & (sat < _FACE_MAX_SAT)).astype(np.uint8)
 
 
+def _drop_narrow_runs(column_on: np.ndarray, min_width: int = _MIN_TILE_RUN) -> np.ndarray:
+    """丢掉"连通过窄"的牌面列：一张牌 55px 宽，UI 碎渣只有几列到十几列。
+
+    实测（20261023_201640 / 20261024_140818）自己牌河右缘外有一个浮动活动按钮，
+    它在牌面带里只露出 10~20 列；不滤掉的话外缘对账会认为"网格右边还有一张牌"，
+    把本来读得好好的帧判成不可信。牌在飞入动画里时仍然是整张 55px 宽，不受影响。
+
+    Args:
+        column_on: 布尔数组，``True`` 表示该列有足够多行是牌面。
+        min_width: 认定成牌的最小连续宽度。
+
+    Returns:
+        同长度布尔数组，只有宽度达标的连续段保留为 ``True``。
+    """
+    kept = np.zeros_like(column_on, dtype=bool)
+    start: int | None = None
+    for index, on in enumerate(column_on):
+        if on and start is None:
+            start = index
+        elif not on and start is not None:
+            if index - start >= min_width:
+                kept[start:index] = True
+            start = None
+    if start is not None and column_on.size - start >= min_width:
+        kept[start:] = True
+    return kept
+
+
 def find_discard_sparkles(image: np.ndarray) -> tuple[int, ...]:
     """对手牌河上方金色菱形闪光标的中心 x 列表（原生坐标，可能为空）。
 
@@ -479,6 +525,10 @@ def measure_river(band: np.ndarray, x_offset: int, y_offset: int, name: str,
     in_band = mask[local_y0:local_y1, :]
     column_face_rows = np.count_nonzero(in_band, axis=0)
     column_on = column_face_rows >= _COL_MIN_FACE_ROWS
+    # 牌面列再按"连续宽度"滤一遍：一整张牌 55px 宽，UI 碎渣（浮动按钮的一角、
+    # 装饰亮边）往往只有几列到十几列。不滤的话这些渣会被当成"网格外面还有一张
+    # 牌"，把整帧判成"最外一张没读全" —— 实测这就是自己牌河 24% 帧弃权的主因。
+    column_on = _drop_narrow_runs(column_on)
     on_columns = int(np.count_nonzero(column_on))
     if on_columns == 0:
         return RiverReading(name=name, valid=True, slots=0, anchor_x=int(anchor),
@@ -522,8 +572,7 @@ def measure_river(band: np.ndarray, x_offset: int, y_offset: int, name: str,
                 reason=(f"牌河从第 {slot} 格起越出解析窗，实际比实测最长还长，"
                         "最新一张不可定位"))
         width = crop_x1 - crop_x0
-        filled = int(np.count_nonzero(
-            column_face_rows[crop_x0:crop_x1] >= _COL_MIN_FACE_ROWS))
+        filled = int(np.count_nonzero(column_on[crop_x0:crop_x1]))
         walked = slot + 1
         if filled < width * _SLOT_MIN_FACE_RATIO:
             holes.append(slot)
@@ -555,7 +604,7 @@ def measure_river(band: np.ndarray, x_offset: int, y_offset: int, name: str,
                 reason=f"牌河中间断了 {run} 格以上，最新一张不可定位")
 
     # 实测外缘 vs 网格外缘对账：防"最外面那张只画了一半"。
-    on = column_face_rows >= _COL_MIN_FACE_ROWS
+    on = column_on
     outer = np.flatnonzero(on)
     if outer.size == 0:
         return RiverReading(name=name, valid=False, slots=walked,
