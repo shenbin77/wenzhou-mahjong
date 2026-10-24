@@ -1085,3 +1085,58 @@ def test_claim_auto_click_switch_does_not_tap_before_channel_is_wired(tmp_path):
     assert event["claim"]["status"] in ("blocked", "awaiting_human_confirm", "abstain")
     assert event["claim"].get("auto_click") is None
     assert tap.execute_calls == [] and tap.plan_calls == []
+
+
+def test_claim_row_uses_discard_vision_incoming_tile(tmp_path):
+    """来牌接进来后，L2 能验证"碰"——但仍然不点（未过人工确认闸门）。"""
+    from discard_vision import DiscardState
+
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[action_row_frame()],
+        action_guard=CLAIM_GUARD,
+        discard_fn=lambda _img: DiscardState(incoming_tile=1,
+                                             incoming_source="opponent"))
+    loop._last_result = dict(CLAIM_HAND_ANALYSIS)
+
+    event = loop.tick()
+
+    assert event["claim"]["status"] == "awaiting_human_confirm"
+    assert event["claim"]["action"] == "peng"
+    assert event["claim"]["needs_human_confirm"] is True
+    assert tap.execute_calls == []
+
+
+def test_claim_row_rejects_self_discard(tmp_path):
+    """自家刚打出的牌不许碰——行动行常在自家出牌后刷出来。"""
+    from discard_vision import DiscardState
+
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[action_row_frame()],
+        action_guard=CLAIM_GUARD,
+        discard_fn=lambda _img: DiscardState(incoming_tile=1,
+                                             incoming_source="self"))
+    loop._last_result = dict(CLAIM_HAND_ANALYSIS)
+
+    event = loop.tick()
+
+    assert event["claim"]["status"] == "blocked"
+    assert "self" in json.dumps(event["claim"], ensure_ascii=False)
+    assert event["claim"]["tap_point"] is None
+    assert tap.execute_calls == []
+
+
+def test_discard_reading_can_be_switched_off(tmp_path):
+    """``read_discards=False`` 时一次都不读（排障/降负载用）。"""
+    calls = []
+
+    def spy(_img):
+        calls.append(1)
+        return None
+
+    loop, _shot, _analyzer, _tap, _ = make_loop(
+        tmp_path, frames=[action_row_frame()], action_guard=CLAIM_GUARD,
+        read_discards=False, discard_fn=spy)
+
+    loop.tick()
+
+    assert calls == []

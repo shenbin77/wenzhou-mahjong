@@ -201,6 +201,89 @@ def test_unknown_incoming_tile_blocks_claims() -> None:
     assert "来牌未知" in decision.l2_reason
 
 
+def test_incoming_source_matches_discard_vision_constants() -> None:
+    """两个模块的归属字面量必须一致，否则闸门会静默失效。"""
+    import discard_vision
+
+    assert ap.INCOMING_SOURCE_OPPONENT == discard_vision.SOURCE_OPPONENT
+    assert ap.INCOMING_SOURCE_SELF == discard_vision.SOURCE_SELF
+    assert ap.INCOMING_SOURCE_OPPONENT in ap.CLAIMABLE_INCOMING_SOURCES
+    assert ap.INCOMING_SOURCE_SELF not in ap.CLAIMABLE_INCOMING_SOURCES
+
+
+def test_self_discard_is_never_claimable() -> None:
+    """自己刚打出的牌不能拿来碰/吃/杠/胡——行动行常在自家出牌后刷出来。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
+                     incoming_source="self", player_count=2)
+    report = ap.evaluate_claim_candidates(hand, ActionPolicyConfig())
+    for action in ap.CLAIM_ACTIONS:
+        assert not report[action]["feasible"], action
+        assert "self" in report[action]["why"], action
+
+    decision = decide_action(state(gold_button(), pass_button()), hand)
+    assert decision is not None
+    assert not decision.executable
+    assert decision.tap_point is None
+
+
+def test_self_discard_blocks_even_the_hu_button() -> None:
+    """胡盘也一样：自家弃牌不能成胡。"""
+    hand = HandState(concealed=HU_HAND.concealed, incoming_tile=1,
+                     incoming_source=ap.INCOMING_SOURCE_SELF, player_count=2)
+    decision = decide_action(state(hu_button(), pass_button()), hand)
+    assert decision is not None
+    assert not decision.executable
+    assert "self" in decision.blocked_reason or "self" in decision.l2_reason
+
+
+def test_opponent_discard_is_claimable() -> None:
+    """别家打出的牌照常可以碰（对照组，防止闸门写反）。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
+                     incoming_source="opponent", player_count=2)
+    decision = decide_action(state(gold_button(), pass_button()), hand)
+    assert decision is not None
+    assert decision.action == ACTION_PENG
+
+
+def test_unrecognised_incoming_source_is_blocked() -> None:
+    """不认识的归属口径一律不信任（fail closed）。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
+                     incoming_source="上家", player_count=2)
+    decision = decide_action(state(gold_button(), pass_button()), hand)
+    assert decision is not None
+    assert not decision.executable
+
+
+def test_unlabelled_incoming_source_still_evaluated() -> None:
+    """调用方没给归属（None）时不因归属拦下——生产链路上有牌必有归属。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
+                     incoming_source=None, player_count=2)
+    decision = decide_action(state(gold_button(), pass_button()), hand)
+    assert decision is not None
+    assert decision.action == ACTION_PENG
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"incoming_source": "self"}, "self"),
+    ({"incoming_source": "opponent"}, "opponent"),
+    ({"discards": {"incoming_tile": 1, "incoming_source": "self"}}, "self"),
+    ({"incoming_source": ""}, None),
+    ({"incoming_source": 7}, None),
+    ({}, None),
+])
+def test_incoming_source_of_parses_every_shape(payload: dict,
+                                               expected: str | None) -> None:
+    """``from_analysis`` 能同时吃下 DiscardState 本体 / as_dict / 顶层键。"""
+    assert ap._incoming_source_of(payload) == expected
+
+
+def test_incoming_source_of_accepts_discard_state_object() -> None:
+    import discard_vision
+
+    state = discard_vision.DiscardState(incoming_tile=1, incoming_source="self")
+    assert ap._incoming_source_of({"discards": state}) == "self"
+
+
 def test_hand_count_not_conserved_blocks() -> None:
     """张数不守恒的手牌不能被用来做任何判定。"""
     hand = HandState(concealed=(1, 1, 2, 4), incoming_tile=1, player_count=2)

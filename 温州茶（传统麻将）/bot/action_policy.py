@@ -48,6 +48,10 @@ confirmed_actions)``，即默认任何动作都需要人工确认。确认一个
   ``discards`` 字段传进来（见 :meth:`HandState.from_analysis`）。**传不进来
   时** :class:`HandState.incoming_tile` 仍是 ``None``，此时 L2 无法验证
   碰/吃/杠/胡，只有"过"可能出手 —— 这是默认的安全行为，不是缺口。
+  * 来牌还带归属 :attr:`HandState.incoming_source`：``"self"``（自家刚打出的）
+    或任何不在 :data:`CLAIMABLE_INCOMING_SOURCES` 里的字符串，一律不许
+    吃/碰/杠/胡——行动行有时是在自家出牌之后刷出来的，没有这道闸就会拿
+    自己的弃牌去碰。归属未标注（``None``）时不拦，只用来牌本身判定。
 * 吃会弹出二次选择面板（面板里有 ``取消``），本版未接线，
   ``config.chi_enabled`` 默认 ``False``。
 * ``tap_executor`` 的几何白名单只放行手牌 ROI（y ≥ 720），行动圆盘在 y≈600，
@@ -99,7 +103,10 @@ __all__ = [
     "BoardState",
     "CLAIM_TAP_CHANNEL_READY",
     "COST_BUTTONS",
+    "CLAIMABLE_INCOMING_SOURCES",
     "HandState",
+    "INCOMING_SOURCE_OPPONENT",
+    "INCOMING_SOURCE_SELF",
     "TEMPLATE_MARGIN_MIN",
     "TEMPLATE_TOP1_MIN",
     "blacklist_hit",
@@ -137,6 +144,19 @@ ACTION_PRIORITY: tuple[str, ...] = (
 
 #: 空字符串 = 没能解析出任何动作（弃权，但保留证据）。
 ACTION_NONE: str = ""
+
+# ---------------------------------------------------------------------------
+# 来牌归属（与 discard_vision.SOURCE_* 同值，此处独立声明避免硬依赖）
+# ---------------------------------------------------------------------------
+
+#: 来牌是别家打出的——**只有这种**才可能被吃/碰/杠/胡。
+INCOMING_SOURCE_OPPONENT: str = "opponent"
+#: 来牌是我自己刚打出的——不能拿来吃/碰/杠/胡。
+INCOMING_SOURCE_SELF: str = "self"
+
+#: 允许拿来做吃/碰/杠/胡的归属集合。``None``（调用方未标注归属）不拦；
+#: 除 ``"opponent"`` 以外的任何字符串一律拦下（未识别的口径不信任）。
+CLAIMABLE_INCOMING_SOURCES: frozenset[str] = frozenset({INCOMING_SOURCE_OPPONENT})
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +475,29 @@ def _incoming_of(result: Mapping[str, Any], vision_to_engine) -> int | None:
     return None
 
 
+def _incoming_source_of(result: Mapping[str, Any]) -> str | None:
+    """从返回体里取来牌归属；取不到就 ``None``（不拦，见 :class:`HandState`）。
+
+    与 :func:`_incoming_of` 同形状：优先 ``result["discards"]``（可以是
+    :class:`discard_vision.DiscardState` 本体或它的 ``as_dict()``），其次
+    顶层的 ``result["incoming_source"]``。只接受非空字符串，其余一律
+    ``None``——宁可"未标注"也不吃下一个可疑的归属。
+    """
+    if not isinstance(result, Mapping):
+        return None
+    raw: Any = None
+    discards = result.get("discards")
+    if isinstance(discards, Mapping):
+        raw = discards.get("incoming_source")
+    elif discards is not None:
+        raw = getattr(discards, "incoming_source", None)
+    if raw is None:
+        raw = result.get("incoming_source")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
+
+
 # ---------------------------------------------------------------------------
 # 手牌状态（L2 输入）
 # ---------------------------------------------------------------------------
@@ -469,6 +512,12 @@ class HandState:
         caishen: 本局财神的引擎 ID；``None`` 表示未确认。
         incoming_tile: 触发本次行动的来牌（别家打出的那张）；``None``
             表示未知——此时 L2 无法验证任何吃碰杠胡。
+        incoming_source: 谁打出的来牌 —— :data:`INCOMING_SOURCE_OPPONENT`
+            / :data:`INCOMING_SOURCE_SELF` / ``None``（未标注）。
+            ``"self"`` 或非这两个值的字符串都**不可**拿来吃碰杠胡。
+            ``None`` 表示调用方没给归属（例如手工构造的局面），此时不因
+            归属而拦下——生产链路上 ``discard_vision`` 只要给了牌就一定
+            给了归属，所以不会出现"有牌没归属"的真空。
         player_count: 局面人数（2 或 4）；``None`` 表示未确认。
         source: 证据来源，写进台账便于回溯。
     """
@@ -477,6 +526,7 @@ class HandState:
     melds: tuple[tuple[int, ...], ...] = ()
     caishen: int | None = None
     incoming_tile: int | None = None
+    incoming_source: str | None = None
     player_count: int | None = None
     source: str = ""
 
@@ -569,6 +619,7 @@ class HandState:
                 count = 4
         return cls(concealed=concealed, melds=tuple(melds), caishen=caishen,
                    incoming_tile=_incoming_of(result, vision_to_engine),
+                   incoming_source=_incoming_source_of(result),
                    player_count=count,
                    source="analyze_snapshot")
 
@@ -852,6 +903,15 @@ def evaluate_claim_candidates(hand: HandState,
     if tile is None:
         for action in CLAIM_ACTIONS:
             report[action]["why"] = "来牌未知（无读牌链路），L2 无法验证吃碰杠胡"
+        return report
+    # 归属闸门：自己刚打出的牌不能拿来吃/碰/杠/胡。真机上行动行有时是在
+    # 自家出牌之后刷出来的（动画残留），没有这道闸就会拿自己的弃牌去碰。
+    source = hand.incoming_source
+    if source is not None and source not in CLAIMABLE_INCOMING_SOURCES:
+        for action in CLAIM_ACTIONS:
+            report[action]["why"] = (
+                f"来牌归属为 {source!r}（只有 {INCOMING_SOURCE_OPPONENT!r} "
+                f"才可能被吃碰杠胡），L2 弃权")
         return report
 
     tile = int(tile)

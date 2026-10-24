@@ -27,6 +27,9 @@
     ``action_policy.decide_action`` 做 L1 几何 + L2 算牌引擎决策，**默认只
     落台账不点击**（``claim_auto_click=False``，且每个动作还须人工确认）；
     点击通道本身尚未接线（TapExecutor 白名单不放行动圆盘所在的 y≈600）。
+    来牌由 ``discard_vision`` 每帧读取（``read_discards_sequential``，需要
+    前后两帧才认得出，换局会 ``forget_discards``）；读不出时 ``incoming_tile``
+    为 ``None``，此时 L2 只能出"过"。
 
 本模块只新增，不修改任何既有文件；识别与点击链路全部 import 复用。
 """
@@ -41,7 +44,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -157,6 +160,9 @@ class AutoPlayLoop:
         clock_fn: Callable[[], float] | None = None,
         claim_auto_click: bool = False,
         claim_policy: ActionPolicyConfig | None = None,
+        read_discards: bool = True,
+        discard_key: str | None = None,
+        discard_fn: Callable[[np.ndarray], Any] | None = None,
     ) -> None:
         if not isinstance(enabled, bool):
             raise TypeError("enabled 必须是显式 bool；True 才允许真实点击")
@@ -203,6 +209,13 @@ class AutoPlayLoop:
             auto_click_enabled=self.claim_auto_click)
         # 上一帧的识牌结果：行动行出现时用它构造 L2 的局面快照。
         self._last_result: dict | None = None
+        # 牌河/来牌读取：行动决策（碰/吃/杠/胡）要拿"别家刚打出的那张"。
+        # discard_vision 需要前后两帧才能确认来牌，所以用它的 sequential
+        # 登记处每帧喂一次；换局必须 forget，否则会拿上一局的牌河当基线。
+        self.read_discards = bool(read_discards)
+        self.discard_key = str(discard_key or f"auto_play:{self.serial}")
+        self._discard = discard_fn or self._read_discards_sequential
+        self._discard_state: Any = None
 
         self.round = RoundState()
         self.consecutive_errors = 0
@@ -359,6 +372,8 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001 - 截图失败计入异常预算
             return self._anomaly("capture_failed", f"{exc}", started)
         image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        # 每帧喂一次牌河：来牌要前后两帧才认得出，缺了它行动决策只能出"过"。
+        self._read_discards(image)
         try:
             action_guard = self._action_guard(image)
         except Exception as exc:  # noqa: BLE001 - 门禁异常必须 fail closed
@@ -409,6 +424,9 @@ class AutoPlayLoop:
             self.round.caishen = caishen
             # 换局：稳定帧必须重新攒（换局后的第一帧绝不放行）。
             self.turn_history.clear()
+            # 牌河基线也要作废：拿上一局的牌河做差分会白丢一轮（后果是弃权，
+            # 不会误报，但没必要）。
+            self._forget_discards()
             self._write_event({
                 "ts": datetime.now().astimezone().isoformat(),
                 "event": "round_reset", "round_seq": self.round.seq,
@@ -488,6 +506,37 @@ class AutoPlayLoop:
         return event
 
     # ------------------------------------------------------------------
+    # 牌河/来牌读取（供行动决策取"别家刚打出的那张"）
+    # ------------------------------------------------------------------
+    def _read_discards_sequential(self, image: np.ndarray) -> Any:
+        """调 ``discard_vision`` 读本帧牌河，并登记为下一帧的基线。"""
+        from discard_vision import read_discards_sequential
+
+        return read_discards_sequential(image, key=self.discard_key)
+
+    def _read_discards(self, image: np.ndarray) -> None:
+        """每帧读一次牌河；失败只丢"来牌"，不许拖垮循环。"""
+        self._discard_state = None
+        if not self.read_discards:
+            return
+        try:
+            self._discard_state = self._discard(image)
+        except Exception:  # noqa: BLE001 - 读牌河失败不影响其它门禁
+            self._discard_state = None
+
+    def _forget_discards(self) -> None:
+        """换局时作废牌河基线（``discard_vision`` 的登记处按 key 隔离）。"""
+        self._discard_state = None
+        if not self.read_discards:
+            return
+        try:
+            from discard_vision import forget_discards
+
+            forget_discards(self.discard_key)
+        except Exception:  # noqa: BLE001 - 清不掉也只是少一层保险
+            pass
+
+    # ------------------------------------------------------------------
     # 行动（吃/碰/杠/胡/过）决策闸门
     # ------------------------------------------------------------------
     def _claim_policy_event(self, image: np.ndarray, frame_path: Path) -> dict:
@@ -510,7 +559,11 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001 - 读不出即记异常，不放行
             return {"claim": {"status": "read_failed", "reason": f"{exc}",
                               "frame": str(frame_path)}}
-        hand = HandState.from_analysis(self._last_result)
+        # 来牌从本帧的牌河读数里取（discard_vision 给的是 DiscardState）。
+        payload = dict(self._last_result or {})
+        if self._discard_state is not None:
+            payload["discards"] = self._discard_state
+        hand = HandState.from_analysis(payload)
         decision = decide_action(claim_state, hand, self._claim_policy, image=image)
         if decision is None:
             return {"claim": {
