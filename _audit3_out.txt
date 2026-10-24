@@ -1,0 +1,39 @@
+## Summary
+
+终审通过。第二审 3 项偏差均已真实修复，关键契约无回归；可以进入下一阶段：金标 manifest 冻结与真机验收。
+
+## Changes
+
+未修改任何源码、测试、SPEC 或配置。
+
+| 复核项 | 结论与证据 |
+|---|---|
+| 弃权完整状态机 | [符合] 首帧只创建 `detected` 并返回，不落盘：[recorder.py:445](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:445>)。第二个同语义键稳定帧才进入 `suggested`，随后关闭为 `abstained`：[recorder.py:460](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:460>)。终态加入轨迹后才追加 JSONL：[recorder.py:346](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:346>)。测试明确验证首帧无文件及轨迹 `detected → suggested → abstained`：[test_recorder.py:173](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:173>)。 |
+| 活动决策锁 | [符合] `detected` 未关闭时，不同语义键在任何状态替换前直接忽略：[recorder.py:411](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:411>)。旧键、稳定计数和轨迹保持不变，旧决策随后可进入 `suggested → timeout`：[test_recorder.py:205](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:205>)。 |
+| 茶系 `gate_ok` | [符合] 只由规则人数是否读出，以及人数与 `mode` 是否一致决定：[recorder.py:157](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:157>)。`无中发` 仅影响记录文字后缀，不参与布尔门禁；专项测试覆盖“未检测到无中发但 tea_2p 仍通过”：[test_recorder.py:231](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:231>)。 |
+
+无回归抽查均符合：
+
+- 语义键包含 `mode + 排序后手牌多重集 + round + caishen_id`，`decision_id` 使用键前 16 位：[recorder.py:35](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:35>)。
+- `suggested` 满 30 秒才关闭为 `timeout`：[recorder.py:354](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:354>)。
+- 成功差分及 `diff_failed` 的 `human_discard/agreed/abstain_reason/diff_note` 组合正确：[recorder.py:392](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:392>)。
+- 茶、熟候选统一为四字段对象，按分数降序且最多 Top-5：[recorder.py:92](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:92>)。
+- `_append()` 仅由 `_close()` 调用，`suggested` 不落盘，每个终态一次写一行：[recorder.py:303](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:303>)。
+
+## Validation
+
+- 已执行并通过：`python -m pytest tests\test_recorder.py`  
+  结果：`12 passed in 3.15s`。
+- 已执行并通过：`python -m pytest tests`  
+  结果：`100 passed in 20.15s`。
+- 未出现 `Errno 28` 或其他环境失败。`pytest.ini` 将 `basetemp` 固定在项目目录，[conftest.py:14](</D:/温州麻将/温州茶（传统麻将）/bot/conftest.py:14>) 同时将 Python 临时目录固定到 D 盘项目目录。
+
+## Risks
+
+- [文档问题] [SPEC-002 第 14 行](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:14>) 的重新布防描述遗漏 `caishen_id`。按已拍板口径，财神变化形成新语义键即可重新布防；当前实现正确，不判不符合。
+- 本轮未做真机验收；这是下一阶段工作，不影响记录器代码终审通过。
+- `bot` 目录没有知识图谱文件，因此影响面检查采用源码调用搜索与全量 100 项回归替代。
+
+下一步：冻结三种模式的金标 manifest，再按模式分别开展真机门禁、识牌、记录及连续稳定性验收。
+
+

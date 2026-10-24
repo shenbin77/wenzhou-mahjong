@@ -18,12 +18,24 @@ from assist_shu import (analyze_shu_manual_hand, analyze_shu_snapshot,
 from mode_vision import detect_shu_rule_text  # noqa: E402
 
 FRAMES = BOT_DIR.parents[1] / "阿法算牌分析" / "熟识牌对照_20261018"
+SHU_GOLD = BOT_DIR.parent / "采集" / "box_replay_harvest_missing"
 
 
 def test_shu_rule_text_accepts_red_zhong_replay_and_rejects_tea(tmp_path):
     for name in ("frame_233s_14.png", "frame_261s_14.png"):
         image = cv2.imdecode(np.fromfile(str(FRAMES / name), np.uint8), cv2.IMREAD_COLOR)
         assert detect_shu_rule_text(image)
+
+    hidden_zhong = cv2.imdecode(np.fromfile(str(FRAMES / "frame_233s_14.png"),
+                                           np.uint8), cv2.IMREAD_COLOR)
+    hidden_zhong[195:250, 810:990] = 130
+    assert not detect_shu_rule_text(hidden_zhong)
+    hidden_path = tmp_path / "hidden_red_zhong_rule.png"
+    ok, encoded = cv2.imencode(".png", hidden_zhong)
+    assert ok
+    hidden_path.write_bytes(encoded.tobytes())
+    hidden_result = analyze_shu_snapshot(hidden_path, confirmed_four_player=True)
+    assert hidden_result["status"] == "abstain" and hidden_result["hand"] == []
 
     tea = BOT_DIR.parent / "采集" / "2026-10-13" / "323028" / "r01" / "frame_01.png"
     image = cv2.imdecode(np.fromfile(str(tea), np.uint8), cv2.IMREAD_COLOR)
@@ -89,3 +101,37 @@ def test_import_and_manual_correction_save_separate_local_records(tmp_path):
     assert corrected["suggested_boxes"] == []
     assert corrected["corrected_from"] == result["record"]
     assert json.loads(Path(corrected["record"]).read_text(encoding="utf-8")) == corrected
+
+
+def test_manual_correction_requires_verified_shu_screenshot(tmp_path):
+    labels = "w1 w1 w6 w6 w8 s1 s6 t3 t3 t4 t5 t6 t9 t9"
+    with pytest.raises(ValueError, match="必须关联"):
+        analyze_shu_manual_hand(
+            labels, confirmed_four_player=True, session_dir=tmp_path,
+        )
+    tea = BOT_DIR.parent / "采集" / "2026-10-13" / "323028" / "r01" / "frame_01.png"
+    with pytest.raises(ValueError, match="未确认温州熟"):
+        analyze_shu_manual_hand(
+            labels, confirmed_four_player=True, session_dir=tmp_path,
+            image_path=tea,
+        )
+    assert not list(tmp_path.glob("shu_manual_*.json"))
+
+
+def test_native_900px_shu_gold_hands_are_exact_and_incomplete_hand_abstains():
+    checked_frames = checked_tiles = 0
+    for manifest in sorted(SHU_GOLD.rglob("gold_hands.json")):
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        for frame in document["frames"]:
+            source = manifest.parent / Path(frame["name"]).name
+            expected = next(seat["tiles"] for seat in frame["seats"]
+                            if seat["seat"] == "bottom")
+            result = analyze_shu_snapshot(source, confirmed_four_player=True)
+            from pc_bot.tile_vision import TILE_IDS
+            observed = [TILE_IDS[label] for label in result["hand"]]
+            assert observed == expected, f"{document['round_uid']}/{source.name}"
+            assert result["mode"] == "shu_4p"
+            assert result["status"] == ("wait" if len(expected) == 13 else "abstain")
+            checked_frames += 1
+            checked_tiles += len(expected)
+    assert (checked_frames, checked_tiles) == (8, 103)

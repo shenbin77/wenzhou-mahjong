@@ -30,17 +30,26 @@ if str(BOT_DIR) not in sys.path:
 
 import mode_vision  # noqa: E402
 from mode_vision import (  # noqa: E402
+    DECK_LATCH,
+    DECK_SCORE_MIN,
     DEFAULT_LATCH_TTL_S,
     MODE_LATCH,
     PLAYER_MARGIN_MIN,
     PLAYER_SCORE_MIN,
+    RULE_GATES,
+    RuleReading,
+    TeaDeckLatch,
     TeaModeLatch,
+    TeaRuleGates,
+    confirm_tea_no_zhong_fa,
+    detect_tea_no_zhong_fa,
     detect_tea_player_count,
     frame_round_identity,
     hud_fingerprint,
     latest_action_ui,
     reset_tea_mode_latch,
     same_hud_fingerprint,
+    score_tea_no_zhong_fa,
     score_tea_player_count,
     visible_caishen_label,
 )
@@ -55,6 +64,7 @@ FOUR_P_FRAME = TEA_ROOT / "采集" / "2026-10-13" / "323028" / "r01" / "frame_02
 REQUIRED_ACTION_UI_KEYS = (
     "action_discs_seen", "action_disc_count", "action_discs",
     "claim_decision", "claim_reason", "action_gold_pixel_ratio",
+    "deck_score", "deck_score_min", "deck_latched", "deck_source",
     "mode_score", "mode_margin", "mode_score_min", "mode_margin_min",
     "mode_raw_players", "mode_players", "mode_source", "mode_latched",
     "mode_latch_resets", "mode_latch_age_frames", "mode_latch_age_s",
@@ -125,6 +135,14 @@ def clear_two_p(two_p_frame) -> np.ndarray:
 def covered_two_p(two_p_frame) -> np.ndarray:
     """同一间房，但圆盘区域被压住 —— 逐帧判定必然给 None。"""
     return synth_frame(two_p_frame, occlude_rule_text=True)
+
+
+@pytest.fixture(scope="module")
+def blind_two_p(two_p_frame) -> np.ndarray:
+    """两取样区全被压住的帧：人数读不出，条幅也读不出（= 最彻底的"看不清"）。"""
+    image = synth_frame(two_p_frame, occlude_rule_text=True)
+    image[135:190, 960:1110] = 130
+    return image
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +345,7 @@ def test_snapshot_exposes_full_latch_state(clear_two_p, covered_two_p):
     assert snap["resets"] == 0
     assert snap["ttl_s"] == DEFAULT_LATCH_TTL_S
     assert isinstance(snap["hud_known"], bool)
-    assert snap["last_reason"] == "latched_mode_reused"
+    assert snap["last_reason"] == "latched_value_reused"
 
 
 def test_reading_as_dict_is_json_serialisable(clear_two_p):
@@ -500,18 +518,19 @@ def test_tea_bot_recovers_covered_frame_after_confirmation(tmp_path, clear_two_p
     _close_bot(bot)
 
 
-def test_tea_bot_read_player_count_exposes_action_ui(tmp_path, clear_two_p):
-    """TeaBot 要把 action_ui 暴露出来供上层逐帧记录。"""
+def test_tea_bot_read_tea_rules_exposes_action_ui(tmp_path, clear_two_p):
+    """TeaBot 要把两道门禁的 action_ui 暴露出来供上层逐帧记录。"""
     bot = _new_bot(tmp_path)
     assert bot.last_action_ui == {}
-    players, ui = bot._read_player_count(clear_two_p, detect_tea_player_count)
-    assert players == 2
+    players, deck, ui = bot._read_tea_rules(
+        clear_two_p, detect_tea_player_count, detect_tea_no_zhong_fa)
+    assert players == 2 and deck is True
     missing = [key for key in REQUIRED_ACTION_UI_KEYS if key not in ui]
     assert not missing, f"TeaBot 读出的 action_ui 缺字段: {missing}"
     _close_bot(bot)
 
 
-def test_tea_bot_read_player_count_falls_back_without_mode_module(
+def test_tea_bot_read_tea_rules_falls_back_without_mode_module(
         tmp_path, clear_two_p, monkeypatch):
     """``mode_vision`` 被 SimpleNamespace 替身顶掉时，行为与修改前完全一致。"""
     import types
@@ -520,10 +539,12 @@ def test_tea_bot_read_player_count_falls_back_without_mode_module(
     monkeypatch.setitem(sys.modules, "mode_vision", types.SimpleNamespace(
         detect_tea_player_count=lambda _img: 2,
         detect_tea_no_zhong_fa=lambda _img: True))
-    players, ui = bot._read_player_count(clear_two_p, lambda _img: 2)
-    assert players == 2
+    players, deck, ui = bot._read_tea_rules(
+        clear_two_p, lambda _img: 2, lambda _img: True)
+    assert players == 2 and deck is True
     assert ui["mode_source"] == "per_frame"
     assert ui["mode_latched"] is False
+    assert ui["deck_latched"] is False
     _close_bot(bot)
 
 
@@ -539,3 +560,185 @@ def test_global_latch_helpers_round_trip(clear_two_p, covered_two_p):
     reset_tea_mode_latch(reason="test")
     assert MODE_LATCH.latched_players is None
     assert confirm_tea_player_count(covered_two_p) is None
+
+
+# ---------------------------------------------------------------------------
+# 7. 第二道门禁：牌集「无中发」的粘滞（与人数不同维度，但共用失效信号）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def deck_covered(two_p_frame) -> np.ndarray:
+    """同一间房、但「无中发规则」条幅被压住的帧 —— 逐帧口径必然读不出。"""
+    image = synth_frame(two_p_frame)
+    image[135:190, 960:1110] = 130        # 条幅取样区实际位置附近
+    return image
+
+
+def test_deck_gate_contract_unchanged(clear_two_p, deck_covered):
+    """逐帧口径本身没被改动：清晰帧 True，遮挡帧 False。"""
+    assert detect_tea_no_zhong_fa(clear_two_p) is True
+    confirmed, score = score_tea_no_zhong_fa(clear_two_p)
+    assert confirmed and score >= DECK_SCORE_MIN
+    confirmed, score = score_tea_no_zhong_fa(deck_covered)
+    assert confirmed is False and score < DECK_SCORE_MIN
+    assert detect_tea_no_zhong_fa(synth_frame(None)) is False
+
+
+def test_deck_latch_never_confirmed_abstains():
+    """一次都没确认过的画面：牌集永远不许被当成「已确认无中发」。"""
+    latch = TeaDeckLatch()
+    for _ in range(3):
+        reading = latch.observe(synth_frame(None))
+        assert reading.value is None
+        assert reading.source == mode_vision.LATCH_SOURCE_UNKNOWN
+        assert reading.confirmed is False
+    assert latch.latched_value is None
+
+
+def test_deck_latch_survives_obscured_banner(clear_two_p, deck_covered):
+    """核心修复：确认过一次之后，条幅被圆盘压住的帧不再弃权。"""
+    latch = TeaDeckLatch()
+    first = latch.observe(clear_two_p)
+    assert (first.value, first.source) == (True, mode_vision.LATCH_SOURCE_CONFIRMED)
+    assert first.score >= DECK_SCORE_MIN
+
+    covered = latch.observe(deck_covered)
+    assert covered.value is True
+    assert covered.source == mode_vision.LATCH_SOURCE_LATCHED
+    assert covered.latched is True
+    assert covered.raw_value is None      # 本帧逐帧口径确实读不出
+    assert covered.score >= DECK_SCORE_MIN   # 复用时要带上当初确认时的分数
+    assert latch.snapshot()["age_frames"] == 1
+
+
+def test_two_gates_hold_independent_values(clear_two_p, deck_covered,
+                                           four_p_frame):
+    """人数锁和牌集锁是两个维度：一个变了不该牵连另一个的值。"""
+    gates = TeaRuleGates()
+    mode, deck = gates.observe(clear_two_p)
+    assert (mode.players, deck.value) == (2, True)
+
+    # 换到 4 人房（同一套合成画法）：只有人数锁翻牌，牌集锁照旧保持 True。
+    mode, deck = gates.observe(synth_frame(four_p_frame))
+    assert mode.players == 4
+    assert mode.source == mode_vision.LATCH_SOURCE_CONFIRMED
+    assert deck.value is True
+    # 牌集这一帧若读不出，仍由它自己的锁继续提供 True。
+    mode, deck = gates.observe(deck_covered)
+    assert deck.value is True
+    assert deck.source == mode_vision.LATCH_SOURCE_LATCHED
+
+
+def test_shared_reset_invalidates_both_gates(two_p_frame):
+    """安全关键：换局信号必须让**两把锁一起**失效，不许各自为政。"""
+    gates = TeaRuleGates()
+    mode, deck = gates.observe(synth_frame(two_p_frame, hud_seed=0))
+    assert (mode.players, deck.value) == (2, True)
+
+    other_room = synth_frame(two_p_frame, hud_seed=1, occlude_rule_text=True)
+    other_room[135:190, 960:1110] = 130       # 条幅也一并被压住
+    mode, deck = gates.observe(other_room)
+    assert mode.players is None, "人数锁没有随换局失效"
+    assert deck.value is None, "牌集锁没有随换局失效 = 拿着上一局的牌集在决策"
+    assert gates.mode.resets == 1 and gates.deck.resets == 1
+
+
+def test_manual_reset_clears_every_gate(clear_two_p, blind_two_p):
+    """作废入口是唯一的：一次 reset 必须同时落到两把锁。"""
+    gates = TeaRuleGates()
+    gates.observe(clear_two_p)
+    assert gates.snapshot()["mode"]["latched"] is True
+    assert gates.snapshot()["deck"]["latched"] is True
+
+    gates.reset(reason="room_switch")
+    assert gates.mode.latched_value is None
+    assert gates.deck.latched_value is None
+
+    # 新作用域里什么都读不出来的帧：两把锁都已经空了，不许再给任何结论。
+    mode, deck = gates.observe(blind_two_p)
+    assert mode.players is None and deck.value is None
+    assert mode.source == mode_vision.LATCH_SOURCE_UNKNOWN
+    assert deck.source == mode_vision.LATCH_SOURCE_UNKNOWN
+
+
+def test_deck_latch_ttl_expiry(two_p_frame, blind_two_p):
+    """牌集锁同样有 TTL 兜底，而且过期后不许再拿着任何旧结论发话。"""
+    clock = {"t": 100.0}
+    gates = TeaRuleGates(ttl_s=20.0, clock=lambda: clock["t"])
+    mode, deck = gates.observe(synth_frame(two_p_frame))
+    assert deck.value is True and mode.players == 2
+
+    clock["t"] += 10.0
+    mode, deck = gates.observe(blind_two_p)        # 未过期：两把锁都继续生效
+    assert deck.value is True and mode.players == 2
+
+    clock["t"] += 15.0                              # 超过 20s
+    mode, deck = gates.observe(blind_two_p)
+    assert deck.value is None, "牌集锁过期后仍在发结论"
+    assert mode.players is None, "人数锁过期后仍在发结论"
+    assert gates.snapshot()["deck"]["last_reason"] == "latch_ttl_expired"
+    assert gates.snapshot()["mode"]["last_reason"] == "latch_ttl_expired"
+
+
+def test_confirm_tea_no_zhong_fa_round_trip(clear_two_p, deck_covered):
+    """``confirm_tea_no_zhong_fa`` 出口：未确认 False → 确认 True → 遮挡仍 True。"""
+    reset_tea_mode_latch(reason="test")
+    assert confirm_tea_no_zhong_fa(deck_covered) is False     # 未确认 → 弃权
+    assert confirm_tea_no_zhong_fa(clear_two_p) is True
+    assert confirm_tea_no_zhong_fa(deck_covered) is True      # 锁存生效
+    reset_tea_mode_latch(reason="test")
+    assert confirm_tea_no_zhong_fa(deck_covered) is False
+
+
+def test_process_gates_are_one_object():
+    """``MODE_LATCH`` / ``DECK_LATCH`` 必须是同一组 gates 里的两把锁。"""
+    assert RULE_GATES.mode is MODE_LATCH
+    assert RULE_GATES.deck is DECK_LATCH
+    assert isinstance(MODE_LATCH, TeaModeLatch)
+    assert isinstance(DECK_LATCH, TeaDeckLatch)
+    reset_tea_mode_latch(reason="test")
+    assert MODE_LATCH.latched_value is None and DECK_LATCH.latched_value is None
+
+
+def test_gates_observe_reads_discs_once(clear_two_p, monkeypatch):
+    """一帧走两把锁，行动圆盘只能被读一次（用计数器盯着，防止白付开销）。"""
+    calls = {"n": 0}
+    real_build = mode_vision.build_action_ui
+
+    def counting_build(image, **kwargs):
+        calls["n"] += 1
+        return real_build(image, **kwargs)
+
+    monkeypatch.setattr(mode_vision, "build_action_ui", counting_build)
+    gates = TeaRuleGates()
+    mode, deck = gates.observe(clear_two_p)
+    assert calls["n"] == 1, "同一帧被重复读行动圆盘，等于白付一次开销"
+    assert mode.action_ui["deck_latched"] == deck.latched
+    assert mode.action_ui["deck_source"] == deck.source
+
+
+def test_rule_reading_is_generic_and_serialisable(clear_two_p):
+    """``RuleReading`` 既能按人数讲话，也能按牌集讲话，JSON 友好。"""
+    reading = TeaModeLatch().observe(clear_two_p)
+    assert isinstance(reading, RuleReading)
+    payload = json.loads(json.dumps(reading.as_dict()))
+    assert payload["gate"] == "mode" and payload["players"] == 2
+
+    deck = TeaDeckLatch().observe(clear_two_p)
+    payload = json.loads(json.dumps(deck.as_dict()))
+    assert payload["gate"] == "deck" and payload["value"] is True
+    # 牌集读数按人数口径取不到值是正常的，不能变成 2/4 之类的假数。
+    assert deck.players is None and deck.raw_players is None
+
+
+def test_turn_gate_action_ui_reports_deck_gate(clear_two_p, deck_covered):
+    """台账里的 action_ui 必须同时说清牌集门禁走了没有。"""
+    reset_tea_mode_latch(reason="test")
+    RULE_GATES.observe(clear_two_p)
+    ui = action_ui_evidence(deck_covered)
+    assert ui["deck_latched"] is True
+    assert ui["deck_value"] is True
+    assert ui["deck_source"] == "latched"
+    assert ui["deck_score"] >= DECK_SCORE_MIN
+    assert ui["deck_latch_available"] is True
+    assert ui["mode_latched"] is True

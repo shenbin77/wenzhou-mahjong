@@ -1,0 +1,57 @@
+## Summary
+
+SPEC-002 v4 已按磁盘现状实现，辅助窗口现使用决策级 JSONL 记录器，保持 dry-run，不触碰模拟器或游戏输入。
+
+## Changes
+
+| 文件 | 改动 |
+|---|---|
+| [recorder.py](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:203>) | 新增状态机、稳定帧、活动锁、语义去重、差分、timeout、严格 v4 JSONL |
+| [assist_window.py](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:250>) | 接入账号、房间号、下一局、超时轮询和记录器；窗口禁用旧逐帧 sidecar |
+| [assist_tea.py](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:56>)、[assist_shu.py](</D:/温州麻将/温州茶（传统麻将）/bot/assist_shu.py:108>) | 暴露识牌诊断及候选；茶候选补齐所需数据，熟候选扩为 Top-5 |
+| [test_recorder.py](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:80>) | 新增10项契约测试 |
+| [QUEUE.md](</D:/温州麻将/SPECS/QUEUE.md:8>) | 仅更新 SPEC-002 行为“五审通过、已实现待真机验收”及测试数字 |
+
+契约自查：
+
+| 契约点 | 实现结果 |
+|---|---|
+| 状态机与稳定帧 | 连续两帧同一多重集才进入 suggested；同时仅一个活动决策 |
+| 语义去重 | mode、排序后多重集、round、caishen_id 生成 SHA-256；会话内已关闭键不重复 |
+| 重新布防 | 手牌、局数或财神变化后允许重新布防，覆盖未选财神后补选 |
+| 关闭与差分 | 仅关闭时写一行；稳定结果帧净少一张则 resolved，否则 `diff_failed`；30秒 timeout |
+| 数据形状 | 严格输出 v4 字段；茶/熟候选统一为按 `final_score` 降序的 Top-5 |
+| 窗口接入 | 账号锁定、房间号可空、下一局递增；窗口调用禁用旧逐帧 JSON，仍只读不点击 |
+
+另保存了改动前基线到 `_backups/20261020_spec002_recorder_baseline/`。按自改进技能要求，测试环境故障记录在 `.learnings/`。
+
+## Validation
+
+全部已执行并通过：
+
+```powershell
+python -m pytest tests\test_recorder.py -q -p no:cacheprovider
+# 10 passed in 3.00s
+
+python -m pytest tests -q -p no:cacheprovider
+# 98 passed in 19.35s
+
+python -m pytest brain_v0\tests pc_bot\tests -q -p no:cacheprovider
+# 446 passed, 13 skipped, 206 subtests passed in 24.05s
+```
+
+同时通过 `py_compile`、AST 解析和 `git diff --check`。因系统 C 盘临时目录已满，pytest 使用了工作区 `D:\温州麻将\.tmp` 作为 `TEMP/TMP/--basetemp`。
+
+## Risks
+
+仍未完成的验收项：
+
+- SPEC §6 的 tea_2p、tea_4p、shu_4p 金标 manifest 尚未生成和冻结。
+- 尚未进行三模式真机连续10局、10个决策点唯一性及人工 `agreed` 复核。
+- 尚未真机制造并复核 low_score、ambiguous、no_box 三类弃权样本。
+- 熟4离线模板路径测试已通过，但仍需部署环境和真实画面验收。
+- 本次未启动模拟器、未操作游戏、未消耗房卡。
+
+下一步是先冻结三模式金标 manifest，再进行只读真机验收。
+
+

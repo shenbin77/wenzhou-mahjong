@@ -42,12 +42,28 @@ __pycache__/
 *.pyo
 *.egg-info/
 .pytest_cache/
+.pytest_tmp/
+.tmp/
+test_out/
 .mypy_cache/
 .ruff_cache/
 node_modules/
 venv/
 .venv/
 env/
+
+# 本地回滚副本：保留在磁盘，不进入版本库
+_backups/
+.codex_backups/
+*.bak
+*.orig
+
+# 本地 Agent/审计工作区：保留在磁盘，不作为项目源码
+/_dfull/
+/_dtest/
+/_ds_test/
+/_acc_bt/
+/_preflight/
 
 # 编辑器 / 系统
 .vscode/
@@ -67,3 +83,17 @@ desktop.ini
 
 # WorkBuddy 本地工作记录，不入库
 .workbuddy/
+
+# 本地凭据及误生成的盘符目录
+/_echobird_key.txt
+/%SystemDrive%/
+
+# Hark 2026-10-24: 运行期会话帧/临时审计目录，本地保留不入库
+温州茶（传统麻将）/采集/assist_sessions/
+温州茶（传统麻将）/采集/dev_auto_play/
+.codex_tmp*/
+.codex_tmp*.txt
+_accept_*.json
+_accept_*.log
+*.err
+温州茶（传统麻将）/采集/workbuddy_review_*/

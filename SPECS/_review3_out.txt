@@ -1,0 +1,25 @@
+## Summary
+
+三审结论：**未通过**。仍有 4 个会导致实现方自行决定数据契约或状态行为的阻塞。
+
+## Changes
+
+未修改任何文件。
+
+## Validation
+
+1. **`diff_failed` 字段仍未冻结。**  
+   字段表把它列入 `abstain_reason`，但差分失败时又规定 `status=resolved`；随后还留下 `abstain_reason` 与新增 `diff_note`“二选一”。这与文首“实现方不得自行变更”冲突。[SPEC 第 38–41 行](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:38>)、[第 48–51 行](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:48>)。必须唯一确定字段及枚举；语义上建议 `resolved + diff_note="diff_failed" + abstain_reason=null`。
+
+2. **`bot_candidates` 不是完整字段定义。**  
+   `array | 同上` 无法确定元素类型、字段和保留数量。[SPEC 第 34–35 行](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:34>)。现有茶模式候选是 `(score, tile)` 元组，[tea_bot.py 第 98–100 行](</D:/温州麻将/温州茶（传统麻将）/bot/tea_bot.py:98>)；熟模式候选是包含 `tile/name/shanten_after/ukeire_count/final_score` 的对象，[assist_shu.py 第 69–77 行](</D:/温州麻将/温州茶（传统麻将）/bot/assist_shu.py:69>)。必须冻结统一对象结构及 Top-N。
+
+3. **重复决策去重和重新布防条件仍不完整。**  
+   `decision_id` 包含决策帧哈希；同一未变化手牌在不同抓图中的 PNG 哈希通常不同，因此“同 id 只写一行”不能阻止语义重复记录。[SPEC 第 15–16 行](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:15>)。现有窗口会持续循环抓图，[assist_window.py 第 363–364 行](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:363>)。需明确一个 active decision 锁，以及 `resolved/timeout/abstained` 后只有在手牌或局号变化时才能重新生成 decision。
+
+4. **`decision_id` 必需元数据没有来源契约。**  
+   ID 强制依赖 `room_id/round`，JSONL 又要求 `account/room_id/round/screen_rule_text` 非空，[SPEC 第 15 行](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:15>)、[第 23–29 行](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:23>)；但当前窗口只有模拟器、模式和财神输入，[assist_window.py 第 88–94 行](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:88>)。现有 HUD 只是像素指纹，不能产出真实房号和局数，[assist_window.py 第 52–67 行](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:52>)。必须冻结这些值来自人工输入、OCR、会话配置中的哪一种，以及无法取得时是否弃权。
+
+## Risks
+
+在以上四项冻结前开始编码，会产生不兼容的 JSONL、重复决策记录，或由实现方擅自决定关键业务字段。下一步应先将这四项写成唯一规则，再进入实现。

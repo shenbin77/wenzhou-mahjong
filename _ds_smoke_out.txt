@@ -1,0 +1,9 @@
+## Report
+
+改动：
+- 创建目录 `D:\温州麻将\_ds_test`
+- 创建 `hello.txt`，内容两行：
+  1. `echobird-deepseek-ok`
+  2. `Python 3.11.9`
+
+测试结果：`python --version` 输出 `Python 3.11.9`，已原样追加为第二行；读取文件确认如上。未改动其他任何文件。

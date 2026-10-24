@@ -1,5 +1,0 @@
-14:43:25 === V3 index-scroll harvest 10-15 ===
-14:43:26 SKIP 790928 frames=48
-14:43:26 SKIP 291755 frames=48
-14:43:26 SKIP 855053 frames=48
-14:43:26 SKIP room_p2a frames=48

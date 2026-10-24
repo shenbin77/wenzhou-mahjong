@@ -86,3 +86,13 @@ def test_build_follow_hud_uses_result_wall_and_play():
     assert hud.countdown == "倒计时：5秒"
     assert hud.turn == "当前行动：我方可出"
     assert "牌河：" in hud.river
+
+
+def test_format_river_summary_empty_lists_are_unknown():
+    """Empty rivers must render 未识别, never 河0/0."""
+    assert "0" not in format_river_summary({"own_river": [], "opponent_river": []})
+    assert UNKNOWN in format_river_summary({"own_river": [], "opponent_river": []})
+    text = format_river_summary({"own_river": [], "opponent_river": [], "discards": {"own_river": [], "opponent_river": []}})
+    assert "河0" not in text
+    assert "0/0" not in text
+    assert UNKNOWN in text

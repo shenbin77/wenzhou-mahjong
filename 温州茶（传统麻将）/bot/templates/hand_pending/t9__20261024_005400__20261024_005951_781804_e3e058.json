@@ -1,0 +1,17 @@
+{
+  "label": "t9",
+  "file": "t9__20261024_005400__20261024_005951_781804_e3e058.png",
+  "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261024_005400\\live\\tea_2p\\20261024_005951_781804_e3e058.png",
+  "source_sha256": "41a979a5e1bd434e0a3457c489889d318c82473e836025b3add5f13dc6d80458",
+  "asset_sha256": "5cef00cd3acbb70e51758bb9bebd47a0927287d1dda1e438ec78e5c25d51e976",
+  "session_id": "20261024_005400",
+  "frame": "20261024_005951_781804_e3e058.png",
+  "box": "725,761,807,875",
+  "score": 0.5291,
+  "margin": 0.0445,
+  "face_bg": 230.0,
+  "best_sim_to_existing": 0.5291,
+  "cluster_frames": 1,
+  "visual_check": "pending",
+  "my_visual_read": "九筒"
+}

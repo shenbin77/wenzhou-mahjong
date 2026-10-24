@@ -1,0 +1,112 @@
+{
+  "schema": "tea_replay_candidates_v1",
+  "source_video": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\2026-10-19\\833667\\r14\\room833667_round14_a7928b28.mp4",
+  "source_sha256": "f55664aaa48cf1e1046c0fb969296ae01665804ed8235148dcd66935ade81718",
+  "sampling": "ffmpeg fps=1; ordinal index is not exact PTS",
+  "counts": {
+    "frames": 29,
+    "visible_2p": 18,
+    "complete_2p": 5
+  },
+  "max_saved": 8,
+  "candidates": [
+    {
+      "file": "candidate_004.png",
+      "sample_index_at_1fps": 4,
+      "sha256": "141334d3a008b65a809a6bfb446decdf0e487d08de6669cc1d6f33fda81486c2",
+      "tile_ids": [
+        2,
+        2,
+        3,
+        5,
+        7,
+        42,
+        42,
+        43,
+        43,
+        44,
+        45,
+        21,
+        28,
+        62,
+        63,
+        67
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_005.png",
+      "sample_index_at_1fps": 5,
+      "sha256": "7196045c384ec91d1f9d379eb73095a48722a5585013edabc019681b7e38ec44",
+      "tile_ids": [
+        2,
+        2,
+        3,
+        67,
+        5,
+        7,
+        42,
+        42,
+        43,
+        43,
+        44,
+        45,
+        21,
+        28,
+        62,
+        63
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_021.png",
+      "sample_index_at_1fps": 21,
+      "sha256": "5378d4cfc7cbd3a1dfcdb0e76019f79692b12f9921ac935a578a75689a3816d7",
+      "tile_ids": [
+        2,
+        2,
+        3,
+        67,
+        5,
+        7,
+        7,
+        8,
+        42,
+        42,
+        43,
+        43,
+        44,
+        45,
+        26,
+        28
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_024.png",
+      "sample_index_at_1fps": 24,
+      "sha256": "7797e05ea15e6d65b796541ca6d080c6e3c7f28262a7cf0ca3baeb4cab52da00",
+      "tile_ids": [
+        2,
+        2,
+        3,
+        67,
+        5,
+        7,
+        7,
+        8,
+        42,
+        42,
+        43,
+        43,
+        44,
+        45,
+        26,
+        28,
+        48
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    }
+  ],
+  "status": "visible_2p_complete_predictions_only_not_training_gold"
+}

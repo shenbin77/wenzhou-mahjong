@@ -1,0 +1,82 @@
+{
+  "schema": "tea_2p_vision_baseline/v1",
+  "created_at": "2026-10-20",
+  "gold_manifest": "tea_2p_manifest.json",
+  "pipeline": {
+    "entrypoint": "tile_vision.TileVision.recognize_hand",
+    "template_manifest": "温州茶（传统麻将）/采集/templates/tea_tiles/manifest.json",
+    "min_score": 0.82,
+    "min_margin": 0.055
+  },
+  "comparison": "Multiset comparison: correct is the multiset intersection; wrong is an accepted prediction outside gold; missed is an unmatched gold tile.",
+  "frames": [
+    {
+      "frame_path": "温州茶（传统麻将）/采集/2026-10-15/room_p2a/r01/frame_02.png",
+      "sha256": "4b68e120e2195e3502da29bbebfe56ffd09512a5b9dc28367ba67b1a5bd4e3a1",
+      "detected_boxes": 16,
+      "accepted": 15,
+      "complete": false,
+      "predicted_hand": [
+        "w3", "w6", "w8", "s2", "s2", "s4", "s5", "s6",
+        "s6", "s7", "t2", "t2", "t3", "t3", "t7"
+      ],
+      "difference": {
+        "correct": 15,
+        "wrong": 0,
+        "missed": 1
+      },
+      "rejected": [
+        {"position": 1, "reason": "low_score"}
+      ]
+    },
+    {
+      "frame_path": "温州茶（传统麻将）/采集/2026-10-15/room_p2a/r03/frame_02.png",
+      "sha256": "690e386359ba3bdb413602248176c544e3bc182caa3a74b5de41db1e6352a6c3",
+      "detected_boxes": 17,
+      "accepted": 12,
+      "complete": false,
+      "predicted_hand": [
+        "w1", "w4", "w5", "w6", "w8", "bai", "t7", "dong",
+        "dong", "dong", "bei", "w9"
+      ],
+      "difference": {
+        "correct": 12,
+        "wrong": 0,
+        "missed": 5
+      },
+      "rejected": [
+        {"position": 1, "reason": "low_score"},
+        {"position": 2, "reason": "low_score"},
+        {"position": 8, "reason": "low_score"},
+        {"position": 10, "reason": "low_score"},
+        {"position": 12, "reason": "low_score"}
+      ]
+    },
+    {
+      "frame_path": "温州茶（传统麻将）/采集/2026-10-15/room_p2a/r12/frame_02.png",
+      "sha256": "a2cf59ac71def36cb1dfbeefedb3da4e76b81830faa2cd84015c9389c97bc009",
+      "detected_boxes": 16,
+      "accepted": 7,
+      "complete": false,
+      "predicted_hand": [
+        "w1", "w1", "w8", "t6", "t8", "t8", "xi"
+      ],
+      "difference": {
+        "correct": 7,
+        "wrong": 0,
+        "missed": 9
+      },
+      "rejected": [
+        {"position": 4, "reason": "low_score"},
+        {"position": 5, "reason": "low_score"},
+        {"position": 6, "reason": "low_score"},
+        {"position": 7, "reason": "low_score"},
+        {"position": 8, "reason": "low_score"},
+        {"position": 9, "reason": "low_score"},
+        {"position": 10, "reason": "low_score"},
+        {"position": 11, "reason": "low_score"},
+        {"position": 13, "reason": "low_score"}
+      ]
+    }
+  ]
+}

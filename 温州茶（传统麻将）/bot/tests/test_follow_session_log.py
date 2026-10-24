@@ -94,3 +94,27 @@ def test_detached_toplevel_still_works(tmp_path: Path):
         log.close()
     finally:
         root.destroy()
+
+def test_embedded_panel_starts_collapsed_and_toggles(tmp_path: Path):
+    """Compact strip stays folded by default so the 1100x740 contract fits."""
+    root = _tk_root()
+    try:
+        frame = ttk.LabelFrame(root, text="log")
+        frame.pack(fill="both", expand=True)
+        log = FollowSessionLog(root, tmp_path, container=frame, compact=True)
+        assert log._collapsed is True
+        assert log._collapse_btn is not None
+        assert "展开" in log._collapse_btn.cget("text")
+        # Withdrawn Tk roots make winfo_ismapped unreliable; use pack manager.
+        assert log._body_frame.winfo_manager() == ""
+        log._toggle_collapsed()
+        assert log._collapsed is False
+        root.update_idletasks()
+        assert log._body_frame.winfo_manager() == "pack"
+        assert "折叠" in log._collapse_btn.cget("text")
+        # still scrollable when expanded
+        assert int(log.text.cget("height")) == FollowSessionLog.EMBED_TEXT_HEIGHT
+        log.stop()
+    finally:
+        root.destroy()
+

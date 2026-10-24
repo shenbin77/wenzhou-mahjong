@@ -1,0 +1,9 @@
+﻿文件,房号,期望,认出,漏分,分错,期望张数,认出张数
+box_replay_harvest_missing/tea/2026-10-13/207547/r01/frame_01.png,964065,"w3,w5,w7,w7,t1,t3,t3,t4,t5,t6,t9,s1,s2,s7,南,西",,"w3,w5,w7,w7,t1,t3,t3,t4,t5,t6,t9,s1,s2,s7,南,西",,16,0
+box_replay_harvest_missing/tea/2026-10-13/207547/r02/frame_01.png,964065,"w3,w4,w6,w6,w8,t1,t2,t2,t7,t8,t8,t9,s1,s2,s4,东",,"w3,w4,w6,w6,w8,t1,t2,t2,t7,t8,t8,t9,s1,s2,s4,东",,16,0
+box_replay_harvest_missing/tea/2026-10-13/207547/r03/frame_02.png,964065,"w1,w1,w3,w4,w6,w8,t1,t2,t4,t4,t5,t7,t8,s1,s2,白,白",,"w1,w1,w3,w4,w6,w8,t1,t2,t4,t4,t5,t7,t8,s1,s2,白,白",,17,0
+box_replay_harvest_missing/tea/2026-10-13/207547/r04/frame_03.png,964065,"w2,w4,w6,w6,w7,w9,t9,t9,s4,s4,s7,s7,s8,s9,s9,白",,"w2,w4,w6,w6,w7,w9,t9,t9,s4,s4,s7,s7,s8,s9,s9,白",,16,0
+box_replay_harvest_missing/tea/2026-10-13/207547/r05/frame_01.png,964065,"w1,w4,w7,w9,t1,t2,t2,t3,t5,t8,t8,t9,s1,s3,s4,s5,s6",,"w1,w4,w7,w9,t1,t2,t2,t3,t5,t8,t8,t9,s1,s3,s4,s5,s6",,17,0
+box_replay_harvest_missing/tea/2026-10-13/207547/r06/frame_01.png,964065,"w1,w7,w7,w7,t2,t3,t4,t5,t6,t8,s1,s3,s4,s5,s8,西",,"w1,w7,w7,w7,t2,t3,t4,t5,t6,t8,s1,s3,s4,s5,s8,西",,16,0
+2026-10-15/room_p2a/r12/frame_02.png,543271,"w2,w2,w8,t2,t3,t5,t6,t6,t8,t8,s1,s2,s3,s8,s9,西",,"w2,w2,w8,t2,t3,t5,t6,t6,t8,t8,s1,s2,s3,s8,s9,西",,16,0
+2026-10-16/740195/r10/frame_02.png,740195,"w4,t1,t2,t3,t7,t8,t8,t8,s1,s1,s4,s4,s6,s6,s7,s7,s8",,"w4,t1,t2,t3,t7,t8,t8,t8,s1,s1,s4,s4,s6,s6,s7,s7,s8",,17,0

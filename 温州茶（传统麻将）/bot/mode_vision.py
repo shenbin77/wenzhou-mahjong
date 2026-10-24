@@ -27,6 +27,7 @@ _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "mode"
 PLAYER_SCORE_MIN = 0.92
 PLAYER_MARGIN_MIN = 0.08
 TITLE_SCORE_MIN = 0.94
+DECK_SCORE_MIN = 0.94          # 「无中发规则」条幅的单模板阈值（无竞争性模板）
 
 
 def _read_template(path: Path) -> np.ndarray:
@@ -98,18 +99,32 @@ def _tea_no_zhong_fa_template() -> np.ndarray:
     return _read_template(_TEMPLATE_DIR / "tea_no_zhong_fa.png")
 
 
-def detect_tea_no_zhong_fa(image: np.ndarray) -> bool:
-    """Confirm the visible no-Zhong/Fa rule for the currently supported tea deck."""
+def score_tea_no_zhong_fa(image: np.ndarray) -> tuple[bool, float]:
+    """Return ``(confirmed, score)`` for the visible no-Zhong/Fa rule text.
+
+    Same threshold as :func:`detect_tea_no_zhong_fa`, but it also hands back the
+    template score so the sticky deck gate can record what it confirmed on.
+    Unusable frames (wrong size, no 茶 title) give ``(False, 0.0)``.
+
+    Note there is **no competing template** for the "this deck has 中/发" case,
+    so unlike the player count this gate can only ever answer "confirmed" or
+    "not established" -- see :class:`TeaDeckLatch`.
+    """
     if image is None or image.shape[:2] != (900, 1600):
-        return False
+        return False, 0.0
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     if not _has_tea_title(gray):
-        return False
+        return False, 0.0
     rule_strip = gray[140:245, 280:1320]
     score = float(cv2.minMaxLoc(cv2.matchTemplate(
         rule_strip, _tea_no_zhong_fa_template(), cv2.TM_CCOEFF_NORMED
     ))[1])
-    return score >= .94
+    return score >= DECK_SCORE_MIN, score
+
+
+def detect_tea_no_zhong_fa(image: np.ndarray) -> bool:
+    """Confirm the visible no-Zhong/Fa rule for the currently supported tea deck."""
+    return score_tea_no_zhong_fa(image)[0]
 
 
 @lru_cache(maxsize=1)
@@ -276,17 +291,24 @@ def frame_round_identity(image: np.ndarray) -> tuple[bytes | None, str | None]:
     return hud_fingerprint(image), visible_caishen_label(image)
 
 
-def build_action_ui(image: np.ndarray, *, mode_score: float, mode_margin: float,
-                    raw_players: int | None, players: int | None,
-                    source: str, latched: bool, resets: int,
-                    age_frames: int, age_s: float) -> dict:
-    """Per-frame record of "what happened in the button area + mode gate".
+def build_action_ui(image: np.ndarray, *, mode_score: float = 0.0,
+                    mode_margin: float = 0.0, raw_players: int | None = None,
+                    players: int | None = None, source: str = LATCH_SOURCE_UNKNOWN,
+                    latched: bool = False, resets: int = 0, age_frames: int = 0,
+                    age_s: float = 0.0, deck_score: float = 0.0,
+                    deck_latched: bool = False,
+                    deck_source: str = LATCH_SOURCE_UNKNOWN) -> dict:
+    """Per-frame record of "what happened in the button area + both rule gates".
 
     Purely descriptive: it never decides anything. Built for the watchdog so a
-    single ledger line answers "were discs up, what did the mode gate score, and
-    did we lean on the latch this frame". Disc reading comes from
+    single ledger line answers "were discs up, what did the two rule gates score,
+    and did we lean on the latches this frame". Disc reading comes from
     ``claim_vision.read_claims`` — the same read-only detector the claim policy
     uses — so the two can never disagree about what was on screen.
+
+    Every argument is optional: a caller that only knows about one gate still
+    gets a full-shaped record, with the other gate's fields left at neutral
+    values.
     """
     seen = False
     count = 0
@@ -322,6 +344,10 @@ def build_action_ui(image: np.ndarray, *, mode_score: float, mode_margin: float,
         "claim_decision": decision,
         "claim_reason": reason,
         "action_gold_pixel_ratio": gold_ratio,
+        "deck_score": round(float(deck_score), 6),
+        "deck_score_min": DECK_SCORE_MIN,
+        "deck_latched": bool(deck_latched),
+        "deck_source": deck_source,
         "mode_score": round(float(mode_score), 6),
         "mode_margin": round(float(mode_margin), 6),
         "mode_score_min": PLAYER_SCORE_MIN,
@@ -336,33 +362,35 @@ def build_action_ui(image: np.ndarray, *, mode_score: float, mode_margin: float,
     }
 
 
-class ModeReading:
-    """One frame's verdict from the mode gate.
+class RuleReading:
+    """One frame's verdict from one sticky rule gate.
 
     Attributes:
-        players: The player count to act on (``2``/``4``), or ``None`` when the
-            frame's rules could not be established — callers MUST abstain then.
+        gate: Which gate produced it (``"mode"`` or ``"deck"``).
+        value: The latched/confirmed value. For ``"mode"`` it is ``2``/``4`` or
+            ``None``; for ``"deck"`` it is ``True`` (no-Zhong/Fa confirmed) or
+            ``None``. ``None`` always means "callers MUST abstain".
         source: ``confirmed_now`` (this frame's own pixels confirmed it),
             ``latched`` (reused a previous confirmation), or ``unknown``.
         score / margin: The template numbers behind the raw per-frame reading.
-        raw_players: What this frame would have said WITHOUT the latch.
+        raw_value: What this frame would have said WITHOUT the latch.
         latched: Convenience flag for ``source == "latched"``.
         action_ui: JSON-serialisable per-frame observability record.
     """
 
-    __slots__ = ("players", "source", "score", "margin", "raw_players",
+    __slots__ = ("gate", "value", "source", "score", "margin", "raw_value",
                  "latched", "age_frames", "age_s", "resets", "reason",
                  "action_ui")
 
-    def __init__(self, *, players: int | None, source: str, score: float,
-                 margin: float, raw_players: int | None, latched: bool,
-                 age_frames: int, age_s: float, resets: int, reason: str,
-                 action_ui: dict):
-        self.players = players
-        self.source = source
+    def __init__(self, *, gate: str, value, source: str, score: float,
+                 margin: float, raw_value, latched: bool, age_frames: int,
+                 age_s: float, resets: int, reason: str, action_ui: dict):
+        self.gate = str(gate)
+        self.value = value
+        self.source = str(source)
         self.score = float(score)
         self.margin = float(margin)
-        self.raw_players = raw_players
+        self.raw_value = raw_value
         self.latched = bool(latched)
         self.age_frames = int(age_frames)
         self.age_s = float(age_s)
@@ -370,40 +398,61 @@ class ModeReading:
         self.reason = str(reason)
         self.action_ui = dict(action_ui)
 
+    # -- mode-gate aliases（``TeaModeLatch`` 的返回体按"人数"讲话）--
+    @property
+    def players(self) -> int | None:
+        """The player count when this reading came from the mode gate."""
+        return self.value if self.value in (2, 4) else None
+
+    @property
+    def raw_players(self) -> int | None:
+        """``players`` for the raw (non-latched) per-frame verdict."""
+        return self.raw_value if self.raw_value in (2, 4) else None
+
     @property
     def confirmed(self) -> bool:
         """Whether this reading may be acted on."""
-        return self.players in (2, 4)
+        return self.value is not None
 
     def as_dict(self) -> dict:
         """JSON-serialisable summary (ledger / log friendly)."""
         return {
-            "players": self.players,
+            "gate": self.gate,
+            "value": self.value,
             "source": self.source,
             "score": round(self.score, 6),
             "margin": round(self.margin, 6),
-            "raw_players": self.raw_players,
+            "raw_value": self.raw_value,
             "latched": self.latched,
             "age_frames": self.age_frames,
             "age_s": round(self.age_s, 3),
             "resets": self.resets,
             "reason": self.reason,
             "action_ui": dict(self.action_ui),
+            # 兼容早期按"人数"取数的调用方
+            "players": self.players,
+            "raw_players": self.raw_players,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - 调试便利
-        return (f"ModeReading(players={self.players}, source={self.source!r}, "
-                f"score={self.score:.3f}, raw={self.raw_players}, "
+        return (f"RuleReading(gate={self.gate!r}, value={self.value!r}, "
+                f"source={self.source!r}, score={self.score:.3f}, "
+                f"raw={self.raw_value!r}, "
                 f"age={self.age_frames}f/{self.age_s:.1f}s)")
 
 
-class TeaModeLatch:
-    """Sticky tea rule-mode gate with explicit, auditable reset conditions.
+#: 早期命名：玩法人数门禁的读数。两组 name 指向同一个类，互不冲突。
+ModeReading = RuleReading
 
-    A room's rules cannot change mid-round, so one confident confirmation is
-    enough for the rest of that round -- including the frames where the claim
-    discs cover the rule text. Nothing is ever invented: without a confirmation
-    inside the current scope this always reports ``players=None``.
+
+class TeaRuleLatch:
+    """Shared sticky-gate machinery: one latched value + one invalidation policy.
+
+    Subclasses supply ``_measure`` (what to read off the pixels); everything
+    about scope tracking, TTL, observability and reset semantics lives here so
+    that **every** rule gate is invalidated by exactly the same signals. Nothing
+    is ever invented: without a confirmation inside the current scope this always
+    reports ``value=None``.
 
     Args:
         ttl_s: Latch lifetime in seconds. Expiry is a safety net for "no usable
@@ -411,16 +460,19 @@ class TeaModeLatch:
         clock: Monotonic clock, injected in tests.
     """
 
+    #: Which gate this is -- subclasses override.
+    gate = "mode"
+
     def __init__(self, *, ttl_s: float = DEFAULT_LATCH_TTL_S,
                  clock: Callable[[], float] | None = None):
         self.ttl_s = max(0.0, float(ttl_s))
         self._clock = clock or time.monotonic
         self.reset(reason="init")
 
-    # -- state --
+    # ---------------------------------------------------------------- state
     def reset(self, reason: str = "explicit") -> None:
         """Drop the confirmation. The next caller must re-confirm from pixels."""
-        self._players: int | None = None
+        self._value = None
         self._score = 0.0
         self._margin = 0.0
         self._hud: bytes | None = None
@@ -432,9 +484,14 @@ class TeaModeLatch:
         self._last_action_ui: dict = {}
 
     @property
+    def latched_value(self):
+        """Currently locked value, or ``None`` when nothing is latched."""
+        return self._value
+
+    @property
     def latched_players(self) -> int | None:
-        """Currently locked player count, or ``None`` when nothing is latched."""
-        return self._players
+        """``latched_value`` as a player count (``None`` for non-mode gates)."""
+        return self._value if self._value in (2, 4) else None
 
     @property
     def resets(self) -> int:
@@ -447,8 +504,10 @@ class TeaModeLatch:
         age = None if self._confirmed_at is None else now - self._confirmed_at
         expired = self._is_expired(now)
         return {
-            "latched": self._players is not None and not expired,
-            "players": None if expired else self._players,
+            "gate": self.gate,
+            "latched": self._value is not None and not expired,
+            "value": None if expired else self._value,
+            "players": None if expired else self.latched_players,
             "score": round(self._score, 6),
             "margin": round(self._margin, 6),
             "age_s": None if age is None else round(age, 3),
@@ -461,20 +520,22 @@ class TeaModeLatch:
             "caishen": self._caishen,
         }
 
-    # -- internals --
+    # ------------------------------------------------------------ internals
     def _is_expired(self, now: float) -> bool:
-        if self._players is None or self.ttl_s <= 0:
+        if self._value is None or self.ttl_s <= 0:
             return False
         return self._confirmed_at is not None and (now - self._confirmed_at) > self.ttl_s
 
-    def _touch(self) -> None:
-        """Count one more frame served from the latch."""
-        if self._players is not None:
-            self._frames += 1
+    def _measure(self, image: np.ndarray) -> tuple[object, float, float]:
+        """Read this gate off one frame: ``(value, score, margin)``.
+
+        ``value`` is ``None`` when the frame does not establish anything.
+        """
+        raise NotImplementedError
 
     def _out_of_scope(self, hud: bytes | None, caishen: str | None) -> str:
         """Name the reset reason if this frame belongs to another scope."""
-        if self._players is None:
+        if self._value is None:
             return ""
         if not same_hud_fingerprint(self._hud, hud):
             return "hud_fingerprint_changed"
@@ -482,33 +543,53 @@ class TeaModeLatch:
             return "caishen_changed"
         return ""
 
-    def _finish(self, *, players: int | None, source: str, score: float,
-                margin: float, raw_players: int | None, reason: str,
-                image: np.ndarray, now: float) -> ModeReading:
+    def _finish(self, *, value, source: str, score: float, margin: float,
+                raw_value, reason: str, image: np.ndarray, now: float,
+                action_ui: dict | None = None) -> RuleReading:
         age_s = 0.0 if self._confirmed_at is None else now - self._confirmed_at
         latched = source == LATCH_SOURCE_LATCHED
-        action_ui = build_action_ui(
-            image, mode_score=score, mode_margin=margin,
-            raw_players=raw_players, players=players, source=source,
-            latched=latched, resets=self._resets,
-            age_frames=self._frames, age_s=age_s)
+        if action_ui is None:
+            action_ui = build_action_ui(
+                image, mode_score=score, mode_margin=margin,
+                raw_players=raw_value if raw_value in (2, 4) else None,
+                players=value if value in (2, 4) else None,
+                source=source, latched=latched, resets=self._resets,
+                age_frames=self._frames, age_s=age_s)
+        action_ui = dict(action_ui)
+        action_ui["mode_score"] = round(float(score), 6)
+        action_ui["mode_latched"] = latched
+        action_ui["mode_source"] = source
+        action_ui["mode_latch_age_frames"] = self._frames
+        action_ui["mode_latch_age_s"] = round(float(age_s), 3)
+        action_ui["mode_latch_resets"] = self._resets
         self._last_action_ui = action_ui
-        return ModeReading(players=players, source=source, score=score,
-                           margin=margin, raw_players=raw_players,
+        return RuleReading(gate=self.gate, value=value, source=source,
+                           score=score, margin=margin, raw_value=raw_value,
                            latched=latched, age_frames=self._frames,
                            age_s=age_s, resets=self._resets, reason=reason,
                            action_ui=action_ui)
 
-    def observe(self, image: np.ndarray, *, now: float | None = None) -> ModeReading:
-        """Read one frame and return its :class:`ModeReading`.
+    def observe(self, image: np.ndarray, *, now: float | None = None,
+                scope: tuple[bytes | None, str | None] | None = None,
+                action_ui: dict | None = None) -> RuleReading:
+        """Read one frame and return its :class:`RuleReading`.
 
         Order matters and is part of the safety contract: scope reset is decided
-        **before** a raw `None` is allowed to fall back to the latch, and a raw
+        **before** a raw miss is allowed to fall back to the latch, and a raw
         confirmation always wins over whatever was latched.
+
+        Args:
+            image: The frame to read.
+            now: Injected clock value (tests).
+            scope: Precomputed ``(hud, caishen)``; pass it when several gates are
+                read from the same frame so they share one scope computation and
+                therefore one invalidation decision.
+            action_ui: Prebuilt observability record to reuse, so N gates on one
+                frame cost one disc read instead of N.
         """
         moment = self._clock() if now is None else float(now)
-        raw_players, raw_score, raw_margin = score_tea_player_count(image)
-        hud, caishen = frame_round_identity(image)
+        raw_value, raw_score, raw_margin = self._measure(image)
+        hud, caishen = frame_round_identity(image) if scope is None else scope
 
         # ① 换房/换局/超时 → 立刻失效，本帧不许吃锁存的结论。
         reason = self._out_of_scope(hud, caishen)
@@ -518,51 +599,151 @@ class TeaModeLatch:
             self.reset(reason=reason)
 
         # ② 正向证据优先：本帧自己确认了，就按本帧的来（含"另一种玩法"翻牌）。
-        if raw_players is not None:
-            flipped = (self._players is not None and self._players != raw_players)
-            self._players = raw_players
+        if raw_value is not None:
+            flipped = self._value is not None and self._value != raw_value
+            self._value = raw_value
             self._score = raw_score
             self._margin = raw_margin
             self._hud = hud
             self._caishen = caishen
             self._confirmed_at = moment
             self._frames = 0
-            self._last_reason = ("players_flipped" if flipped else "confirmed")
+            self._last_reason = ("value_flipped" if flipped else "confirmed")
             return self._finish(
-                players=raw_players, source=LATCH_SOURCE_CONFIRMED,
-                score=raw_score, margin=raw_margin, raw_players=raw_players,
-                reason=self._last_reason, image=image, now=moment)
+                value=raw_value, source=LATCH_SOURCE_CONFIRMED,
+                score=raw_score, margin=raw_margin, raw_value=raw_value,
+                reason=self._last_reason, image=image, now=moment,
+                action_ui=action_ui)
 
         # ③ 本帧读不出，但有有效锁存 → 复用（这才是修掉按钮帧弃权的那一步）。
-        if self._players is not None:
-            self._touch()
+        if self._value is not None:
+            self._frames += 1
             if hud is not None:
                 self._hud = hud
             if caishen:
                 self._caishen = caishen
-            self._last_reason = "latched_mode_reused"
+            self._last_reason = "latched_value_reused"
             return self._finish(
-                players=self._players, source=LATCH_SOURCE_LATCHED,
-                score=self._score, margin=self._margin, raw_players=None,
-                reason="latched_mode_reused", image=image, now=moment)
+                value=self._value, source=LATCH_SOURCE_LATCHED,
+                score=self._score, margin=self._margin, raw_value=None,
+                reason=self._last_reason, image=image, now=moment,
+                action_ui=action_ui)
 
         # ④ 一次都没确认过 → 仍然弃权（fail closed 不变）。
         return self._finish(
-            players=None, source=LATCH_SOURCE_UNKNOWN,
-            score=raw_score, margin=raw_margin, raw_players=None,
-            reason="mode_not_confirmed", image=image, now=moment)
+            value=None, source=LATCH_SOURCE_UNKNOWN,
+            score=raw_score, margin=raw_margin, raw_value=None,
+            reason="not_confirmed", image=image, now=moment,
+            action_ui=action_ui)
 
 
-#: Process-wide latch used by ``tea_bot._default_vision``.
+class TeaModeLatch(TeaRuleLatch):
+    """玩法人数（2 人茶 / 4 人）的粘滞门禁。
+
+    详见模块顶部「玩法门禁粘滞」一节。这里的锁存值与人数的语义一一对应：
+    正向读出 4 就等于翻牌，绝不会被锁着的 2 压住。
+    """
+
+    gate = "mode"
+
+    def _measure(self, image: np.ndarray) -> tuple[object, float, float]:
+        players, score, margin = score_tea_player_count(image)
+        return players, score, margin
+
+
+class TeaDeckLatch(TeaRuleLatch):
+    """牌集规则「无中发」的粘滞门禁 —— 与人数**不同维度**，各自独立一把锁。
+
+    两者的锁存值互不相干（一间房的人数变了不代表牌集也变了，反之亦然），但
+    **重置判据必须共用**：换房换局时两把锁要走同一套 HUD/财神/TTL 信号一起失效，
+    这个"一起失效"由 :class:`TeaRuleGates` 保证。
+
+    与第二把锁有关的诚实说明（不吹）：人数那把锁有「正向矛盾翻牌」这条最强的
+    安全兜底（读到 4 就一定不是 2），而**这把锁没有**。原因是游戏只提供"无中发"
+    这一张规则条幅模板，不存在"有中发"的竞争模板，所以这一 concerns 只能回答
+    "确认了"或"没确认"，无法从像素上读出相反的结论。它的安全兜底因此只有：
+    ① 作用域信号（HUD/财神）变化即失效；② TTL 超时即失效；③ 任何一帧条幅清晰
+    可读时都会用当帧的真值重新确认（分数 ≥0.94 才认，认不出来不算驳斥）。
+    风险和控制方式与第一把锁同构：只有"换到一个牌集不同、且条幅恰好被持续
+    遮挡的新房间且**财神与 HUD 也没变**"才可能踩雷，而那种情形下逐帧判定本来
+    也是 False（= 弃权）。
+    """
+
+    gate = "deck"
+
+    def _measure(self, image: np.ndarray) -> tuple[object, float, float]:
+        confirmed, score = score_tea_no_zhong_fa(image)
+        # 只有 True 是"确认过的事实"；读不出时给 None（= 不许锁成 True，
+        # 也不许当成"这张桌子有中发"的证据）。
+        return (True if confirmed else None), score, 0.0
+
+
+class TeaRuleGates:
+    """All sticky rule gates of one 温州茶 room, behind **one** invalidation entry.
+
+   为什么要有这一层：玩法人数和牌集规则是两个维度，各自一把锁，但如果它们各自
+   判断何时失效，就可能出现"人数锁因为换局作废了、牌集锁还拿着上一局的结论"这种
+   最危险的组合。这里把两把锁的作废动作收成唯一入口：``reset()`` 一定作用在
+   两把锁上，``observe()`` 也一次性给两把锁喂同一份 **局身份**（同一帧只算一次
+   HUD/财神）和同一份 ``action_ui``（同一帧只读一次行动圆盘）。
+    """
+
+    def __init__(self, *, ttl_s: float = DEFAULT_LATCH_TTL_S,
+                 clock: Callable[[], float] | None = None):
+        self.mode = TeaModeLatch(ttl_s=ttl_s, clock=clock)
+        self.deck = TeaDeckLatch(ttl_s=ttl_s, clock=clock)
+
+    def reset(self, reason: str = "explicit") -> None:
+        """Invalidate **every** gate at once. 两条锁永不各自为政。"""
+        self.mode.reset(reason=reason)
+        self.deck.reset(reason=reason)
+
+    def observe(self, image: np.ndarray, *,
+                now: float | None = None) -> tuple[RuleReading, RuleReading]:
+        """Read one frame through both gates; returns ``(mode, deck)`` readings."""
+        moment = self.mode._clock() if now is None else float(now)
+        scope = frame_round_identity(image)
+        # action_ui 只建一次再喂给两把锁：不然每帧的行动圆盘要被读两遍。
+        shared_ui: dict | None = None
+        mode = self.mode.observe(image, now=moment, scope=scope)
+        shared_ui = dict(mode.action_ui)
+        shared_ui.update({
+            "deck_score": round(float(self.deck.snapshot()["score"]), 6),
+            "deck_score_min": DECK_SCORE_MIN,
+        })
+        deck = self.deck.observe(image, now=moment, scope=scope,
+                                 action_ui=shared_ui)
+        shared_ui["deck_score"] = round(float(deck.score), 6)
+        shared_ui["deck_latched"] = deck.latched
+        shared_ui["deck_source"] = deck.source
+        mode.action_ui.update({key: shared_ui[key] for key in
+                               ("deck_score", "deck_latched", "deck_source")})
+        deck.action_ui.update({key: shared_ui[key] for key in
+                               ("deck_score", "deck_latched", "deck_source")})
+        return mode, deck
+
+    def snapshot(self) -> dict:
+        """Both gates' state in one JSON-friendly dict."""
+        return {"mode": self.mode.snapshot(), "deck": self.deck.snapshot()}
+
+
+#: Process-wide gates used by ``tea_bot._default_vision``.
 #: ``assist_tea.analyze_snapshot`` builds a **new TeaBot per frame**, so the
-#: latch has to outlive any one bot instance to be of any use. Scope-reset
-#: signals (HUD fingerprint + caishen) keep it honest across rooms.
-MODE_LATCH = TeaModeLatch()
+#: latches have to outlive any one bot instance to be of any use. Scope-reset
+#: signals (HUD fingerprint + caishen) keep them honest across rooms.
+RULE_GATES = TeaRuleGates()
+MODE_LATCH = RULE_GATES.mode
+DECK_LATCH = RULE_GATES.deck
 
 
 def confirm_tea_player_count(image: np.ndarray) -> int | None:
     """Sticky wrapper around :func:`detect_tea_player_count` via :data:`MODE_LATCH`."""
     return MODE_LATCH.observe(image).players
+
+
+def confirm_tea_no_zhong_fa(image: np.ndarray) -> bool:
+    """Sticky wrapper around :func:`detect_tea_no_zhong_fa` via :data:`DECK_LATCH`."""
+    return DECK_LATCH.observe(image).value is True
 
 
 def latest_action_ui() -> dict:
@@ -571,5 +752,8 @@ def latest_action_ui() -> dict:
 
 
 def reset_tea_mode_latch(reason: str = "manual") -> None:
-    """Invalidate the process-wide latch (call on room/mode change)."""
-    MODE_LATCH.reset(reason=reason)
+    """Invalidate **every** sticky rule gate (call on room/mode change).
+
+    名字保留 ``..._mode_latch`` 是为了不打断既有调用方，但它作废的是整组锁。
+    """
+    RULE_GATES.reset(reason=reason)

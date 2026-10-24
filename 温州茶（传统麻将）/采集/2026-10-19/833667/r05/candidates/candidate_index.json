@@ -1,0 +1,14 @@
+{
+  "schema": "tea_replay_candidates_v1",
+  "source_video": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\2026-10-19\\833667\\r05\\room833667_round5_6fa2ae31.mp4",
+  "source_sha256": "6587e213628d2dc92f30195f381a702721a7efa4e12f73ad5f34b825369132e1",
+  "sampling": "ffmpeg fps=1; ordinal index is not exact PTS",
+  "counts": {
+    "frames": 29,
+    "visible_2p": 9,
+    "complete_2p": 0
+  },
+  "max_saved": 8,
+  "candidates": [],
+  "status": "visible_2p_complete_predictions_only_not_training_gold"
+}

@@ -1,0 +1,59 @@
+真局会话目录 17 个，每会话上限 400 帧
+  ... 20261023_192955：累计 1 帧 / 圆盘帧 0 / 修改前弃权 0 / 修改后弃权 0
+  ... 20261023_201640：累计 325 帧 / 圆盘帧 21 / 修改前弃权 9 / 修改后弃权 0
+  ... 20261023_220643：累计 405 帧 / 圆盘帧 29 / 修改前弃权 10 / 修改后弃权 0
+  ... 20261023_223209：累计 561 帧 / 圆盘帧 34 / 修改前弃权 12 / 修改后弃权 0
+  ... 20261023_223759：累计 900 帧 / 圆盘帧 51 / 修改前弃权 21 / 修改后弃权 0
+  ... 20261023_224827：累计 1046 帧 / 圆盘帧 69 / 修改前弃权 37 / 修改后弃权 0
+  ... 20261023_225317：累计 1203 帧 / 圆盘帧 98 / 修改前弃权 57 / 修改后弃权 20
+  ... 20261023_225827：累计 1603 帧 / 圆盘帧 115 / 修改前弃权 63 / 修改后弃权 20
+  ... 20261023_235121：累计 1975 帧 / 圆盘帧 165 / 修改前弃权 69 / 修改后弃权 20
+  ... 20261024_001405：累计 1987 帧 / 圆盘帧 165 / 修改前弃权 69 / 修改后弃权 20
+  ... 20261024_002903：累计 2224 帧 / 圆盘帧 177 / 修改前弃权 75 / 修改后弃权 20
+  ... 20261024_005400：累计 2624 帧 / 圆盘帧 189 / 修改前弃权 77 / 修改后弃权 20
+  ... 20261024_015005：累计 2855 帧 / 圆盘帧 195 / 修改前弃权 81 / 修改后弃权 20
+  ... 20261024_035412：累计 3255 帧 / 圆盘帧 219 / 修改前弃权 87 / 修改后弃权 22
+  ... 20261024_122607：累计 3655 帧 / 圆盘帧 278 / 修改前弃权 113 / 修改后弃权 24
+  ... 20261024_133129：累计 4055 帧 / 圆盘帧 298 / 修改前弃权 117 / 修改后弃权 24
+  ... 20261024_140818：累计 4455 帧 / 圆盘帧 355 / 修改前弃权 118 / 修改后弃权 24
+=== 汇总 ===
+扫描帧            4455
+检出行动圆盘的帧  355
+修改前 弃权       118  (33.2%)
+  其中同时卡无中发 9
+修改后 弃权       24  (6.8%)
+修改后 吃粘滞救回 94
+HUD 可读率        全帧 1267/4455，圆盘帧 140/355
+财神 可读率       全帧 4035/4455，圆盘帧 342/355
+--- 救回样本（前 6）---
+  20261023_205352_915355_67cca9.png  (score=None, raw=None → latched 2, age=1f)
+  20261023_205448_053076_c0c1de.png  (score=None, raw=None → latched 2, age=1f)
+  20261023_205507_457928_9c7ac7.png  (score=None, raw=None → latched 2, age=1f)
+  20261023_205718_572706_6f1ed2.png  (score=None, raw=None → latched 2, age=1f)
+  20261023_205818_558948_3c4590.png  (score=None, raw=None → latched 2, age=1f)
+  20261023_205900_591888_5419b0.png  (score=None, raw=None → latched 2, age=1f)
+--- 修改后仍弃权的帧（前 30 / 共 24）---
+  20261023_225317/20261023_225319_959699_2b8864.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225321_675214_796cae.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225323_282999_e37264.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225324_778715_feb2fa.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225326_725987_f7d919.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225328_974432_79477a.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225330_453877_e8f92f.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225331_900824_d5e3d8.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225333_334873_21f174.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225334_843984_9fb91d.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225336_482329_71d560.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225337_991421_82ac45.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225339_529202_8692a9.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225341_075290_229f75.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225342_802616_b43b95.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225344_480541_860ed7.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225346_161251_e7dfd8.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225347_724058_88e9cc.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225349_300732_5ef2a6.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261023_225317/20261023_225351_007909_9dc4ba.png: reason=mode_not_confirmed resets=0 age=0f hud=N caishen=t8 raw=None
+  20261024_035412/20261024_042333_428296_0d6edd.png: reason=mode_not_confirmed resets=14 age=0f hud=Y caishen=None raw=None
+  20261024_035412/20261024_075945_449962_37804a.png: reason=mode_not_confirmed resets=15 age=0f hud=Y caishen=None raw=None
+  20261024_122607/20261024_125052_528179_9bdc49.png: reason=mode_not_confirmed resets=2 age=0f hud=Y caishen=w7 raw=None
+  20261024_122607/20261024_125054_093288_5fbcf2.png: reason=mode_not_confirmed resets=2 age=0f hud=Y caishen=w7 raw=None

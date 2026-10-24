@@ -1,0 +1,15 @@
+你是实现者。任务：修复 SPEC-002 v4 记录器的 3 项终审偏差，并让 bot 全量测试在本机环境下真实全绿。不得修改 spec 契约本身；不得动阈值、模板、模拟器。
+
+先读终审证据（recorder.py 对应行号）与 D:\温州麻将\SPECS\SPEC-002-assist-record.md 的状态机与门禁原文，然后逐项修复：
+
+1. recorder.py:418 附近：当前 gate 失败/牌数错/识别失败/财神未选时，首帧创建 detected 后立即 _close("abstained")，形成 detected → abstained 且单帧落盘，绕过冻结状态机与稳定帧门槛（SPEC:9）。改为严格按 spec 状态机原文执行：弃权也必须走完规定的决策生命周期，不得单帧直达终态。同步修改 test_recorder.py:171 附近固化该错误行为的测试，改为断言修复后的生命周期。若你认为 spec 原文允许某种即时弃权，必须在报告中逐字引用 spec 行文说明，不得默默保留现状。
+
+2. recorder.py:451、461 附近：detected 状态收到不同语义键时直接用新 _ActiveDecision 覆盖未关闭的旧决策，旧决策无终态。改为：存在未关闭决策期间，新语义键一律不得替换/生成新决策（按 spec 的活动锁与重新布防规则处理），保证每个决策都有完整生命周期与终态。
+
+3. recorder.py:157、161 附近：tea 的 gate_ok 额外要求检测到“无中发”，超出契约定义（SPEC:35：规则文字可读且与 mode 一致）。改为 gate_ok 仅由“规则文字可读 + 与所选 mode 一致”决定，删除额外绑定。
+
+4. 本机 C 盘已满（0 字节级），bot 全量 pytest 有 6 项因临时目录写入报 OSError [Errno 28] 失败（非代码断言失败）。在项目内做持久化处理（例如 bot 目录下 pytest 配置/conftest 将 basetemp/TEMP 指向 D 盘工作区），不得削弱或跳过任何测试。修完后在本机实际运行：python -m pytest tests\test_recorder.py 与 python -m pytest tests（bot 全量），报告真实通过/失败数字。
+
+5. 更新 D:\温州麻将\SPECS\QUEUE.md 的 SPEC-002 行：注明三项偏差已修复待复审 + 最新测试数字。其余行不动。
+
+完成后输出：每项偏差的改法（文件:行号）、改动的测试、两条 pytest 命令的实际输出摘要、仍存疑义的 spec 行文引用（如有）。

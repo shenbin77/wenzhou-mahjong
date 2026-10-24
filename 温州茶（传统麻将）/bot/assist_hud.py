@@ -116,8 +116,9 @@ def format_river_summary(result: Mapping[str, Any] | None) -> str:
             parts.append(f"{src_map[source]}:{UNKNOWN}")
 
     def _count(value: Any) -> int | None:
+        # Empty []/() is not trusted evidence — show 未识别, never 河0/0.
         if isinstance(value, (list, tuple)):
-            return len(value)
+            return len(value) if len(value) > 0 else None
         return None
 
     opp_n = _count(opp)

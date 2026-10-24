@@ -18,12 +18,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from assist_tea import _load_image, _write_annotation
+from assist_tea import _load_image, _recording_vision, _write_annotation
 from harvest_tea import DEFAULT_ADB, DEFAULT_SERIAL, EXPECTED_PACKAGE
 from mode_vision import detect_shu_rule_text
-from pc_bot.tile_vision import TILE_IDS, TARGET_IDS, TileVision
+from pc_bot.tile_vision import TILE_IDS, TARGET_IDS
+from tile_vision import TileVision
 from brain_v0.engine.advisor import Advisor
 from brain_v0.engine.wenzhou_rules import hand_is_win, hand_shanten, ting_tiles
+
+
+_SHU_TEMPLATE_DIR = (Path(__file__).resolve().parent.parent / "代打BOT" /
+                     "majiang-bot" / "pc_bot" / "templates_hongzhong_v2")
 
 
 def _validate_hand(labels: list[str], meld_count: int = 0) -> list[int]:
@@ -68,7 +73,7 @@ def _calculate(labels: list[str], meld_count: int) -> dict:
         "options": [
             {key: option[key] for key in
              ("tile", "name", "shanten_after", "ukeire_count", "final_score")}
-            for option in options[:3]
+            for option in options[:5]
         ],
     }
 
@@ -76,6 +81,7 @@ def _calculate(labels: list[str], meld_count: int) -> dict:
 def analyze_shu_snapshot(
     image_path: str | Path, *, confirmed_four_player: bool,
     output_path: str | Path | None = None,
+    on_recognized=None,
 ) -> dict:
     """Inspect one saved frame. Never send game input or network requests."""
     if not confirmed_four_player:
@@ -97,14 +103,20 @@ def analyze_shu_snapshot(
                 "annotation": str(output) if output else None,
                 "hand": [], "meld_count": 0, "suggested_boxes": [],
                 "dry_run": True, "status": "abstain", "reason": early_reason}
-    vision = TileVision()
-    vision.recognize_hand(image)
+    vision = TileVision(template_dir=_SHU_TEMPLATE_DIR)
+    try:
+        vision.recognize_hand(image)
+    finally:
+        if on_recognized is not None:
+            on_recognized()
     diagnostics = vision.diagnostics
+    recording_diagnostics, hand_ids = _recording_vision(vision)
     result = {
         "mode": "shu_4p", "image": str(source),
         "annotation": str(output) if output else None,
         "hand": [item["label"] for item in diagnostics],
         "meld_count": 0, "suggested_boxes": [], "dry_run": True,
+        "vision_diagnostics": recording_diagnostics, "hand_ids": hand_ids,
     }
     def abstain(reason: str) -> dict:
         _write_annotation(image, diagnostics, None, output)
@@ -142,15 +154,22 @@ def analyze_shu_manual_hand(
     session_dir: str | Path | None = None,
     image_path: str | Path | None = None,
     corrected_from: str | Path | None = None,
+    write_sidecar: bool = True,
 ) -> dict:
     if not confirmed_four_player:
         raise ValueError("须先确认这是温州熟 4 人红中放炮局")
+    if image_path is None:
+        raise ValueError("修正手牌必须关联已核对的熟局截图")
+    _, source_image = _load_image(Path(image_path))
+    if not detect_shu_rule_text(source_image):
+        raise ValueError("截图未确认温州熟 4 人红中放炮玩法，停止手工重算")
     parsed = labels.replace("，", " ").replace(",", " ").split()
     calculation = _calculate(parsed, meld_count)
     suggestion = calculation.pop("suggestion")
     result = {
         **calculation, "mode": "shu_4p", "source": "manual_correction",
         "hand": parsed, "meld_count": meld_count,
+        "hand_ids": [TILE_IDS[label] for label in parsed],
         "image": str(image_path) if image_path else None,
         "suggestion": next((name for name, tid in TILE_IDS.items() if tid == suggestion), None)
         if suggestion is not None else None,
@@ -158,7 +177,7 @@ def analyze_shu_manual_hand(
         "corrected_from": str(corrected_from) if corrected_from else None,
         "captured_at": datetime.now().astimezone().isoformat(),
     }
-    if session_dir is not None:
+    if session_dir is not None and write_sidecar:
         folder = Path(session_dir)
         folder.mkdir(parents=True, exist_ok=True)
         record = folder / f"shu_manual_{datetime.now():%Y%m%d_%H%M%S_%f}_{uuid.uuid4().hex[:6]}.json"
@@ -171,7 +190,7 @@ def analyze_shu_manual_hand(
 
 def import_shu_and_analyze(
     image_path: str | Path, *, session_dir: str | Path,
-    confirmed_four_player: bool,
+    confirmed_four_player: bool, write_sidecar: bool = True,
 ) -> dict:
     source = Path(image_path)
     raw, _ = _load_image(source)
@@ -196,17 +215,20 @@ def import_shu_and_analyze(
     result.update({
         "source": "imported_image", "source_image": str(source),
         "captured_at": datetime.now().astimezone().isoformat(),
-        "image_sha256": hashlib.sha256(raw).hexdigest(), "record": str(sidecar),
+        "image_sha256": hashlib.sha256(raw).hexdigest(),
     })
-    with sidecar.open("x", encoding="utf-8") as fh:
-        json.dump(result, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    if write_sidecar:
+        result["record"] = str(sidecar)
+        with sidecar.open("x", encoding="utf-8") as fh:
+            json.dump(result, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
     return result
 
 
 def capture_shu_and_analyze(
     *, serial: str = DEFAULT_SERIAL, adb_path: str = DEFAULT_ADB,
     session_dir: str | Path, confirmed_four_player: bool,
+    write_sidecar: bool = True,
 ) -> dict:
     """Take one read-only ADB screenshot after verifying the foreground app."""
     adb = Path(adb_path)
@@ -243,8 +265,10 @@ def capture_shu_and_analyze(
                   "image": str(original), "annotation": None, "dry_run": True}
     result.update({"captured_at": datetime.now().astimezone().isoformat(),
                    "serial": serial, "image_sha256": hashlib.sha256(raw).hexdigest(),
-                   "record": str(sidecar)})
-    with sidecar.open("x", encoding="utf-8") as fh:
-        json.dump(result, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+                   })
+    if write_sidecar:
+        result["record"] = str(sidecar)
+        with sidecar.open("x", encoding="utf-8") as fh:
+            json.dump(result, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
     return result

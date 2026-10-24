@@ -26,7 +26,7 @@ class FollowSessionLog:
     REFRESH_MS = 800
     LINE_LIMIT = 250
     EMBED_LINE_LIMIT = 80
-    EMBED_TEXT_HEIGHT = 6
+    EMBED_TEXT_HEIGHT = 3
 
     def __init__(
         self,
@@ -53,6 +53,11 @@ class FollowSessionLog:
         # Sentinel so first refresh paints empty-state when no jsonl yet.
         self._last_signature = object()
         self._detach_callback = None
+        self._collapsed = True  # compact embed starts folded to keep 1100x740
+        self._body_frame = None
+        self._path_label_widget = None
+        self._status_label_widget = None
+        self._collapse_btn = None
         self.window: tk.Toplevel | None
         self.host: tk.Misc
 
@@ -76,7 +81,7 @@ class FollowSessionLog:
         controls = ttk.Frame(parent, padding=pad)
         controls.pack(fill="x")
         ttk.Checkbutton(
-            controls, text="跟随最新", variable=self.follow, command=self.refresh
+            controls, text="自动跟随", variable=self.follow, command=self.refresh
         ).pack(side="left")
         ttk.Button(controls, text="刷新", command=self.refresh).pack(side="left", padx=4)
         if detached or not self.compact:
@@ -93,6 +98,10 @@ class FollowSessionLog:
             ttk.Button(
                 controls, text="弹出完整窗口", command=self._request_detach
             ).pack(side="left", padx=4)
+            self._collapse_btn = ttk.Button(
+                controls, text="展开日志", command=self._toggle_collapsed
+            )
+            self._collapse_btn.pack(side="left", padx=4)
         ttk.Label(
             controls,
             text=f"CLAIM通道={CLAIM_TAP_CHANNEL_READY}",
@@ -100,12 +109,15 @@ class FollowSessionLog:
         ).pack(side="right")
 
         wrap = 720 if self.compact else 760
-        ttk.Label(
+        self._path_label_widget = ttk.Label(
             parent, textvariable=self.path_var, wraplength=wrap, foreground="#555555"
-        ).pack(fill="x", padx=6)
+        )
+        if not self.compact:
+            self._path_label_widget.pack(fill="x", padx=6)
 
-        frame = ttk.Frame(parent, padding=(6, 2))
-        frame.pack(fill="both", expand=True)
+        self._body_frame = ttk.Frame(parent, padding=(6, 2))
+        if not self.compact:
+            self._body_frame.pack(fill="both", expand=True)
         text_kwargs: dict = dict(
             wrap="none",
             state="disabled",
@@ -117,19 +129,70 @@ class FollowSessionLog:
         )
         if self.compact:
             text_kwargs["height"] = self.EMBED_TEXT_HEIGHT
-        self.text = tk.Text(frame, **text_kwargs)
-        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
-        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.text.xview)
+        self.text = tk.Text(self._body_frame, **text_kwargs)
+        yscroll = ttk.Scrollbar(
+            self._body_frame, orient="vertical", command=self.text.yview
+        )
+        xscroll = ttk.Scrollbar(
+            self._body_frame, orient="horizontal", command=self.text.xview
+        )
         self.text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
         self.text.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
-        frame.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
+        self._body_frame.rowconfigure(0, weight=1)
+        self._body_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(parent, textvariable=self.status_var, wraplength=wrap).pack(
-            fill="x", padx=6, pady=(0, 4)
+        self._status_label_widget = ttk.Label(
+            parent, textvariable=self.status_var, wraplength=wrap
         )
+        if not self.compact:
+            self._status_label_widget.pack(fill="x", padx=6, pady=(0, 4))
+
+        if self.compact:
+            self._apply_collapsed()
+
+    def _toggle_collapsed(self) -> None:
+        """Fold/unfold the embedded log body so the 1100x740 contract stays intact."""
+        if not self.compact:
+            return
+        self._collapsed = not self._collapsed
+        self._apply_collapsed()
+
+    def _apply_collapsed(self) -> None:
+        if not self.compact:
+            return
+        body = self._body_frame
+        path = self._path_label_widget
+        status = self._status_label_widget
+        btn = self._collapse_btn
+        if body is None:
+            return
+        if self._collapsed:
+            try:
+                body.pack_forget()
+            except tk.TclError:
+                pass
+            if path is not None:
+                try:
+                    path.pack_forget()
+                except tk.TclError:
+                    pass
+            if status is not None:
+                try:
+                    status.pack_forget()
+                except tk.TclError:
+                    pass
+            if btn is not None:
+                btn.configure(text="展开日志")
+        else:
+            if path is not None:
+                path.pack(fill="x", padx=6)
+            body.pack(fill="both", expand=True)
+            if status is not None:
+                status.pack(fill="x", padx=6, pady=(0, 4))
+            if btn is not None:
+                btn.configure(text="折叠日志")
 
     def set_detach_callback(self, callback) -> None:
         """Optional: More-menu / 弹出完整窗口 opens the detached viewer."""

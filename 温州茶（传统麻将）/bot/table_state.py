@@ -118,7 +118,8 @@ def build_table_state(
     if caishen is not None:
         caishen = str(caishen) or None
     cid = known_caishen_id(result)
-    caishen_known = cid is not None or bool(caishen)
+    # Only a resolvable caishen_id counts as known (garbage labels stay unknown).
+    caishen_known = cid is not None
 
     melds = result.get("melds")
     meld_count = 0

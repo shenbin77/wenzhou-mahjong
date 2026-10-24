@@ -61,6 +61,8 @@ from claim_vision import read_claims
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE
 from tap_executor import TapAborted, TapExecutor
 from table_state import WALL_CARDS_STOP_AT, build_table_state
+from follow_pipeline import build_frame_facts, missing_decision_facts
+from session_logger import SessionLogger
 from turn_gate import (
     MAX_HISTORY as TURN_HISTORY_LIMIT,
     HandObservation,
@@ -194,6 +196,10 @@ class AutoPlayLoop:
         self.session_dir = Path(session_dir) if session_dir else DEV_ROOT / stamp
         self.frame_dir = self.session_dir / "frames"
         self.ledger_path = self.session_dir / "actions.jsonl"
+        # Structured follow-session debug log (vision/gates/caishen/decisions).
+        # Never flips CLAIM_TAP_CHANNEL_READY; dual-writes beside actions.jsonl.
+        self.follow_log_path = self.session_dir / "follow_session.jsonl"
+        self._follow_log = SessionLogger(self.session_dir)
         # session_dir 在 self._tap（161 行）之后才确定，所以只能在这里回填：
         # 让 tap 证据落进本局会话目录而不是 TapExecutor 的默认目录。
         # self._tap 可能是测试注入的替身/mock，普通属性赋值对它们无害。
@@ -342,12 +348,22 @@ class AutoPlayLoop:
                 "enabled": self.enabled, "dry_run": self.dry_run,
                 "caishen": self.caishen_label or "auto",
                 "started_at": datetime.now().astimezone().isoformat(),
+                "claim_tap_channel_ready": CLAIM_TAP_CHANNEL_READY,
             }
             with self.ledger_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(header, ensure_ascii=False) + "\n")
+            self._follow_log.write_header({
+                "serial": self.serial, "mode": self.mode,
+                "enabled": self.enabled, "dry_run": self.dry_run,
+                "caishen": self.caishen_label or "auto",
+                "dev": True,
+            })
             self._ledger_started = True
         with self.ledger_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        # Structured follow-session row for post-hoc debug (no taps).
+        analysis = self._last_result if isinstance(self._last_result, dict) else None
+        self._follow_log.append(event, tick=self.tick_index, analysis=analysis)
 
     def _save_frame(self, raw: bytes, tag: str) -> Path:
         self._ensure_dirs()
@@ -491,6 +507,27 @@ class AutoPlayLoop:
             incoming_source=incoming_source,
         )
         base["table_state"] = table.ledger()
+        # Unified path parity with assist_window FollowPipeline (read-only facts).
+        facts = build_frame_facts(
+            result_for_table, table,
+            round_seq=self.round.seq,
+            turn_status=result.get("status"),
+            turn_actionable=(result.get("status") == "advise"
+                             and bool(result.get("suggested_boxes"))),
+        )
+        base["frame_facts"] = facts.ledger()
+        missing = missing_decision_facts(result_for_table, table)
+        # dry_run / observe: abstain on missing decision facts.
+        # enabled: keep hard stop via should_stop_for_unknown_caishen below.
+        if (missing and result.get("status") == "advise" and not self.enabled):
+            return self._event({
+                **base,
+                "event": "idle",
+                "status": "abstain",
+                "suggestion": None,
+                "suggestion_id": None,
+                "reason": f"决策事实不足({','.join(missing)})；本帧弃权",
+            })
         if self.enabled and table.should_stop_for_unknown_caishen:
             return self._stop(
                 "gate_unknown_caishen",
@@ -748,6 +785,7 @@ class AutoPlayLoop:
         return {
             "session": str(self.session_dir),
             "ledger": str(self.ledger_path),
+            "follow_session": str(self.follow_log_path),
             "actions": self.actions_done,
             "dry_run": self.dry_run,
             "stopped": self.stopped,

@@ -1,0 +1,6 @@
+冒烟测试任务（只许在 D:\温州麻将\_ds_test 目录内操作，不要动其他任何文件）：
+
+1. 创建目录 D:\温州麻将\_ds_test（若不存在）。
+2. 在其中创建 hello.txt，第一行写：echobird-deepseek-ok
+3. 用 shell 运行 python --version，把输出原样追加为 hello.txt 的第二行。
+4. 完成以上即可，不要做任何额外事情。

@@ -1,0 +1,50 @@
+## Summary
+
+SPEC-002 收尾三件套已完成。未连接模拟器、未改识牌阈值、未修改模板图片或 SPEC 行为代码。
+
+## Changes
+
+1. 财神模板标签
+
+`t6.png` 标签由 `t6` 修正为 `t7`，`t7.png` 标签由 `t7` 修正为 `t6`。[manifest.json](<D:/温州麻将/温州茶（传统麻将）/bot/templates/caishen/manifest.json:61>)
+
+同步更新两项测试断言：
+
+- `291755/r05/frame_01.png`：`t6 → t7`
+- `207547/r03/frame_01.png`：`t7 → t6`
+
+原因均为 manifest 标签纠正，图片、来源、资产 SHA 未变。[test_caishen_vision.py](<D:/温州麻将/温州茶（传统麻将）/bot/tests/test_caishen_vision.py:31>)
+
+2. 文档同步
+
+[QUEUE.md](<D:/温州麻将/SPECS/QUEUE.md:8>) 已更新为指定的第三审通过状态。[SPEC-002-assist-record.md](<D:/温州麻将/SPECS/SPEC-002-assist-record.md:14>) 只修改了重新布防措辞，明确财神变化形成新语义键。
+
+3. tea_2p 金标冻结
+
+三帧 SHA、张数和牌面已逐张复核，写入 [tea_2p_manifest.json](<D:/温州麻将/温州茶（传统麻将）/bot/gold/tea_2p_manifest.json:1>)。首版离线结果写入 [tea_2p_vision_baseline.json](<D:/温州麻将/温州茶（传统麻将）/bot/gold/tea_2p_vision_baseline.json:1>)。
+
+| 帧 | 金标张数 | 接受 | 对 | 错 | 漏 |
+|---|---:|---:|---:|---:|---:|
+| r01 | 16 | 15 | 15 | 0 | 1 |
+| r03 | 17 | 12 | 12 | 0 | 5 |
+| r12 | 16 | 7 | 7 | 0 | 9 |
+
+新增 [test_tea_2p_gold_manifest.py](<D:/温州麻将/温州茶（传统麻将）/bot/tests/test_tea_2p_gold_manifest.py:1>)，覆盖三帧路径、模式、SHA、张数及基线差异。
+
+## Validation
+
+- 受影响模板/识牌专项：`15/15 passed`
+- bot 全量：`106/106 passed`
+- 修改前全量基线：`100/100 passed`
+- `t6.png`、`t7.png` 磁盘 SHA 与 manifest 记录一致，确认图片未修改
+- 阈值保持 `0.82/0.055`
+
+当前全量比 QUEUE 记录的第三审 `100/100` 多 6 项，来自新增的三帧冻结和基线回归。
+
+## Files and risks
+
+全部改动文件：上述两个 SPECS 文档、财神 manifest、财神测试，以及新增的金标 manifest、基线 JSON、金标回归测试，共 7 个文件。
+
+四个既有文件的修改前版本已镜像备份至 [_backups\20261020_SPEC-002_closeout_before](<D:/温州麻将/_backups/20261020_SPEC-002_closeout_before>)，备份时源文件与备份 SHA 全部一致。
+
+未执行真机验收；r03/r12 为变暗回放帧，当前漏识数据只作为离线保守识别基线，不代表亮牌实战准确率。下一步仍是真机验收。

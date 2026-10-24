@@ -35,6 +35,8 @@ class CaishenRead:
     score: float
     runner_up: float
     reason: str
+    # Best-scoring label when abstaining — diagnostic only, never an accepted label.
+    candidate: str | None = None
 
 
 def _templates() -> tuple[tuple[int, int, int, int], dict[str, tuple[np.ndarray, ...]]]:
@@ -96,5 +98,8 @@ def detect_caishen(image: np.ndarray) -> CaishenRead:
     best_label, best_score = ranked[0]
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
     if best_score < _MIN_SCORE or best_score - second_score < _MIN_MARGIN:
-        return CaishenRead(None, best_score, second_score, "财神小牌匹配不够确定")
-    return CaishenRead(best_label, best_score, second_score, "")
+        # Keep the stable reason token; candidate/score are diagnostics only.
+        return CaishenRead(
+            None, best_score, second_score, "财神小牌匹配不够确定", best_label
+        )
+    return CaishenRead(best_label, best_score, second_score, "", None)

@@ -1,0 +1,42 @@
+## Summary
+
+终审不通过。实现主体已落地，但存在 3 项冻结契约偏差；未修改任何项目文件。
+
+## 不符合项（按严重程度）
+
+| 结论 | 审计项 | 证据 |
+|---|---|---|
+| [不符合] | **弃权绕过冻结状态机和稳定帧门槛。** 契约规定 `detected → suggested → resolved \| abstained \| timeout`，且进入 `suggested` 前必须连续两帧手牌多重集相同。当前 gate、牌数、识别失败或财神未选时，首帧即创建 `detected` 并立即 `_close("abstained")`，实际为 `detected → abstained`，且单帧就写入 JSONL。测试也明确固化了这一行为。 | [SPEC:9](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:9>)；[recorder.py:418](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:418>)；[test_recorder.py:171](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:171>) |
+| [不符合] | **活动决策可在未关闭时被替换。** `detected` 状态收到不同语义键时，代码直接用新的 `_ActiveDecision` 覆盖旧对象；旧决策没有进入任何终态，随后新键可进入 `suggested`。这不满足“未关闭期间的新稳定帧一律不生成新决策”，也破坏冻结状态机的完整生命周期。 | [SPEC:11](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:11>)；[recorder.py:451](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:451>)；[recorder.py:461](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:461>) |
+| [不符合] | **茶系 `gate_ok` 额外绑定“无中发”。** 契约定义是“规则文字与 mode 一致且可读”；当前即使已读出“温州茶 2人/4人”，只要未检测到“无中发”便返回 `gate_ok=False`。这会把 mode 正确、规则可读但牌集不同的茶局误记为门禁失败。 | [SPEC:35](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:35>)；[recorder.py:157](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:157>)；[recorder.py:161](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:161>) |
+
+## 其余逐条核对
+
+| 结论 | 契约项与证据 |
+|---|---|
+| [符合] | mode 严格限定为 `tea_2p / tea_4p / shu_4p`，其他值不进入记录：[recorder.py:18](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:18>)、[recorder.py:370](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:370>)。 |
+| [符合] | 建议路径连续两帧相同语义键才进入 `suggested`；结果路径也要求变化后的手牌连续两帧相同：[recorder.py:469](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:469>)、[recorder.py:380](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:380>)。弃权路径例外已列为不符合。 |
+| [符合] | `suggested` 不落盘；所有终态统一经 `_close()` 一次追加完整 JSONL：[recorder.py:303](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:303>)、[recorder.py:322](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:322>)、[recorder.py:472](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:472>)。 |
+| [符合] | 语义键保留多重集并排序，使用 SHA-256，包含 mode、手牌、round、caishen；`decision_id` 为 mode 加前 16 位：[recorder.py:31](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:31>)、[recorder.py:35](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:35>)、[recorder.py:47](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:47>)。 |
+| [符合] | 已关闭语义键不会重复；财神由未选变为已选会产生不同键，round 也包含在键中，因此可以重新布防：[recorder.py:348](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:348>)、[recorder.py:415](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:415>)、[test_recorder.py:126](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:126>)。 |
+| [符合] | `suggested` 满 30 秒关闭为 `timeout`，`agreed/human_discard/result_frame` 保持 null：[recorder.py:354](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:354>)、[test_recorder.py:143](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:143>)。 |
+| [符合] | JSONL 字段齐全；逐牌四字段、候选统一对象 Top-5 并按 `final_score` 降序；`diff_failed`、`caishen_unset`、`abstain_reason` 的字段组合符合约束：[recorder.py:71](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:71>)、[recorder.py:92](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:92>)、[recorder.py:322](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:322>)。 |
+| [符合] | 语义键和帧引用均用 SHA-256；`decision_frame/result_frame` 均包含 path 和 sha256：[recorder.py:44](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:44>)、[recorder.py:51](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:51>)、[recorder.py:343](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:343>)。 |
+| [符合] | 差分只在结果手牌稳定两帧后执行；只有净消失一张、无新增且两边全部已识别时才生成 `human_discard`，其余为 `diff_failed`：[recorder.py:385](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:385>)、[recorder.py:392](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:392>)。 |
+| [符合] | account 必填并锁定；room_id 可空；round 从 1 开始并由“下一局”递增；熟 4 财神固定为 55，茶系由窗口手选注入：[recorder.py:206](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:206>)、[recorder.py:239](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:239>)、[recorder.py:172](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:172>)、[assist_window.py:250](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:250>)。 |
+
+## Validation
+
+- [符合] 记录器专项：
+
+  `python -m pytest tests\test_recorder.py -q -p no:cacheprovider`
+
+  实际结果：`10 passed in 2.93s`。
+
+- [不符合] bot 全量回归：
+
+  `python -m pytest tests -q -p no:cacheprovider`
+
+  实际结果：`92 passed, 6 failed in 18.30s`。六项均因 pytest 临时目录写入报 `OSError: [Errno 28] No space left on device`；没有出现代码断言失败，但当前环境无法复现 [QUEUE.md:8](</D:/温州麻将/SPECS/QUEUE.md:8>) 声称的 `98/98`。
+
+总评：存在冻结状态机、活动决策锁和茶系门禁三项契约偏差，且全量回归当前未绿，不可进入真机验收。

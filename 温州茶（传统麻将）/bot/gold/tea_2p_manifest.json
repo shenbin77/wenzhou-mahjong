@@ -1,0 +1,66 @@
+{
+  "schema": "tea_gold_manifest/v1",
+  "frozen_at": "2026-10-20",
+  "frames": [
+    {
+      "mode": "tea_2p",
+      "frame_path": "温州茶（传统麻将）/采集/2026-10-15/room_p2a/r01/frame_02.png",
+      "sha256": "4b68e120e2195e3502da29bbebfe56ffd09512a5b9dc28367ba67b1a5bd4e3a1",
+      "annotated_hand_multiset": {
+        "w3": 1,
+        "w6": 1,
+        "w8": 1,
+        "t2": 2,
+        "t3": 2,
+        "t7": 1,
+        "t9": 1,
+        "s2": 2,
+        "s4": 1,
+        "s5": 1,
+        "s6": 2,
+        "s7": 1
+      }
+    },
+    {
+      "mode": "tea_2p",
+      "frame_path": "温州茶（传统麻将）/采集/2026-10-15/room_p2a/r03/frame_02.png",
+      "sha256": "690e386359ba3bdb413602248176c544e3bc182caa3a74b5de41db1e6352a6c3",
+      "annotated_hand_multiset": {
+        "w1": 1,
+        "w4": 1,
+        "w5": 1,
+        "w6": 1,
+        "w8": 1,
+        "w9": 1,
+        "t2": 1,
+        "t7": 1,
+        "t9": 1,
+        "s1": 1,
+        "s6": 2,
+        "dong": 3,
+        "bei": 1,
+        "bai": 1
+      }
+    },
+    {
+      "mode": "tea_2p",
+      "frame_path": "温州茶（传统麻将）/采集/2026-10-15/room_p2a/r12/frame_02.png",
+      "sha256": "a2cf59ac71def36cb1dfbeefedb3da4e76b81830faa2cd84015c9389c97bc009",
+      "annotated_hand_multiset": {
+        "w1": 2,
+        "w8": 1,
+        "t2": 1,
+        "t3": 1,
+        "t5": 1,
+        "t6": 2,
+        "t8": 2,
+        "s1": 1,
+        "s2": 1,
+        "s3": 1,
+        "s8": 1,
+        "s9": 1,
+        "xi": 1
+      }
+    }
+  ]
+}

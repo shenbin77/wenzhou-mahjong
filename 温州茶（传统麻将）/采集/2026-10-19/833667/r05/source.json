@@ -1,0 +1,25 @@
+{
+  "capture_date": "2026-10-19",
+  "game_date": "2026-10-16",
+  "screen_room": "833667",
+  "screen_round": 5,
+  "mode_visible": "温州茶 2人回放",
+  "device_serial_observed": "emulator-5556",
+  "foreground_package_observed": "com.xm.zjgamecenter",
+  "route": "比赛战绩 → 2026-10-16 → 房间833667详情 → 第5局回放",
+  "record_seconds_requested": 30,
+  "video": "room833667_round5_6fa2ae31.mp4",
+  "video_sha256": "6587e213628d2dc92f30195f381a702721a7efa4e12f73ad5f34b825369132e1",
+  "probe": {
+    "codec_name": "h264",
+    "width": 1600,
+    "height": 900,
+    "duration_seconds": 29.409189
+  },
+  "click_validation": "fresh detail screenshot + round-row left-side fingerprint; after close btn_fanhui_list matched",
+  "no_new_game_or_room_card_spend": true,
+  "candidates": "candidates/candidate_index.json",
+  "candidate_status": "no_complete_closed_hand_in_1fps_sampled_frames",
+  "supplementary_candidates": "candidates_3fps/candidate_index.json",
+  "supplementary_status": "3fps scan found one complete 16-tile prediction; not human ground truth"
+}

@@ -1,0 +1,11 @@
+你是终审员，只审不改，不要修改任何文件。这是 SPEC-002 v4 记录器的第三审：复核第二审 3 项偏差的修复，并确认无回归。
+
+背景与裁定（先读）：
+- 第二审 3 项偏差：①弃权单帧直达终态绕状态机；②未关闭决策可被不同语义键替换；③茶 gate_ok 额外绑定“无中发”。实现者称已修复（recorder.py:157、411、424、460；test_recorder.py:173、205、231），并称专项 12 passed、bot 全量 100 passed、pytest 临时目录已固定到 D 盘项目目录（pytest.ini、conftest.py）。
+- 重新布防口径已在 spec 五审时拍板：“决策关闭后，仅当新语义键与已关闭决策的语义键不同，才允许生成新决策”，语义键含 caishen_id，故财神变化产生新键即可重新布防——实现遵循此口径为正确。SPEC 第 14 行措辞未提财神属文档残留歧义，请单独列为[文档问题]，不要判实现不符合。
+
+任务：
+1. 逐项复核 3 项修复是否真实成立（读代码给行号证据；特别检查：弃权轨迹是否为 detected → suggested → abstained 且首帧不落盘；detected 未关闭时不同键是否被忽略且旧决策生命周期完整；tea gate_ok 是否只取决于规则文字可读+人数与 mode 一致）。
+2. 抽查第二审已判[符合]的关键项无回归：语义键/decision_id、suggested 30 秒 timeout、diff/diff_failed 字段规则、bot_candidates Top-5 统一形状、suggested 不落盘终态一次写一行。
+3. 实际运行：python -m pytest tests\test_recorder.py 与 python -m pytest tests（在 D:\温州麻将\温州茶（传统麻将）\bot 下），报告真实数字；确认无 Errno 28 类环境失败。
+4. 总评：是否可进入下一阶段（金标 manifest 冻结 + 真机验收）。

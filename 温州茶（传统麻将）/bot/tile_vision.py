@@ -36,7 +36,7 @@ def face_region(crop):
     h, w = crop.shape[:2]
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     cream = (hsv[:, :, 1] < 90) & (hsv[:, :, 2] > 65)
-    # Broad �?bird glyphs can touch either side; use low cream coverage and
+    # Broad �?bird glyphs can touch either side; use low cream coverage and
     # bridge only short glyph interruptions, never the tall gold selection cap.
     a,b=max(1,int(w*.05)),min(w-1,int(w*.95))
     rows = (np.mean(cream[:,a:b],axis=1) > .23).astype(np.uint8)
@@ -74,9 +74,9 @@ def tile_signature(crop):
     red = ((hue < 19) | (hue > 165)) & (sat > 100) & (val > 35)
     green = (hue >= 32) & (hue <= 95) & (sat > 90) & (val > 35)
     # Navy numerals are highly saturated too; exclude red/green by hue instead
-    # of excluding all saturated dark ink (which loses the numeral above �?.
+    # of excluding all saturated dark ink (which loses the numeral above �?.
     dark = (gray < max(35., background*.62)) & ~red & ~green
-    # The actual target recordings overlay a yellow �?word on a red corner
+    # The actual target recordings overlay a yellow �?word on a red corner
     # triangle. Detect both colours together; an ordinary red tile stroke or
     # a gold bevel alone must not trigger this mask. Only the observed corner
     # is ignored, preserving the real glyph pixels underneath/elsewhere.
@@ -123,11 +123,73 @@ def tile_signature(crop):
     return canvas / norm if norm > .001 else None
 
 
+# --- 财神高亮 / 整手压暗的亮度补偿 -------------------------------------------
+# 实测（1600x900 实战帧，3684 个手牌框）：普通牌面底色 p70(V)=238-245；被游戏
+# "财"高亮框住的财神牌、以及"请出牌"整手压暗时，同一张牌只剩 100-115。模板签名
+# 是用亮底建的，暗底把笔画/底色对比压掉三分之二，分数直接掉到 0.27-0.40，整帧
+# 因此被判"识牌不完整"。这里只做一次线性增益把底色调回模板的亮度基准；已经够亮
+# 的牌原样返回，所以既有帧的输入和结论逐字节不变。
+_FACE_BG_BELOW = 200.0
+_FACE_BG_REFERENCE = 238.0
+
+# 实测（同 3684 个牌框）：红"财"角标占左上角标窗口 46.3%-48.8%，内部必有金色
+# "财"笔画 9.4%-12.3%；其余牌框最高只有 13.7% 红 / 14.1% 金。两个条件同时成立
+# 时 3684 个牌框零误报，所以角标可以作为"这张就是本局财神牌"的确定性证据。
+_BADGE_RED_FRACTION = 0.30
+_BADGE_GOLD_FRACTION = 0.04
+
+
+def face_background(crop):
+    """Return p70(V) of the tile face: the brightness level templates encode."""
+    face = face_region(crop)
+    hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+    return float(np.percentile(hsv[:, :, 2], 70))
+
+
+def normalise_face_brightness(crop, reference=_FACE_BG_REFERENCE,
+                              below=_FACE_BG_BELOW):
+    """Gain a greyed/dimmed tile face back to ordinary hand-tile brightness.
+
+    The game renders the 财-marked caishen tile, and the whole hand during the
+    "discard now" pause, at roughly half brightness. A plain linear gain feeds
+    the existing templates the same contrast they were measured on, so the real
+    glyph decides the label instead of the highlight being guessed around.
+    """
+    if crop is None or crop.size == 0:
+        return crop
+    background = face_background(crop)
+    if background <= 1.0 or background >= below:
+        return crop
+    return np.clip(crop.astype(np.float32)*(reference/background),
+                   0, 255).astype(np.uint8)
+
+
+def caishen_badge(crop):
+    """Return True when the tile carries the game's red 财 corner banner."""
+    if crop is None or crop.size == 0:
+        return False
+    height, width = crop.shape[:2]
+    window = crop[:max(10, round(height*.32)),
+                  :max(12, round(width*.36))].astype(np.int16)
+    blue, green, red = window[:, :, 0], window[:, :, 1], window[:, :, 2]
+    # Ratios rather than absolute levels: the same banner is drawn on a bright
+    # tile and on a greyed one, so only the colour relationship survives.
+    red_mask = (red-green > 50) & (red-blue > 50) & (red > 70)
+    gold_mask = ((red > 70) & (green*100 > red*45) & (green*100 < red*82)
+                 & (blue*100 < red*58) & (green-blue > 18))
+    area = float(window.shape[0]*window.shape[1])
+    return (float(np.count_nonzero(red_mask))/area >= _BADGE_RED_FRACTION
+            and float(np.count_nonzero(gold_mask))/area >= _BADGE_GOLD_FRACTION)
+
+
 class TileVision:
-    def __init__(self, template_dir=None, min_score=.82, min_margin=.055):
+    def __init__(self, template_dir=None, min_score=.82, min_margin=.055,
+                 caishen_label=None):
         self.template_dir = Path(template_dir or BASE_DIR/'templates_hongzhong_v2')
         self.min_score = min_score
         self.min_margin = min_margin
+        # 本局财神 label（vision 词汇，如 's4'）。None=未知，此时角标不填牌。
+        self.caishen_label = caishen_label
         self.diagnostics = []
         self.detection_diagnostics = {}
         self.last_meld_boxes = []
@@ -195,12 +257,27 @@ class TileVision:
         for a,b in zip(np.flatnonzero(ld==1),np.flatnonzero(ld==-1)):
             if b-a<=max(5,round(11*scale)):
                 visible_border[a:b]=True
-        # A �?corner overlay plus a long �?stroke can cover most of a column;
+        # A �?corner overlay plus a long �?stroke can cover most of a column;
         # a few real cream rows are sufficient once vertical borders are known.
         on = (np.count_nonzero(mask, axis=0) >= max(12*scale, band.shape[0]*.07))
         on &= ~visible_border
         changes = np.diff(np.r_[False,on,False].astype(np.int8))
         runs = zip(np.flatnonzero(changes==1), np.flatnonzero(changes==-1))
+        # A glyph column can split one face into two runs; both are then dropped
+        # by the width filter below (20261024_015126: the 7 of 5-6-7 dots was
+        # lost this way, turning a legal chi into an illegal 2-tile group).
+        # Merge only when BOTH sides are narrower than a single tile, the gap is
+        # far below any real group gap, and the result still fits one tile.
+        merged_runs = []
+        for a, b in runs:
+            if merged_runs:
+                pa, pb = merged_runs[-1]
+                if (pb - pa) < 48*scale and (b - a) < 48*scale \
+                        and (a - pb) < 6*scale and (b - pa) <= 125*scale:
+                    merged_runs[-1] = (pa, b)
+                    continue
+            merged_runs.append((a, b))
+        runs = merged_runs
         boxes,unresolved = [],[]
         for a,b in runs:
             if b-a < 48*scale:
@@ -221,32 +298,98 @@ class TileVision:
             boxes.append((x0+bx,y0+by,x0+ex,y0+ey))
         boxes.sort(key=lambda b: b[0])
         visible_count=len(boxes)
+        meld_groups=[]
         if len(boxes)>=6:
-            baseline=float(np.median([b[3] for b in boxes]))
-            typical_h=float(np.median([b[3]-b[1] for b in boxes]))
-            typical_w=float(np.median([b[2]-b[0] for b in boxes]))
-            cut=0
-            for b in boxes:
-                if b[3] < baseline-max(8*scale,typical_h*.07) and b[2]-b[0] < typical_w*.98:
-                    cut+=1
-                else:break
-            if cut>=3 and cut<len(boxes):
-                group=boxes[:cut];gap=boxes[cut][0]-group[-1][2]
-                tight=max(b[3] for b in group)-min(b[3] for b in group)<=4*scale
-                if gap>=8*scale and tight:
-                    self.last_meld_boxes=group
-                    boxes=boxes[cut:]
+            melds, boxes, meld_groups = self._split_exposed_prefix(boxes, scale)
+            self.last_meld_boxes = melds
         self.detection_diagnostics={'reason':'visible_borders','unresolved_regions':unresolved,
                                     'roi':[x0,y0,x1,y1], 'visible_count':visible_count,
-                                    'concealed_count':len(boxes),'meld_boxes':[list(b) for b in self.last_meld_boxes]}
+                                    'concealed_count':len(boxes),'meld_boxes':[list(b) for b in self.last_meld_boxes],
+                                    'meld_groups':meld_groups}
         return len(boxes), boxes
 
-    def classify_crop(self, crop):
+    @staticmethod
+    def _same_suit_run(ids):
+        """True when exactly three tile ids form one consecutive same-suit run."""
+        if len(set(ids)) != 3:
+            return False
+        return any(all(lo <= t <= hi for t in ids) and max(ids) - min(ids) == 2
+                   for lo, hi in ((1, 9), (21, 29), (41, 49)))
+
+    @staticmethod
+    def _split_exposed_prefix(boxes, scale):
+        """Cut the leading exposed-meld groups off the concealed hand.
+
+        The game renders melds on a raised platform at the left: its tiles
+        sit one row above the hand (bottoms ~16px higher at 1600x900) in
+        groups of 3-4 positions. In-group neighbours are ~4px apart,
+        inter-meld gaps are ~15px, and the platform-to-hand boundary is
+        21-30px; hand neighbours never exceed ~11px. A gang stacks its 4th
+        tile on the middle position, so one box of a meld group may sit a
+        further ~26px higher (the 西杠 defect: per-box baseline tests
+        rejected that box and then the whole group). Group shape decides
+        instead: every box of the leading raised run belongs to the
+        platform — internal gaps only split it into groups, they never
+        disqualify single boxes. Label evidence is deliberately NOT used
+        here: three identical faces may be a peng just as well as a gang.
+        """
+        if len(boxes) < 6:
+            return [], list(boxes), []
+        bottoms = [b[3] for b in boxes]
+        typical_h = float(np.median([b[3]-b[1] for b in boxes]))
+        typical_w = float(np.median([b[2]-b[0] for b in boxes]))
+        # The hand owns the lowest row; the platform is clearly above it.
+        hand_bottom = float(max(bottoms))
+        raise_need = max(8.0*scale, typical_h*0.07)
+        cut = 0
+        for bottom in bottoms:
+            if bottom < hand_bottom - raise_need:
+                cut += 1
+            else:
+                break
+        if cut < 3 or cut >= len(boxes):
+            return [], list(boxes), []
+        # The platform must be separated from the hand by a real gap.
+        boundary = boxes[cut][0] - boxes[cut-1][2]
+        if boundary < max(12.0*scale, typical_w*0.14):
+            return [], list(boxes), []
+        # Group sizes are reported for audit (a gang's 4th tile stacks onto
+        # one of the 3 positions and must NOT be invented as an extra box);
+        # an unusual group size never drags platform tiles back into the hand.
+        meld_gap = max(12.0*scale, typical_w*0.14)
+        groups, group = [], [boxes[0]]
+        for b in boxes[1:cut]:
+            if b[0] - group[-1][2] >= meld_gap:
+                groups.append(group)
+                group = [b]
+            else:
+                group.append(b)
+        groups.append(group)
+        return [b for g in groups for b in g], list(boxes[cut:]), [len(g) for g in groups]
+
+    def classify_crop(self, crop, caishen_label=None):
+        """Classify one tile crop; a 财-marked tile may be settled by its badge.
+
+        caishen_label is this round's caishen in vision vocabulary. When it is
+        unknown the badge is reported but never used to invent a tile.
+        """
         self.load_templates()
-        sig = tile_signature(crop)
+        marked = caishen_badge(crop)
+        known = caishen_label in TILE_IDS
+        # 只有"角标命中 + 本局财神已知"才做亮度补偿并计入：整手压暗是游戏
+        # "请出牌"的瞬时状态，财神未知时角标牌也必须按未识别处理，两者都保持
+        # 既有弃权契约（test_*_dimmed_frame / 金标基线）。
+        prepared = normalise_face_brightness(crop) if (marked and known) else crop
+        sig = tile_signature(prepared)
         if sig is None:
-            return {'tile_id': None, 'label': None, 'score': 0., 'margin': 0.,
-                    'accepted': False, 'reason': 'no_glyph'}
+            result = {'tile_id': None, 'label': None, 'score': 0., 'margin': 0.,
+                      'accepted': False, 'reason': 'no_glyph'}
+            if marked and known:
+                result.update(tile_id=TILE_IDS[caishen_label],
+                              label=caishen_label, accepted=True,
+                              reason='caishen_marked')
+            result['caishen_marked'] = marked
+            return result
         scores = self._matrix @ sig.ravel()
         by_label = {}
         for score, (name, tid, _) in zip(scores, self.templates):
@@ -257,29 +400,151 @@ class TileVision:
         second = ranked[1][1][0] if len(ranked)>1 else 0.
         margin = score-second
         accepted = score >= self.min_score and margin >= self.min_margin
-        return {'tile_id': tid if accepted else None, 'label': label,
+        result = {'tile_id': tid if accepted else None, 'label': label,
                 'score': score, 'margin': margin, 'accepted': accepted,
                 'runner_up': ranked[1][0] if len(ranked)>1 else None,
                 'reason': 'accepted' if accepted else ('low_score' if score<self.min_score else 'ambiguous')}
+        # The red 财 banner is the game declaring "this tile is the caishen".
+        # A known label therefore outranks an ambiguous glyph (九萬/八萬 land at
+        # 0.845-0.854 here); the glyph reading is kept for audit.
+        result['caishen_marked'] = marked
+        if marked and known:
+            result.update(tile_id=TILE_IDS[caishen_label], label=caishen_label,
+                          accepted=True, reason='caishen_marked',
+                          glyph_label=label, glyph_score=score)
+        # 筒牌的"字形分数落后一点点"不再只能弃权：模板 top1/top2 都是筒牌时的
+        # 歧义，改由独立判据（数圆点，见 pip_discriminator）裁决。只在这一个
+        # 分支里生效，非歧义路径与改动前逐位一致。
+        if not result['accepted'] and result['reason'] == 'ambiguous':
+            self._resolve_pip_ambiguity(result, prepared)
+        return result
 
-    def recognize_hand(self, img, roi=None):
+    @staticmethod
+    def _resolve_pip_ambiguity(result, prepared):
+        """Settle a dot-vs-dot ambiguity by counting pips, or leave it abstained.
+
+        Only called when the glyph classifier already abstained with
+        reason='ambiguous'. The pip count is independent evidence, not a
+        re-ranking of the two candidates:
+
+        * count readable + standard layout + exactly one of {top1, top2} has
+          that pip count  ->  adopt it, reason='pip_count', with the original
+          score/margin preserved for audit;
+        * count unreadable, layout non-standard, border-clipped face, or both/
+          neither candidate matching  ->  the reading stays abstained.
+
+        Args:
+            result: the mutable classification dict from `classify_crop`.
+            prepared: the exact crop pixels the glyph signature was built from.
+        """
+        from pip_discriminator import expected_pip_count, read_dot_pips
+        top = result.get('label')
+        runner = result.get('runner_up')
+        first, second = expected_pip_count(top), expected_pip_count(runner)
+        if first is None or second is None or first == second:
+            return
+        reading = read_dot_pips(prepared)
+        result['pip_reading'] = reading.as_dict()
+        result['pip_source_label'] = top
+        result['pip_source_score'] = result.get('score')
+        result['pip_source_margin'] = result.get('margin')
+        if reading.count is None or not reading.layout_ok:
+            return
+        hits = [name for name, count in ((top, first), (runner, second))
+                if count == reading.count]
+        if len(hits) != 1:
+            return
+        chosen = hits[0]
+        result.update(tile_id=TILE_IDS[chosen], label=chosen, accepted=True,
+                      reason='pip_count', glyph_label=top,
+                      glyph_score=result.get('score'))
+
+    def _read_table_caishen(self, img):
+        """Best-effort read of this round's caishen from the table sprite.
+
+        Only used when a caller wants TileVision to resolve the label itself;
+        the decision path stays opt-in so that frames analysed without a known
+        caishen keep their previous, stricter behaviour.
+        """
+        try:
+            from caishen_vision import detect_caishen
+            return detect_caishen(img).label
+        except Exception:
+            return None
+
+    def recognize_hand(self, img, roi=None, caishen_label=None):
         self.load_templates()
+        # 财神 label 只认调用方给的值：没有 label 就不动角标牌，保持既有严格行为
+        # （整手压暗/未知财神仍弃权，见 test_*_dimmed_frame 与金标基线）。
+        label = self.caishen_label if caishen_label is None else caishen_label
         count, boxes = self.count_tiles(img, roi)
         result, self.diagnostics = [], []
         self.last_melds,self.meld_diagnostics=[],[]
         for box in boxes:
             x0,y0,x1,y1 = box
-            d = self.classify_crop(img[y0:y1,x0:x1])
+            d = self.classify_crop(img[y0:y1,x0:x1], caishen_label=label)
             d['box'] = list(box)
             d['region'] = 'concealed'
             self.diagnostics.append(d)
-            if d['accepted']:
-                result.append((d['tile_id'],*box))
         for box in self.last_meld_boxes:
             x0,y0,x1,y1=box
-            d=self.classify_crop(img[y0:y1,x0:x1]);d['box']=list(box);d['region']='exposed'
+            d=self.classify_crop(img[y0:y1,x0:x1], caishen_label=label)
+            d['box']=list(box);d['region']='exposed'
             self.meld_diagnostics.append(d)
-            if d['accepted']:self.last_melds.append((d['tile_id'],*box))
+        # Recover at most one weak tile in three consecutive equal-label boxes,
+        # whether concealed or exposed. Both neighbours must have passed the
+        # original classifier; a dark whole hand therefore still abstains.
+        # The classifier's normal score and margin thresholds stay unchanged.
+        def recover_triplet(diagnostics, group_boxes, region):
+            originally_accepted = [d['accepted'] for d in diagnostics]
+
+            def face_at(index):
+                x0,y0,x1,y1 = group_boxes[index]
+                face = face_region(img[y0:y1, x0:x1])
+                return cv2.resize(cv2.cvtColor(face, cv2.COLOR_BGR2GRAY), (48, 64))
+
+            for idx, d in enumerate(diagnostics):
+                if (originally_accepted[idx]
+                        or d.get('reason') not in ('low_score', 'ambiguous')
+                        or d.get('score', 0) < .5 or not d.get('label')):
+                    continue
+                last_start = min(idx, len(diagnostics) - 3)
+                for start in range(max(0, idx - 2), last_start + 1):
+                    good = [j for j in range(start, start + 3)
+                            if j != idx and originally_accepted[j]
+                            and diagnostics[j]['label'] == d['label']]
+                    if len(good) != 2:
+                        # Run completion: a chi group holds three DIFFERENT
+                        # labels, so equal-label correlation can never fire.
+                        # When the two accepted neighbours plus the weak
+                        # tile's own top-1 label form one consecutive
+                        # same-suit run, the sequence is the evidence
+                        # (20261024_0815: exposed 2-3-4 dots lost its leading
+                        # 2 at score .51 and the whole frame abstained).
+                        peers = [j for j in range(start, start + 3)
+                                 if j != idx and originally_accepted[j]]
+                        if len(peers) == 2 and self._same_suit_run(
+                                [TILE_IDS[diagnostics[j]['label']] for j in peers]
+                                + [TILE_IDS[d['label']]]):
+                            d.update(accepted=True, tile_id=TILE_IDS[d['label']],
+                                     reason=f'{region}_run_correlated')
+                            break
+                        continue
+                    weak_face = face_at(idx)
+                    similarity = max(float(cv2.matchTemplate(
+                        weak_face, face_at(j), cv2.TM_CCOEFF_NORMED)[0, 0])
+                        for j in good)
+                    if similarity >= .95:
+                        d.update(accepted=True, tile_id=TILE_IDS[d['label']],
+                                 reason=f'{region}_triplet_correlated',
+                                 group_similarity=similarity)
+                        break
+
+        recover_triplet(self.diagnostics, boxes, 'concealed')
+        recover_triplet(self.meld_diagnostics, self.last_meld_boxes, 'exposed')
+        result = [(d['tile_id'], *d['box']) for d in self.diagnostics if d['accepted']]
+        self.last_melds = [(d['tile_id'], *d['box']) for d in self.meld_diagnostics
+                           if d['accepted']]
         over = {tid for tid,n in Counter(t[0] for t in result+self.last_melds).items() if n>4}
         if over:
             # Never silently trim an impossible hand into a plausible one.

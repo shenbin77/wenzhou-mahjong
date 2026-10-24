@@ -1260,3 +1260,34 @@ def test_round_change_frame_never_feeds_discards_to_l2(tmp_path):
     assert "来牌未知" in json.dumps(event["claim"], ensure_ascii=False)
     assert event["claim"]["tap_point"] is None
     assert tap.execute_calls == []
+
+def test_follow_session_jsonl_dual_writes_without_claim_channel(tmp_path):
+    """Structured follow_session.jsonl mirrors actions.jsonl; CLAIM stays False."""
+    import action_policy as ap
+    assert ap.CLAIM_TAP_CHANNEL_READY is False
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path,
+        analyses=[advise(caishen="w1"), advise(caishen="w1")],
+        hud=[(HUD_A, "w1"), (HUD_A, "w1")],
+    )
+    first = loop.tick()
+    second = loop.tick()
+    assert tap.execute_calls == []
+    assert loop.follow_log_path.name == "follow_session.jsonl"
+    assert loop.follow_log_path.is_file()
+    rows = [
+        json.loads(line)
+        for line in loop.follow_log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[0].get("kind") == "session_header"
+    assert rows[0]["claim_tap_channel_ready"] is False
+    body = [
+        row for row in rows
+        if row.get("schema") == "follow_session/v1" and row.get("kind") != "session_header"
+    ]
+    assert body, (first, second, rows)
+    for row in body:
+        assert row["claim_tap_channel_ready"] is False
+        assert "vision" in row and "gates" in row and "caishen" in row and "decision" in row
+

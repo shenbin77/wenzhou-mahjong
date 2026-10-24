@@ -1,0 +1,10 @@
+我是 Hana。SPECS/SPEC-002-assist-record.md 已更新为 v4（文首有说明）。针对三审 4 点逐条冻结：
+
+1. diff_failed 唯一确定：新增 diff_note 字段，resolved+差分失败时 diff_note="diff_failed"、abstain_reason=null；abstain_reason 仅 abstained 时非空，见 §4/§5。
+2. bot_candidates 冻结统一对象 Top-5：{tile, final_score, shanten_after, ukeire_count}，茶系元组由实现层补齐，见 §4。
+3. 去重改语义键（mode+手牌多重集+round+caishen 的 sha256），decision_id 不含图片哈希；新增活动决策锁与重新布防条件，见 §2。
+4. 元数据来源契约，见 §3：account 会话必选、room_id 人工可选可为 null、round 为记录器会话计数（下一局按钮 +1）、screen_rule_text 读不到则 gate 失败弃权（新增 gate_unreadable）。
+
+另：shu_4p 验收加了模板目录缺失的前置条件（§6），不阻塞茶系。
+
+请四审：只核对这 4 点是否闭合。全部闭合请明确回复"通过"，并给出实现第一步（哪个文件、加什么）。若仍有缺口，只列真正阻塞实现的，不要重复已闭合项，也不要把实现细节问题列为契约阻塞。不要修改任何文件。

@@ -1,0 +1,42 @@
+## Summary
+
+终审不通过。指定的 `recorder.py` 当前不存在，窗口仍使用旧式“每帧立即写独立 JSON”流程，SPEC-002 v4 的核心记录契约未落地。
+
+## Changes
+
+未修改任何文件。
+
+## Validation
+
+| 严重度 | 结论 | 契约项与证据 |
+|---|---|---|
+| P0 | [未实现] | **记录器不存在且未接入。** `Test-Path recorder.py = False`；`import recorder` 报 `ModuleNotFoundError`。窗口只导入现有茶/熟分析器，未导入记录器：[assist_window.py:16](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:16>)。队列仍标记“待 Codex 预审”：[QUEUE.md:8](</D:/温州麻将/SPECS/QUEUE.md:8>)。 |
+| P0 | [不符合] | **状态机与落盘时机不符合。** 当前状态为 `advise/hu/wait/abstain`，不是冻结状态机：[assist_window.py:366](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:366>)、[assist_tea.py:130](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:130>)。每次截图分析完成后立即写 `.json`：[assist_tea.py:349](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:349>)、[assist_tea.py:355](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:355>)；关闭窗口只停止线程，没有“一次性关闭落盘”：[assist_window.py:426](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:426>)。 |
+| P0 | [不符合] | **`assist_record/v4` JSONL 未实现。** 当前是一帧一个格式化 JSON 文件，并无 `schema/decision_id/account/room_id/round/gate_ok/tiles/bot_candidates/human_discard/agreed/status/abstain_reason/diff_note/decision_frame/result_frame` 完整行：[assist_tea.py:349](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:349>)、[assist_shu.py:254](</D:/温州麻将/温州茶（传统麻将）/bot/assist_shu.py:254>)。测试也明确按单个 JSON 对象读取旧记录：[test_assist_tea.py:144](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_assist_tea.py:144>)、[test_assist_shu.py:94](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_assist_shu.py:94>)。 |
+| P0 | [不符合] | **字段取值约束不符合。** 识牌原因使用 `accepted/no_glyph/more_than_four`，不是冻结的 `ok/low_score/ambiguous/no_box`：[tile_vision.py:248](</D:/温州麻将/温州茶（传统麻将）/bot/tile_vision.py:248>)、[tile_vision.py:263](</D:/温州麻将/温州茶（传统麻将）/bot/tile_vision.py:263>)。熟模式候选只取 Top-3 且保留 `name`，不是统一 Top-5 对象：[assist_shu.py:73](</D:/温州麻将/温州茶（传统麻将）/bot/assist_shu.py:73>)。茶模式没有输出 `bot_candidates`：[assist_tea.py:150](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:150>)。 |
+| P0 | [未实现] | **稳定结果帧差分未实现。** 没有多重集净消失一张的计算，也没有 `human_discard/agreed/diff_failed`。当前实际弃牌来自用户手动选择并写反馈事件：[assist_window.py:411](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:411>)。 |
+| P1 | [未实现] | **连续两帧手牌多重集相同的稳定帧判定未实现。** 连续观察只检查 `status` 和房号/局数 HUD 指纹，不比较手牌多重集：[assist_window.py:219](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:219>)。 |
+| P1 | [未实现] | **活动决策锁未实现。** `future` 只防止两个截图任务并发：[assist_window.py:241](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:241>)；每帧完成后继续调度抓图：[assist_window.py:363](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:363>)。没有“最多一个未关闭决策”。 |
+| P1 | [未实现] | **语义去重键与 `decision_id` 未实现。** 当前 SHA-256 只计算原始图片哈希：[assist_tea.py:352](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:352>)；没有 `sha256(mode + 排序手牌 + round + caishen_id)`，也没有 `{mode}_{前16位}`。 |
+| P1 | [未实现] | **重新布防及财神补选场景未实现。** 财神变化仅停止观察并清空显示：[assist_window.py:198](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:198>)；没有已关闭语义键，也无法判断补选财神后是否应生成新决策。 |
+| P1 | [未实现] | **30 秒超时未实现。** `capture_started` 只用于显示单帧耗时：[assist_window.py:344](</D:/温州麻将/温州茶（传统麻将）/bot/assist_window.py:344>)；连续观察没有决策超时或 `timeout/agreed=null` 逻辑。 |
+| P1 | [不符合] | **财神未选的专用结果不符合。** 当前返回 `status="abstain"` 和自然语言 `reason`：[assist_tea.py:99](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:99>)；没有 `status="abstained"`、`abstain_reason=null`、`diff_note="caishen_unset"`。 |
+| P2 | [不符合] | **双帧哈希对象未实现。** 原始图片确实采用 SHA-256，但只保存 `image_sha256`：[assist_shu.py:254](</D:/温州麻将/温州茶（传统麻将）/bot/assist_shu.py:254>)；没有 `{path, sha256}` 形式的 `decision_frame/result_frame`。 |
+| P2 | [符合] | **底层 mode 值符合。** 茶人数被限制为 2 或 4，并生成 `tea_2p/tea_4p`：[assist_tea.py:56](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:56>)、[assist_tea.py:78](</D:/温州麻将/温州茶（传统麻将）/bot/assist_tea.py:78>)；熟固定输出 `shu_4p`：[assist_shu.py:101](</D:/温州麻将/温州茶（传统麻将）/bot/assist_shu.py:101>)。但这仅证明现有辅助器的模式值正确，不证明记录器契约。 |
+
+测试命令：
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+python -m pytest tests/test_assist_tea.py tests/test_assist_shu.py -q -p no:cacheprovider
+```
+
+输出摘要：`21 passed, 0 failed in 6.57s`。这些测试验证的是旧式辅助器和单帧 JSON 记录，不覆盖 v4 状态机、语义去重、超时或结果帧差分。
+
+记录器导入检查：`0 通过、1 失败`，失败原因为 `ModuleNotFoundError: No module named 'recorder'`。
+
+## Risks
+
+若另一会话已经实现记录器，其产物尚未同步到当前工作区或指定路径；在当前磁盘状态下无法进行实现级终审。现有 21 个通过测试不能作为 SPEC-002 v4 合约通过证据。
+
+总评：不可进入真机验收。

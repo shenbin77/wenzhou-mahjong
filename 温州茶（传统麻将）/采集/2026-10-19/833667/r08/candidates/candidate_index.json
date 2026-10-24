@@ -1,0 +1,163 @@
+{
+  "schema": "tea_replay_candidates_v1",
+  "source_video": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\2026-10-19\\833667\\r08\\room833667_round8_dc6be099.mp4",
+  "source_sha256": "87da4daa392e7de4a5aaf602073437d7f2ba17139e37392d5e22fac39bcadb30",
+  "sampling": "ffmpeg fps=1; ordinal index is not exact PTS",
+  "counts": {
+    "frames": 29,
+    "visible_2p": 18,
+    "complete_2p": 13
+  },
+  "max_saved": 8,
+  "candidates": [
+    {
+      "file": "candidate_004.png",
+      "sample_index_at_1fps": 4,
+      "sha256": "cc0e5610de8bd0a9008ae834fbae68845eb4aebfb872067ea94947e9d41029e4",
+      "tile_ids": [
+        2,
+        4,
+        42,
+        45,
+        47,
+        48,
+        49,
+        23,
+        25,
+        26,
+        26,
+        27,
+        61,
+        61,
+        63,
+        64,
+        45
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_010.png",
+      "sample_index_at_1fps": 10,
+      "sha256": "da9fb535cacf7f5b78a2b7d2508330340b84f5c8570db8a662c30dd3e6f58060",
+      "tile_ids": [
+        2,
+        4,
+        42,
+        45,
+        45,
+        47,
+        48,
+        49,
+        23,
+        25,
+        26,
+        26,
+        27,
+        27,
+        61,
+        61,
+        4
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_012.png",
+      "sample_index_at_1fps": 12,
+      "sha256": "bd3ca25ef7e624252f671bb17f67d5f929a7e5a65b017dfe0badbac4d0cae7dc",
+      "tile_ids": [
+        2,
+        4,
+        4,
+        45,
+        45,
+        47,
+        48,
+        49,
+        23,
+        25,
+        26,
+        26,
+        27,
+        27,
+        61,
+        61
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_015.png",
+      "sample_index_at_1fps": 15,
+      "sha256": "a2b0cdb6e7f19fefb9e53bd66500412aa6a4ff5a2d58b604caa78d3a7eb80976",
+      "tile_ids": [
+        2,
+        4,
+        4,
+        45,
+        45,
+        47,
+        48,
+        49,
+        23,
+        25,
+        26,
+        26,
+        27,
+        27,
+        61,
+        61,
+        45
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_021.png",
+      "sample_index_at_1fps": 21,
+      "sha256": "a9624b40676b0cbeef0d3d659ea83c61a2b1ec7f9878968c6a55803c76fb5084",
+      "tile_ids": [
+        2,
+        4,
+        4,
+        45,
+        45,
+        45,
+        47,
+        48,
+        49,
+        25,
+        26,
+        26,
+        27,
+        27,
+        61,
+        61,
+        43
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_024.png",
+      "sample_index_at_1fps": 24,
+      "sha256": "c253e01a8c8df2f68f792a36ba404ec1ebbfaac18c6b7abaa21f100bdc4743ac",
+      "tile_ids": [
+        2,
+        4,
+        4,
+        45,
+        45,
+        45,
+        47,
+        48,
+        49,
+        25,
+        26,
+        26,
+        27,
+        27,
+        61,
+        61
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    }
+  ],
+  "status": "visible_2p_complete_predictions_only_not_training_gold"
+}

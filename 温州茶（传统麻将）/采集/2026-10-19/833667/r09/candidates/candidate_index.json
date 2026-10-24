@@ -1,0 +1,63 @@
+{
+  "schema": "tea_replay_candidates_v1",
+  "source_video": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\2026-10-19\\833667\\r09\\room833667_round9_d4a6f992.mp4",
+  "source_sha256": "a80a1405373c7edea822139bd892add21a5787980e46c77be4e847bcc53f5f00",
+  "sampling": "ffmpeg fps=1; ordinal index is not exact PTS",
+  "counts": {
+    "frames": 29,
+    "visible_2p": 14,
+    "complete_2p": 2
+  },
+  "max_saved": 8,
+  "candidates": [
+    {
+      "file": "candidate_003.png",
+      "sample_index_at_1fps": 3,
+      "sha256": "4081aae3e747005305d5544d1e12c2a9d4d27e45d12b117d7bdce6e92d9d727f",
+      "tile_ids": [
+        2,
+        5,
+        6,
+        8,
+        8,
+        9,
+        41,
+        43,
+        47,
+        21,
+        21,
+        24,
+        26,
+        28,
+        29,
+        63
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_004.png",
+      "sample_index_at_1fps": 4,
+      "sha256": "05b993f70dbf8ac08043e723069b061ad776b6e20cd775ec4b661208507bd7ef",
+      "tile_ids": [
+        63,
+        2,
+        5,
+        6,
+        8,
+        8,
+        9,
+        41,
+        43,
+        47,
+        21,
+        21,
+        24,
+        26,
+        28,
+        29
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    }
+  ],
+  "status": "visible_2p_complete_predictions_only_not_training_gold"
+}

@@ -2,13 +2,13 @@
 
 执行人：Grok Bot（用户：「Continue remaining P0… Focus chunk A」）。
 CLAIM_TAP_CHANNEL_READY：**仍为 False**（未开通道 / 未做实战点）。
-更新时间：2026-10-24 20:39（Asia/Shanghai）
+更新时间：2026-10-24 20:50（Asia/Shanghai）
 
 ## 测试基线（本机全量）
 
 | 套件 | 结果 |
 |---|---|
-| 主仓库 ot/tests | **680 passed**（chunk A 后全量；含 countdown/table_state 新测） |
+| 主仓库 bot/tests | **686 passed**（chunk A + follow_session.jsonl；含 countdown/table_state + logger） |
 | 子仓库 brain_v0 / pc_bot | 本轮未重跑（上一轮 487 passed / 13 skipped） |
 
 原基线 662 → 本轮 +18（countdown/table_state + wall≤16 / unknown-caishen / turn_gate countdown 接线回归）。
@@ -74,3 +74,11 @@ CLAIM_TAP_CHANNEL_READY：**仍为 False**（未开通道 / 未做实战点）�
 - 温州茶（传统麻将）/bot/tests/test_turn_gate.py
 - 温州茶（传统麻将）/bot/tests/test_auto_play_loop.py
 - P0_CLOSEOUT_WIP_20261024.md
+
+## Follow-session 日志（2026-10-24 20:50 追加）
+
+- 新增 session_logger.py → <session>/follow_session.jsonl（vision/hand、gates/abstain、caishen、decision）
+- uto_play_loop._write_event 双写；**CLAIM_TAP_CHANNEL_READY 仍 False**
+- 测试：	ests/test_session_logger.py + 	est_follow_session_jsonl_dual_writes_without_claim_channel
+- 全量：**686 passed**
+- Codex 审计包：CODEX_P0_AUDIT_PACKET_20261024.md

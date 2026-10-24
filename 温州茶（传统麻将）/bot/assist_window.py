@@ -47,7 +47,7 @@ TEA_ROOT = Path(__file__).resolve().parent.parent
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "温州麻将辅助器.ico"
 LAST_ACCOUNT_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".last_account"
 WINDOW_STATE_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".window_state.json"
-DEFAULT_SIZE = (1100, 880)
+DEFAULT_SIZE = (1100, 740)
 SIZE_RANGE = {"w": (840, 1600), "h": (600, 1200)}
 STALE_SECONDS = 3.0
 OFFLINE_SOURCES = {"offline_preflight", "imported_image", "mp4_1fps", "manual_correction"}
@@ -285,6 +285,16 @@ class TeaAssistWindow:
         self.hud_countdown = tk.StringVar(value="倒计时：未识别")
         self.hud_turn = tk.StringVar(value="当前行动：未识别")
         self.hud_river = tk.StringVar(value="牌河：未识别")
+        # Extended unified-path facts (玩法/房号局数/财神/暗手/副露/最近出牌).
+        self.hud_mode = tk.StringVar(value="玩法：未识别")
+        self.hud_room_round = tk.StringVar(value="房号/局数：未识别")
+        self.hud_caishen = tk.StringVar(value="财神：未识别")
+        self.hud_concealed = tk.StringVar(value="暗手：未识别")
+        self.hud_melds = tk.StringVar(value="副露：未识别")
+        self.hud_meld_types = tk.StringVar(value="副露类型：未识别")
+        self.hud_last_discard = tk.StringVar(value="最近出牌：未识别")
+        self.hud_claim_buttons = tk.StringVar(value="鸣牌按钮：未识别")
+        self._follow_pipeline = None
         self.display_source: str | None = None
         self._build()
         self.recorder_timer = root.after(500, self._poll_recorder)
@@ -326,7 +336,7 @@ class TeaAssistWindow:
         # Bottom strip: read-only follow_session.jsonl (gate/abstain/decision).
         # Pack before main so the strip stays at the window bottom.
         self.follow_log_frame = ttk.LabelFrame(
-            self.root, text="跟随会话日志 · 只读", padding=(4, 2)
+            self.root, text="跟随会话日志 · 只读（可折叠）", padding=(4, 2)
         )
         self.follow_log_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
 
@@ -359,25 +369,20 @@ class TeaAssistWindow:
             font=("Microsoft YaHei UI", 9, "bold"), wraplength=380,
         ).pack(fill="x", padx=6)
 
-        # Read-only table HUD (余牌 / 倒计时 / 当前行动 / 牌河) — never invents values.
+        # Read-only unified table HUD — never invents values; CLAIM stays off.
         self.hud_panel = ttk.Frame(sidebar, padding=(6, 2))
         self.hud_panel.pack(fill="x")
-        ttk.Label(
-            self.hud_panel, textvariable=self.hud_wall,
-            font=("Microsoft YaHei UI", 9),
-        ).pack(anchor="w")
-        ttk.Label(
-            self.hud_panel, textvariable=self.hud_countdown,
-            font=("Microsoft YaHei UI", 9),
-        ).pack(anchor="w")
-        ttk.Label(
-            self.hud_panel, textvariable=self.hud_turn,
-            font=("Microsoft YaHei UI", 9, "bold"),
-        ).pack(anchor="w")
-        ttk.Label(
-            self.hud_panel, textvariable=self.hud_river,
-            font=("Microsoft YaHei UI", 9), wraplength=380,
-        ).pack(anchor="w")
+        for var in (
+            self.hud_mode, self.hud_room_round, self.hud_caishen,
+            self.hud_concealed, self.hud_melds, self.hud_meld_types, self.hud_wall,
+            self.hud_countdown, self.hud_turn, self.hud_river,
+            self.hud_claim_buttons,
+            self.hud_last_discard,
+        ):
+            ttk.Label(
+                self.hud_panel, textvariable=var,
+                font=("Microsoft YaHei UI", 9), wraplength=380,
+            ).pack(anchor="w")
 
         self.advice_label = ttk.Label(
             sidebar, textvariable=self.suggestion, foreground="#146c2e",
@@ -723,25 +728,19 @@ class TeaAssistWindow:
         局身份证据有两路，互相独立：
         1. 房号/局数 HUD 像素指纹（头像未遮挡时可用，像素级、最精确）；
         2. 桌面财神小牌识别（不受头像遮挡，0.98 阈值，逐帧可读）。
-        任一路给出"与已核对局矛盾"的硬证据即判定换局：停止跟随并清空
-        上一局手选财神。两路都无法证实当前手选/旧局时保持 Codex 挡板
-        行为：不出建议、不清空、也不续用。
+        任一路给出"与已核对局矛盾"的硬证据即判定换局：清除上一局手选财神，
+        自动采用本帧识出的新财神，并跳过过渡帧建议。
+
+        "局身份更新"与"本帧能否给建议"分开：advise / abstain 都先读本帧
+        HUD 与财神证据并更新局基线。abstain 只表示本帧不能用于决策——
+        撤销建议、保留当前截图与识牌证据，但绝不能挡住换局检测。
+        同一局的 abstain 不得清除已确认的本局财神；两路都不可读时
+        fail-closed：清旧建议、不猜新局或新财神。
         """
         mode = getattr(getattr(self, "mode", None), "get", lambda: "")()
         if not (getattr(self, "continuous", False) and str(mode).startswith("温州茶")):
             return True
-        if result.get("status") == "abstain":
-            # 弃权只表示本帧不能用于决策，不代表本帧没有展示价值。
-            # `_show()` 随后会用当前结果撤销旧建议，并继续展示当前截图、
-            # 已接受牌和未识别证据；这里若 reset，会先把牌面和截图清空，
-            # 造成实时主界面反复闪成空白。
-            invalidate = getattr(self, "_invalidate_live_advice", None)
-            if callable(invalidate):
-                invalidate()
-            live_info = getattr(self, "live_info", None)
-            if live_info is not None:
-                live_info.set("本帧识别未完整；已停用建议并保留当前识牌证据。")
-            return True
+        is_abstain = result.get("status") == "abstain"
         image = result.get("image")
         fingerprint = tea_round_fingerprint(image)
         card_label, card_score = tea_round_caishen_evidence(image)
@@ -759,6 +758,15 @@ class TeaAssistWindow:
             except Exception:  # noqa: BLE001 - 替身对象没有这两个控件时按无手选处理
                 stale_manual = False
         manual_evidence = manual or stale_manual
+
+        def invalidate_abstain_advice() -> None:
+            """Abstain revokes advice but keeps the current live evidence."""
+            invalidate = getattr(self, "_invalidate_live_advice", None)
+            if callable(invalidate):
+                invalidate()
+            live_info = getattr(self, "live_info", None)
+            if live_info is not None:
+                live_info.set("本帧识别未完整；已停用建议并保留当前识牌证据。")
 
         def adopt_automatic_round(reason: str, *, drop_manual: bool = False) -> bool:
             """Keep following when automatic evidence proves a new round.
@@ -799,7 +807,7 @@ class TeaAssistWindow:
             return adopt_automatic_round(
                 f"财神牌已变化（{stored_card}→{card_label}）；上一局手选财神已清空",
                 drop_manual=True)
-        # 硬证据三：手选财神与画面财神牌矛盾——要么上局遗留、要么选错，
+        # 硬证据三：手选财神与画面财神牌矛盾——要么上局遗留、要么选错。
         # 两者都必须作废，绝不能带着矛盾给出可执行建议。
         if manual and pick and card_label is not None and card_label != pick:
             self._forget_manual_caishen()
@@ -810,14 +818,21 @@ class TeaAssistWindow:
             live_info = getattr(self, "live_info", None)
             if live_info is not None:
                 live_info.set("桌面财神暂不可读；使用本局手选值并继续观察。")
+            if is_abstain:
+                invalidate_abstain_advice()
             return True
         # 采纳本帧证据：指纹首次出现即锁定，牌面确认即记录局财神。
+        # 同一局 abstain 只在本帧识出牌面时更新；不可读时绝不把已确认财神清掉。
         if fingerprint is not None and first is None:
             self.continuous_round = fingerprint
         if card_label is not None:
             self.continuous_caishen = card_label
         # 挡板二（Codex 行为保留）：HUD 被遮挡且牌面也不可读 → 无证据。
         if fingerprint is None and card_label is None:
+            if is_abstain:
+                # fail-closed：清旧建议，但不猜测新局/新财神，也不抹掉当前证据。
+                invalidate_abstain_advice()
+                return True
             self._reset_round_display("画面未核对")
             status = getattr(self, "status", None)
             if status is not None:
@@ -826,12 +841,15 @@ class TeaAssistWindow:
             if live_info is not None:
                 live_info.set("画面未核对；当前没有可执行的出牌建议。")
             return False
+        if is_abstain:
+            invalidate_abstain_advice()
+            return True
         if fingerprint is None:
             # 头像遮挡但牌面证实仍同一局：不再因遮挡长期停摆。
             live_info = getattr(self, "live_info", None)
             if live_info is not None:
                 live_info.set(
-                    f"房号被头像遮挡；桌面财神牌({card_label})与已核对局一致，继续观察。")
+                    f"房号被头像遮挡；桌面财神（{card_label}）与已核对局一致，继续观察。")
         return True
 
     def _reset_round_display(self, reason: str) -> None:
@@ -1094,12 +1112,41 @@ class TeaAssistWindow:
         self.continuous_caishen = None
         self._last_capture_at = None
         self._last_render_done_at = None
+        # Fail loud BEFORE arming continuous: every live follow must own jsonl.
+        try:
+            attach = getattr(self, "_attach_follow_pipeline", None)
+            if not callable(attach):
+                raise RuntimeError(
+                    "本窗口缺少跟随管线 _attach_follow_pipeline；"
+                    "请关闭助手后重新打开以加载新代码"
+                )
+            attach()
+            pipeline = getattr(self, "_follow_pipeline", None)
+            log_path = getattr(pipeline, "follow_log_path", None) if pipeline else None
+            if log_path is None or not Path(log_path).is_file():
+                raise RuntimeError(
+                    f"follow_session.jsonl 未创建：{log_path}"
+                )
+        except Exception as exc:
+            self._follow_pipeline = None
+            self.continuous = False
+            msg = f"无法开始跟随：{exc}"
+            if getattr(self, "status", None) is not None:
+                self.status.set(msg)
+            if getattr(self, "live_info", None) is not None:
+                self.live_info.set(msg)
+            return
         self.continuous = True
         if getattr(self, "start_button", None) is not None:
             self.start_button.configure(text="停止跟随")
         self.next_run = time.perf_counter()
-        self.status.set("实时跟随已启动；等待当前画面，界面按实际处理周期刷新。")
-        self.live_info.set("实时跟随中：只读画面，不会代点。")
+        log_path = self._follow_pipeline.follow_log_path
+        self.status.set(
+            f"实时跟随已启动；日志 {Path(log_path).name}；界面按实际处理周期刷新。"
+        )
+        self.live_info.set(
+            f"实时跟随中：只读画面，不会代点；已写入 {log_path}"
+        )
         title = getattr(self, "preview_title", None)
         if title is not None:
             title.set("实时跟随 · 等待当前画面")
@@ -1114,6 +1161,8 @@ class TeaAssistWindow:
         self.continuous = False
         self.continuous_round = None
         self.continuous_caishen = None
+        # Keep follow_session.jsonl; only drop the live writer handle.
+        self._follow_pipeline = None
         if getattr(self, "start_button", None) is not None:
             self.start_button.configure(text="开始跟随")
         if getattr(self, "display_source", None) in OFFLINE_SOURCES:
@@ -1319,6 +1368,29 @@ class TeaAssistWindow:
     def _show(self, result: dict, now: float) -> None:
         self.display_source = self._result_source(result)
         offline = self.display_source in OFFLINE_SOURCES
+        # Codex must-fix: FollowPipeline.observe / gates FIRST, then refresh + render.
+        # Missing decision facts must clear advise before the main UI can show "打 X".
+        observe = getattr(self, "_observe_follow_frame", None)
+        if callable(observe):
+            import types as _types
+            pre = _types.SimpleNamespace(
+                status=result.get("status"),
+                actionable=(
+                    str(result.get("status") or "") == "advise"
+                    and result.get("suggestion") is not None
+                ),
+            )
+            try:
+                observe(result, pre)
+            except Exception as exc:
+                # Fail-closed on realtime pipeline errors: never keep a stale advise.
+                result["status"] = "abstain"
+                result["suggestion"] = None
+                result["suggestion_id"] = None
+                result["reason"] = f"实时管线异常：{exc}"
+                result["follow_error"] = str(exc)
+                result["follow_abstain"] = True
+                result["follow_display"] = None
         state = self.refresh.update(result, now=now)
         self.current = result
         render_preview = getattr(self, "_render_live_frame", None)
@@ -1343,7 +1415,9 @@ class TeaAssistWindow:
         if set_notice is not None:
             set_notice()
         self.caishen_title.set(self._caishen_title(state))
-        self._update_follow_hud(result, state)
+        update_hud = getattr(self, "_update_follow_hud", None)
+        if callable(update_hud):
+            update_hud(result, state)
         self._update_latency_bar()
         initial = self.actual_choice.get() == ""
         self.actual_choice["values"] = sorted(
@@ -1394,23 +1468,243 @@ class TeaAssistWindow:
         self.images["preview"] = self._to_tk(image)
         picture.configure(image=self.images["preview"], text="")
 
-    def _update_follow_hud(self, result: dict, state) -> None:
-        """Refresh read-only 余牌/倒计时/行动/牌河 labels (CLAIM stays off)."""
-        from assist_hud import build_follow_hud, load_result_bgr
-
-        image = load_result_bgr(result)
-        hud = build_follow_hud(
-            result,
-            image=image,
-            status=getattr(state, "status", None),
-            actionable=bool(getattr(state, "actionable", False)),
-            wall_cards=result.get("wall_cards"),
-            run_countdown=True,
+    def _attach_follow_pipeline(self) -> None:
+        """Bind SessionLogger/follow_session.jsonl for this 开始跟随 run."""
+        from follow_enrich import (
+            WALL_CARD_READER_CONNECTED,
+            river_read_enabled,
         )
-        self.hud_wall.set(hud.wall)
-        self.hud_countdown.set(hud.countdown)
-        self.hud_turn.set(hud.turn)
-        self.hud_river.set(hud.river)
+        from follow_pipeline import FollowPipeline
+
+        mode = self._mode_key() if hasattr(self, "_mode_key") else None
+        session_dir = Path(self.session_dir)
+        # 余牌: no reliable assist card_reader yet — leave unconnected (未识别).
+        # 牌河: only tea_2p is calibrated.
+        pipeline = FollowPipeline(
+            session_dir,
+            mode=mode,
+            enabled=True,
+            card_reader=None,  # WALL_CARD_READER_CONNECTED=False
+            read_river=river_read_enabled(mode),
+            read_room=True,
+            read_claims_display=True,
+        )
+        assert pipeline.card_reader is None
+        assert pipeline.wall_card_reader_connected is False
+        assert WALL_CARD_READER_CONNECTED is False
+        log_path = pipeline.start({
+            "account": (self.account.get().strip()
+                        if getattr(self, "account", None) is not None else ""),
+            "room_id": (self.room_id.get().strip()
+                        if getattr(self, "room_id", None) is not None else ""),
+            "round_no": getattr(self, "round_no", None),
+            "serial": (self.serial.get().strip()
+                       if getattr(self, "serial", None) is not None else ""),
+        })
+        if log_path is None or not Path(log_path).is_file():
+            from session_logger import FollowSessionLogError
+            raise FollowSessionLogError(
+                f"开始跟随未能创建 follow_session.jsonl：{log_path}"
+            )
+        self._follow_pipeline = pipeline
+        # Point embedded / detached viewers at this session's jsonl.
+        for attr in ("embedded_follow_log", "follow_session_log"):
+            viewer = getattr(self, attr, None)
+            if viewer is None:
+                continue
+            try:
+                viewer.path = pipeline.follow_log_path
+                if hasattr(viewer, "refresh"):
+                    viewer.refresh()
+                elif hasattr(viewer, "_refresh"):
+                    viewer._refresh()
+            except Exception:
+                pass
+
+    def _observe_follow_frame(self, result: dict, state) -> dict | None:
+        """TableState + safety abstain + follow_session.jsonl on one path."""
+        from follow_pipeline import FollowPipeline
+        from assist_hud import load_result_bgr
+
+        pipeline = getattr(self, "_follow_pipeline", None)
+        live = bool(getattr(self, "continuous", False))
+        if pipeline is None and live:
+            self._attach_follow_pipeline()
+            pipeline = getattr(self, "_follow_pipeline", None)
+        if live:
+            if pipeline is None:
+                from session_logger import FollowSessionLogError
+                raise FollowSessionLogError(
+                    "实时跟随中无 FollowPipeline；拒绝无 follow_session.jsonl 继续"
+                )
+            log_path = getattr(pipeline, "follow_log_path", None)
+            if log_path is None or not Path(log_path).is_file():
+                from session_logger import FollowSessionLogError
+                raise FollowSessionLogError(
+                    f"实时跟随中 follow_session.jsonl 缺失：{log_path}"
+                )
+        elif pipeline is None:
+            # Offline / one-shot / stopped: HUD facts only, no jsonl writer.
+            mode = self._mode_key() if hasattr(self, "_mode_key") else None
+            session = getattr(self, "session_dir", None) or Path(".")
+            from follow_enrich import river_read_enabled as _river_ok
+
+            pipeline = FollowPipeline(
+                Path(session),
+                mode=mode,
+                enabled=False,
+                card_reader=None,
+                read_river=_river_ok(mode),
+            )
+        image = load_result_bgr(result)
+        room = ""
+        try:
+            room = self.room_id.get().strip() if getattr(self, "room_id", None) else ""
+        except Exception:
+            room = ""
+        outcome = pipeline.observe(
+            result,
+            image,
+            frame_path=result.get("frame_path") or result.get("image"),
+            room_id=room or None,
+            round_no=getattr(self, "round_no", None),
+            round_seq=getattr(self, "round_no", None),
+            wall_cards=result.get("wall_cards"),
+            turn_status=getattr(state, "status", None) or result.get("status"),
+            turn_actionable=bool(getattr(state, "actionable", False)),
+        )
+        result["table_state"] = outcome.table.ledger()
+        result["frame_facts"] = outcome.facts.ledger()
+        result["follow_display"] = outcome.display
+        result["follow_abstain"] = bool(outcome.abstain)
+        if outcome.abstain and result.get("status") == "advise":
+            result["status"] = "abstain"
+            result["reason"] = outcome.event.get("reason") or result.get("reason")
+            result["suggestion"] = None
+            result["suggestion_id"] = None
+        return outcome.display
+
+    def _update_follow_hud(self, result: dict, state) -> None:
+        """Refresh unified read-only HUD; persist jsonl only while 开始跟随."""
+        display = result.get("follow_display")
+        live = bool(getattr(self, "continuous", False))
+        pipeline_error = result.get("follow_error")
+        if live and not isinstance(display, dict) and not pipeline_error:
+            # Standalone HUD refresh (observe not yet run this frame).
+            try:
+                display = self._observe_follow_frame(result, state)
+            except Exception as exc:
+                pipeline_error = str(exc)
+                result["follow_error"] = pipeline_error
+                result["status"] = "abstain"
+                result["suggestion"] = None
+                result["suggestion_id"] = None
+                result["reason"] = f"实时管线异常：{pipeline_error}"
+                result["follow_abstain"] = True
+                display = None
+        if pipeline_error:
+            # Fail-closed: clear main suggestion and surface the error reason.
+            try:
+                self.suggestion.set("识别中")
+            except Exception:
+                pass
+            try:
+                self.reason.set(f"实时管线异常：{pipeline_error}")
+            except Exception:
+                pass
+            if not isinstance(display, dict):
+                display = {
+                    "mode": "玩法：未识别",
+                    "room_round": "房号/局数：未识别",
+                    "caishen": "财神：未识别",
+                    "concealed": "暗手：未识别",
+                    "melds": "副露：未识别",
+                    "meld_types": "副露类型：未识别",
+                    "wall_cards": "余牌：未识别",
+                    "countdown": "倒计时：未识别",
+                    "turn": f"当前行动：管线异常（{pipeline_error}）",
+                    "river": "牌河：未识别",
+                    "last_discard": "最近出牌：未识别",
+                    "claim_buttons": "鸣牌按钮：未识别",
+                }
+        if not isinstance(display, dict):
+            # Offline / one-shot / pipeline miss: light HUD only (no jsonl).
+            from assist_hud import build_follow_hud, load_result_bgr
+            from follow_pipeline import format_frame_facts_display, build_frame_facts
+            from table_state import build_table_state
+            # Offline: do not re-run countdown CV (keeps preflight snappy under suite load).
+            image = None
+            try:
+                table = build_table_state(
+                    result, None, wall_cards=result.get("wall_cards"))
+                room = ""
+                try:
+                    room = self.room_id.get().strip() if getattr(self, "room_id", None) else ""
+                except Exception:
+                    room = ""
+                facts = build_frame_facts(
+                    result, table,
+                    room_id=room or None,
+                    round_no=getattr(self, "round_no", None),
+                    turn_status=getattr(state, "status", None),
+                    turn_actionable=bool(getattr(state, "actionable", False)),
+                )
+                display = format_frame_facts_display(facts)
+                result["table_state"] = table.ledger()
+                result["frame_facts"] = facts.ledger()
+            except Exception:
+                hud = build_follow_hud(
+                    result,
+                    image=image,
+                    status=getattr(state, "status", None),
+                    actionable=bool(getattr(state, "actionable", False)),
+                    wall_cards=result.get("wall_cards"),
+                    run_countdown=True,
+                )
+                display = {
+                    "wall_cards": hud.wall,
+                    "countdown": hud.countdown,
+                    "turn": hud.turn,
+                    "river": hud.river,
+                }
+        mapping = {
+            "mode": "hud_mode",
+            "room_round": "hud_room_round",
+            "caishen": "hud_caishen",
+            "concealed": "hud_concealed",
+            "melds": "hud_melds",
+            "meld_types": "hud_meld_types",
+            "wall_cards": "hud_wall",
+            "countdown": "hud_countdown",
+            "turn": "hud_turn",
+            "river": "hud_river",
+            "last_discard": "hud_last_discard",
+            "claim_buttons": "hud_claim_buttons",
+        }
+        for key, attr in mapping.items():
+            var = getattr(self, attr, None)
+            if var is None:
+                continue
+            value = display.get(key)
+            if value:
+                try:
+                    var.set(value)
+                except Exception:
+                    pass
+        # Keep embedded follow log scrolling only while 开始跟随 is live.
+        if getattr(self, "continuous", False):
+            emb = getattr(self, "embedded_follow_log", None)
+            if emb is not None:
+                try:
+                    pipe = getattr(self, "_follow_pipeline", None)
+                    if pipe is not None and pipe.follow_log_path is not None:
+                        emb.path = pipe.follow_log_path
+                    if hasattr(emb, "refresh"):
+                        emb.refresh()
+                    elif hasattr(emb, "_refresh"):
+                        emb._refresh()
+                except Exception:
+                    pass
 
     def _refresh_view(self, state=None) -> None:
         state = state or self.refresh.state

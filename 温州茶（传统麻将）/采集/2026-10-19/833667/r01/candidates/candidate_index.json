@@ -1,0 +1,88 @@
+{
+  "schema": "tea_replay_candidates_v1",
+  "source_video": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\2026-10-19\\833667\\r01\\room833667_round1_ec9baee3.mp4",
+  "source_sha256": "443334b7a4b3e819ab5601360db514cdff7ba8db3a08c0fe473b69dc3a9055d7",
+  "sampling": "ffmpeg fps=1; ordinal index is not exact PTS",
+  "counts": {
+    "frames": 29,
+    "visible_2p": 20,
+    "complete_2p": 6
+  },
+  "max_saved": 8,
+  "candidates": [
+    {
+      "file": "candidate_016.png",
+      "sample_index_at_1fps": 16,
+      "sha256": "bbaae7d7db83719820c8bf82b38a5752fad5a7e6701ed0121b662818142e6092",
+      "tile_ids": [
+        1,
+        2,
+        3,
+        3,
+        67,
+        8,
+        42,
+        46,
+        47,
+        48,
+        22,
+        22,
+        25,
+        29,
+        64,
+        64,
+        47
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_018.png",
+      "sample_index_at_1fps": 18,
+      "sha256": "f77b8308a7a0980135e9572465d60add4738686037a76e67b0315c865a0f5a9e",
+      "tile_ids": [
+        1,
+        2,
+        3,
+        3,
+        67,
+        8,
+        42,
+        46,
+        47,
+        48,
+        22,
+        22,
+        25,
+        64,
+        64,
+        47
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    },
+    {
+      "file": "candidate_019.png",
+      "sample_index_at_1fps": 19,
+      "sha256": "75c739fb1aef7350d18309414705ed2c95b13da30c79117a86ab228e5916f66e",
+      "tile_ids": [
+        1,
+        2,
+        3,
+        3,
+        67,
+        8,
+        42,
+        46,
+        47,
+        47,
+        48,
+        22,
+        22,
+        25,
+        64,
+        64
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    }
+  ],
+  "status": "visible_2p_complete_predictions_only_not_training_gold"
+}

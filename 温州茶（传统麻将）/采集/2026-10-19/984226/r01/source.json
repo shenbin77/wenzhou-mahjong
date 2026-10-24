@@ -1,0 +1,24 @@
+{
+  "capture_date": "2026-10-19",
+  "game_date": "2026-10-16",
+  "screen_room": "984226",
+  "screen_round": 1,
+  "mode_visible": "温州茶 2人回放",
+  "device_serial_observed": "emulator-5556",
+  "foreground_package_observed": "com.xm.zjgamecenter",
+  "route": "比赛战绩 → 2026-10-16 → 房间984226详情 → 第1局回放",
+  "record_seconds_requested": 30,
+  "video": "room984226_round1_3d58eb17.mp4",
+  "video_sha256": "77debb354d9f8dcd00bae3bfaf94ccc9b11c1b1e90d64c875372409ac810cc6c",
+  "probe": {
+    "codec_name": "h264",
+    "width": 1600,
+    "height": 900,
+    "duration_seconds": 29.424378
+  },
+  "preview_round_number_visually_checked": "room984226_round1_3d58eb17_1.png",
+  "click_validation": "fresh detail screenshot + round-row left-side fingerprint; after close btn_fanhui_list matched",
+  "no_new_game_or_room_card_spend": true,
+  "candidates": "candidates/candidate_index.json",
+  "candidate_status": "vision_prediction_not_human_ground_truth"
+}

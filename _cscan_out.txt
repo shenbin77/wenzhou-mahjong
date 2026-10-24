@@ -1,0 +1,76 @@
+=== Phase 1: C:\ children ===
+147.00 GB C:\Users
+30.51 GB C:\Windows
+21.21 GB C:\Program Files
+16.46 GB C:\Models
+13.71 GB C:\hiberfil.sys
+12.99 GB C:\pagefile.sys
+11.97 GB C:\Program Files (x86)
+10.79 GB C:\leidian
+9.19 GB C:\ProgramData
+0.73 GB C:\Android
+0.70 GB C:\DrvCeonw
+0.23 GB C:\DrvPath
+0.15 GB C:\PE_JSYOS
+0.08 GB C:\node-v20.19.5-win-x64
+0.07 GB C:\Temp
+0.07 GB C:\temp_concat
+0.02 GB C:\Backups
+0.02 GB C:\swapfile.sys
+0.01 GB C:\tmp
+0.00 GB C:\nssm
+0.00 GB C:\appverifUI.dll
+0.00 GB C:\vfcompat.dll
+0.00 GB C:\home
+0.00 GB C:\DumpStack.log.tmp
+0.00 GB C:\$WinREAgent
+0.00 GB C:\$Recycle.Bin
+0.00 GB C:\temp_hosts
+0.00 GB C:\c
+0.00 GB C:\work
+0.00 GB C:\UsersAdministratorAppDataRoaminghermes-studioSharedStorage
+0.00 GB C:\HanaAgent-verify
+0.00 GB C:\inetpub
+0.00 GB C:\System Volume Information
+0.00 GB C:\Recovery
+0.00 GB C:\PerfLogs
+0.00 GB C:\Documents and Settings
+0.00 GB C:\Config.Msi
+0.00 GB C:\$WINRE_BACKUP_PARTITION.MARKER
+
+=== Drill: C:\Users ===
+  147.00 GB C:\Users\Administrator
+  0.00 GB C:\Users\Default
+  0.00 GB C:\Users\Public
+  0.00 GB C:\Users\desktop.ini
+  0.00 GB C:\Users\Default User
+  0.00 GB C:\Users\CodexSandboxOffline
+
+=== Drill: C:\Windows ===
+  9.65 GB C:\Windows\WinSxS
+  7.26 GB C:\Windows\System32
+  4.09 GB C:\Windows\assembly
+  3.36 GB C:\Windows\Installer
+  1.30 GB C:\Windows\SysWOW64
+  1.28 GB C:\Windows\servicing
+  0.85 GB C:\Windows\Microsoft.NET
+  0.54 GB C:\Windows\LastGood.Tmp
+  0.47 GB C:\Windows\Fonts
+  0.40 GB C:\Windows\Containers
+  0.28 GB C:\Windows\SoftwareDistribution
+  0.19 GB C:\Windows\SystemApps
+
+=== Drill: C:\Program Files ===
+  4.52 GB C:\Program Files\NVIDIA GPU Computing Toolkit
+  4.39 GB C:\Program Files\Docker
+  3.64 GB C:\Program Files\NVIDIA Corporation
+  1.24 GB C:\Program Files\Microsoft Visual Studio
+  1.22 GB C:\Program Files\WSL
+  1.09 GB C:\Program Files\dotnet
+  1.07 GB C:\Program Files\Google
+  0.92 GB C:\Program Files\Tencent
+  0.72 GB C:\Program Files\Hermes Studio
+  0.42 GB C:\Program Files\Git
+  0.36 GB C:\Program Files\Razer
+  0.32 GB C:\Program Files\Eclipse Adoptium
+

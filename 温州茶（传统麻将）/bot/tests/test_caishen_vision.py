@@ -201,3 +201,42 @@ def test_auto_candidate_never_writes_on_a_non_tile_frame(tmp_path):
     result = caishen_collector.collect_auto_candidate(frame, pending_dir=tmp_path)
     assert result["status"] in {"no_badge", "unknown", "noise"}
     assert not list(tmp_path.iterdir())
+
+
+# 2026-10-24 晚间验收会话 Round1：财神为 7筒(t7)，缺 live 变体模板
+# 导致 小牌匹配不够确定；补 live 模板后，0.98/0.02 必须读对。
+LIVE_SESSION_1024_EVE = CAPTURES / "assist_sessions" / "20261024_211352" / "live" / "tea_2p"
+
+
+@pytest.mark.parametrize(("frame", "expected"), [
+    ("20261024_225442_037340_67061a.png", "t7"),
+    ("20261024_225500_432052_b46480.png", "t7"),
+    ("20261024_230118_528549_2fca86.png", "t9"),
+])
+def test_20261024_211352_round1_t7_live_frame_clears_strict_thresholds(frame, expected):
+    if not (LIVE_SESSION_1024_EVE / frame).exists():
+        pytest.skip("实战截屏样本已不在此机器上")
+    observed = detect_caishen(
+        _read(f"assist_sessions/20261024_211352/live/tea_2p/{frame}"))
+    assert observed.label == expected
+    assert observed.score >= .98
+    assert observed.score - observed.runner_up >= .02
+
+
+def test_match_fail_exposes_candidate_diagnostic_not_as_label():
+    """When gated out, candidate is diagnostic only; label stays None."""
+    # Synthetic: badge-like red patch but random gray face → low match.
+    image = np.zeros((900, 1600, 3), dtype=np.uint8)
+    image[:] = (40, 80, 40)
+    # Paint a red badge inside default ROI top-left so badge gate passes.
+    (x0, y0, x1, y1), _ = caishen_vision._templates()
+    image[y0:y0 + 22, x0:x0 + 30] = (20, 40, 200)  # BGR strong red
+    # Fill rest of crop with noise so no template clears 0.98.
+    rng = np.random.default_rng(0)
+    image[y0:y1, x0:x1] = rng.integers(0, 255, size=(y1 - y0, x1 - x0, 3), dtype=np.uint8)
+    image[y0:y0 + 22, x0:x0 + 30] = (20, 40, 200)
+    observed = detect_caishen(image)
+    if observed.reason == "财神小牌匹配不够确定":
+        assert observed.label is None
+        assert observed.candidate is not None
+        assert observed.score < .98 or (observed.score - observed.runner_up) < .02

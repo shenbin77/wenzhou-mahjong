@@ -1,0 +1,15 @@
+你是实现者。任务：按已冻结的 SPEC-002 v4 契约，在真实代码树中实现辅助器录像记录器，并接入辅助窗口。背景：此前有会话声称已实现，但磁盘上不存在 recorder.py，窗口仍是旧的逐帧 JSON 流程，QUEUE 状态也是旧的——以磁盘现状为准，从零实现。
+
+先读：
+- D:\温州麻将\SPECS\SPEC-002-assist-record.md（v4 冻结契约，逐条实现，不得自行变更契约）
+- D:\温州麻将\温州茶（传统麻将）\bot\assist_window.py、assist_tea.py、assist_shu.py、tile_vision.py 的现有接口（识牌结果、candidates 的现有形状）
+
+实现要求：
+1. 新建 D:\温州麻将\温州茶（传统麻将）\bot\recorder.py：决策状态机 detected → suggested → resolved | abstained | timeout；稳定帧=连续2帧手牌多重集相同；活动决策锁（同时最多1个未关闭决策）；语义去重键=sha256(mode + 排序后手牌多重集 + round + caishen_id)，decision_id={mode}_{语义键前16位}；决策关闭后仅当新语义键不同才重新布防（必须覆盖"财神未选弃权后补选财神、手牌不变"场景）；suggested 后30秒无稳定结果帧→timeout 且 agreed=null；仅在决策关闭时一次性追加一行 JSONL（schema=assist_record/v4），suggested 阶段不落盘。
+2. JSONL 字段严格按契约：decision_id、timestamp（ISO8601带时区，关闭时刻）、account、room_id(可null)、mode(tea_2p|tea_4p|shu_4p)、screen_rule_text(可null)、gate_ok、round、tiles[]（每张{id|null,score,margin,reason∈ok/low_score/ambiguous/no_box}）、caishen_id(可null)、melds(可空)、shanten（有未识别牌时null）、bot_suggest、bot_candidates（统一对象Top-5按final_score降序{tile,final_score,shanten_after,ukeire_count}；茶系现有元组由你在实现层用shanten/advisor补齐字段，熟系丢弃name等多余字段）、human_discard、agreed（无法判定一律null）、status、abstain_reason（仅abstained时非空，∈gate_mismatch/gate_unreadable/wrong_count/unrecognized）、diff_note（resolved且差分失败时="diff_failed"，此时human_discard=null、agreed=null、abstain_reason=null；caishen未选时status=abstained且diff_note="caishen_unset"、abstain_reason=null）、decision_frame{path,sha256}、result_frame{path,sha256}|null。哈希统一SHA-256。
+3. 差分：结果帧须稳定帧；多重集净消失恰1张且已识别→human_discard，agreed=(human_discard==bot_suggest)；其余→diff_failed 分支。
+4. 接入 assist_window.py：用记录器替换旧的逐帧立即写JSON流程的记录部分（识牌与建议流程保持不变）；account=开窗会话值、round=记录器会话计数（从1，"下一局"动作+1）、room_id=窗口现有输入（无则null）。改动最小化，不重构无关代码。
+5. 测试：在 bot\tests\ 下新增 test_recorder.py，覆盖：状态机流转、稳定帧判定、语义键与decision_id格式、重新布防（含财神补选）、30秒timeout、diff成功与diff_failed字段规则、财神未选分支、bot_candidates茶/熟两种输入形状的统一化、JSONL每行可json.loads解析。运行新测试 + 全量测试，报告通过/失败实际数字。
+6. 更新 D:\温州麻将\SPECS\QUEUE.md 中 SPEC-002 行状态为：五审通过（2026-10-20）、已实现待真机验收（注明日期与测试数字）。其余行不动。
+
+约束：不改阈值、不删模板、不动模拟器/游戏；dry-run 红线不变（记录器只记录，不点击）。完成后输出：新增/修改文件清单、关键设计点对照契约的自查表、测试命令与实际输出摘要、仍未覆盖的验收项（如金标manifest、真机验收）清单。

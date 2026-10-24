@@ -50,6 +50,25 @@ def erase_tile(png_bytes: bytes, box) -> bytes:
     return encoded.tobytes()
 
 
+RAISE_LIFT_PX = 25
+
+
+def raise_tile(png_bytes: bytes, box) -> bytes:
+    """Return a PNG where the given hand tile is lifted up like the game does.
+
+    已用真帧探针验证（2026-10-27）：上移 25px 后 count_tiles 仍数出 17 张、
+    recognize_hand 仍完整、该框 y1=867 ≤ 中位数 892 - 12，"几何抬起"判据成立。
+    """
+    image = cv2.imdecode(
+        np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR).copy()
+    x0, y0, x1, y1 = (int(value) for value in box)
+    image[y0 - RAISE_LIFT_PX:y1 - RAISE_LIFT_PX, x0:x1] = image[y0:y1, x0:x1]
+    image[y1 - RAISE_LIFT_PX:y1, x0:x1] = (20, 60, 30)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
 def confirmed_frame(selected_png: bytes, box) -> bytes:
     """Keep the hand count reduced while making the raised target disappear."""
     image = cv2.imdecode(
@@ -122,11 +141,11 @@ def test_dry_run_default_produces_plan_without_any_adb_call(analysis, monkeypatc
 
 
 def test_enabled_taps_center_of_hand_box_after_fresh_screenshot(analysis, monkeypatch):
-    """enabled=True：同一牌点两次，第二次后才验证真正离手。"""
+    """enabled=True：第一击抬牌（牌仍在、张数守恒、几何抬起），第二击才出牌。"""
     png = frame_png()
     box = [int(v) for v in analysis["suggested_boxes"][0]]
-    selected = erase_tile(png, box)
-    fake = FakeAdb([png, selected, confirmed_frame(selected, box)])
+    # 审计 B 之后的正确时序：第一击后牌是"抬起"（还在手里），不是消失。
+    fake = FakeAdb([png, raise_tile(png, box), erase_tile(png, box)])
     monkeypatch.setattr(subprocess, "run", fake)
     executor = TapExecutor(enabled=True, adb_path="fake-adb",
                            serial="emulator-test", verify_delay=0)
@@ -215,19 +234,53 @@ def test_post_tap_verification_fails_closed_without_retry(analysis, monkeypatch)
     assert len(fake.tap_commands()) == 1
 
 
-def test_second_tap_must_make_raised_tile_disappear(analysis, monkeypatch):
-    """第二次点击没生效时，即使识别计数已少一，也必须判失败。"""
+def test_second_tap_must_reduce_hand_count_by_one(analysis, monkeypatch):
+    """第二击没生效（手牌没少）：判失败。审计 B 后张数复核是第一判据。"""
     png = frame_png()
     box = [int(v) for v in analysis["suggested_boxes"][0]]
-    selected = erase_tile(png, box)
-    fake = FakeAdb([png, selected, selected])
+    raised = raise_tile(png, box)
+    fake = FakeAdb([png, raised, raised])  # 第二击后画面仍是抬牌态
     monkeypatch.setattr(subprocess, "run", fake)
     executor = TapExecutor(enabled=True, adb_path="fake-adb",
                            serial="emulator-test", select_delay=0,
                            verify_delay=0)
-    with pytest.raises(TapUnverified, match="抬起牌仍未消失"):
+    with pytest.raises(TapUnverified, match="确认出牌后手牌数量"):
         executor.execute(analysis)
     assert len(fake.tap_commands()) == 2
+
+
+def test_first_click_that_already_discards_forbids_second_tap(
+        analysis, monkeypatch):
+    """审计 B 核心：第一击后手牌已少一张 → 判定已出牌，**禁止第二击**。"""
+    png = frame_png()
+    box = [int(v) for v in analysis["suggested_boxes"][0]]
+    fake = FakeAdb([png, erase_tile(png, box)])
+    monkeypatch.setattr(subprocess, "run", fake)
+    executor = TapExecutor(enabled=True, adb_path="fake-adb",
+                           serial="emulator-test", verify_delay=0)
+    outcome = executor.execute(analysis)
+
+    assert outcome["executed"] is True
+    assert outcome["stage"] == "discarded_first_click"
+    assert outcome["after_count"] == outcome["before_count"] - 1
+    assert "禁止第二击" in outcome["reason"]
+    taps = fake.tap_commands()
+    assert len(taps) == 1, "第一击已出牌时绝不允许发第二击"
+    assert len([c for c in fake.commands if "screencap" in c]) == 2
+
+
+def test_second_click_forbidden_when_target_not_raised(analysis, monkeypatch):
+    """审计 B：第一击后张数守恒但牌没抬起（只有无关动画）→ 禁止第二击。"""
+    png = frame_png()
+    box = [int(v) for v in analysis["suggested_boxes"][0]]
+    # confirmed_frame 只画一条无关的红色动画条，牌既没少也没抬起。
+    fake = FakeAdb([png, confirmed_frame(png, box)])
+    monkeypatch.setattr(subprocess, "run", fake)
+    executor = TapExecutor(enabled=True, adb_path="fake-adb",
+                           serial="emulator-test", verify_delay=0)
+    with pytest.raises(TapUnverified, match="牌没有抬起"):
+        executor.execute(analysis)
+    assert len(fake.tap_commands()) == 1, "牌没抬起就绝不许发第二击"
 
 
 # ----------------------------------------------------------------------
@@ -256,13 +309,13 @@ def _executor(monkeypatch, fake, session_dir, **kwargs) -> TapExecutor:
 
 def test_second_tap_failure_dumps_before_selected_after_and_metrics(
         analysis, monkeypatch, tmp_path):
-    """第二次点击后画面完全不变：抛 TapUnverified，且五样证据齐全。"""
+    """第二击后手牌没少：抛 TapUnverified，证据齐全，且两击间复核已留证。"""
     png = frame_png()
     box = [int(v) for v in analysis["suggested_boxes"][0]]
-    selected = erase_tile(png, box)
-    fake = FakeAdb([png, selected, selected])
+    raised = raise_tile(png, box)
+    fake = FakeAdb([png, raised, raised])
     executor = _executor(monkeypatch, fake, tmp_path)
-    with pytest.raises(TapUnverified, match="抬起牌仍未消失"):
+    with pytest.raises(TapUnverified, match="确认出牌后手牌数量"):
         executor.execute(analysis)
     assert len(fake.tap_commands()) == 2
 
@@ -273,8 +326,8 @@ def test_second_tap_failure_dumps_before_selected_after_and_metrics(
 
     data = _read_evidence(tmp_path)
     assert data["outcome"] == "TapUnverified"
-    assert data["second_click_metrics"]["changed"] is False
-    assert data["reason"] == "第二次点击后抬起牌仍未消失，未证明真正出牌"
+    assert data["second_click_metrics"] is None  # 张数复核先一步判死
+    assert "确认出牌后手牌数量" in data["reason"]
     assert data["first_click_metrics"]["changed"] is True
     assert data["tap"] == [(box[0] + box[2]) // 2, (box[1] + box[3]) // 2]
     assert data["tile_id"] == analysis["suggestion_id"]
@@ -288,21 +341,25 @@ def test_second_tap_failure_dumps_before_selected_after_and_metrics(
         assert isinstance(guard["boxes"], list)
     assert "before_count_source" in data
     assert "第一次点击之前" in data["before_count_source"]
-    # 抬牌诊断：至少给出暗手框列表与“疑似抬起”的中位判据。
-    assert isinstance(data["raised_candidates"], dict)
-    assert "median_y1" in data["raised_candidates"]
+    # 两击之间的手牌复核（审计 B）：张数、目标框、抬起判据全部留证。
+    gate = data["selected_gate"]
+    assert isinstance(gate, dict)
+    assert gate["count"] == data["before_count"]  # 张数守恒才放的第二击
+    assert gate["ready"] is True and gate["lifted"] is True
+    assert gate["discarded"] is False
+    assert gate["median_y1"] == 892.0
     assert data["raised_candidates"]["lift_px"] == 12
+    assert any(item["raised"] for item in data["raised_candidates"]["boxes"])
     assert isinstance(data["hand_boxes_selected"], list)
     assert isinstance(data["hand_boxes_after"], list)
 
 
 def test_verified_tap_dumps_evidence_with_matching_counts(
         analysis, monkeypatch, tmp_path):
-    """正常成功路径：outcome == verified，after_count == before_count - 1。"""
+    """正常成功路径：第一击抬牌 → 第二击出牌，outcome == verified。"""
     png = frame_png()
     box = [int(v) for v in analysis["suggested_boxes"][0]]
-    selected = erase_tile(png, box)
-    fake = FakeAdb([png, selected, confirmed_frame(selected, box)])
+    fake = FakeAdb([png, raise_tile(png, box), erase_tile(png, box)])
     executor = _executor(monkeypatch, fake, tmp_path)
     outcome = executor.execute(analysis)
 
@@ -412,7 +469,11 @@ def test_claim_tap_on_measured_disc_sends_input_tap_with_exact_coordinates(
     outcome = executor.execute_claim(GOLD_CENTER, action="peng")
 
     assert outcome["executed"] is True and outcome["dry_run"] is False
-    assert outcome["stage"] == "verified"
+    # 审计 A：本模块只证明"点击送达且 UI 有响应"，不证明动作语义成功。
+    assert outcome["stage"] == "clicked"
+    assert outcome["ui_responded"] is True
+    assert outcome["semantic_verified"] is False
+    assert outcome["semantic_verifier"] == "action_policy.verify_after_click"
     assert outcome["action"] == "peng" and outcome["kind"] == "gold"
     assert outcome["tap"] == list(GOLD_CENTER)
     assert outcome["box"] == list(GOLD_BOX)
@@ -428,7 +489,7 @@ def test_claim_tap_on_measured_disc_sends_input_tap_with_exact_coordinates(
     assert outcome["click_metrics"]["changed"] is True
 
     data = _read_evidence(tmp_path)
-    assert data["outcome"] == "verified"
+    assert data["outcome"] == "clicked"
     assert data["tap"] == list(GOLD_CENTER)
     claim = data["claim"]
     assert claim["action"] == "peng" and claim["tapped_kind"] == "gold"
@@ -576,6 +637,54 @@ def test_claim_tap_refuses_implicit_session_dir(monkeypatch):
     with pytest.raises(TapAborted, match="必须显式传 session_dir"):
         executor.execute_claim(GOLD_CENTER, action="peng")
     assert fake.commands == []
+
+
+def test_claim_tap_rejects_when_disc_still_present_after_tap(
+        monkeypatch, tmp_path):
+    """审计 A：画面变了但目标圆盘仍在 → 点击没生效，判失败，绝不假通过。
+
+    构造：after 帧圆盘原样保留，只在它的验证区域里画一条无关红色动画条
+    （模拟"动画结束/超时取消"那种"画面变了但按钮还在"的假成功）。
+    """
+    before_png = claim_frame()
+    after = cv2.imdecode(
+        np.frombuffer(before_png, np.uint8), cv2.IMREAD_COLOR).copy()
+    # 条在圆盘验证区域内（y0-90..y1+8）但在圆盘本体之外。
+    after[GOLD_BOX[1] - 70:GOLD_BOX[1] - 35, GOLD_BOX[0]:GOLD_BOX[2]] = (0, 0, 220)
+    ok, after_png = cv2.imencode(".png", after)
+    assert ok
+    fake = FakeAdb([before_png, after_png.tobytes()])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+    with pytest.raises(TapUnverified, match="圆盘仍实测存在"):
+        executor.execute_claim(GOLD_CENTER, action="peng")
+    assert len(fake.tap_commands()) == 1  # 失败即停
+    data = _read_evidence(tmp_path)
+    assert data["outcome"] == "TapUnverified"
+    assert data["first_click_metrics"]["changed"] is True  # 画面确实变了
+    assert len(data["claim"]["buttons_after"]) == 1        # 但按钮还在
+
+
+def test_claim_switch_off_means_execute_claim_sends_no_commands(
+        monkeypatch, tmp_path):
+    """审计要求：`CLAIM_TAP_CHANNEL_READY` 保持 False，开关关闭时零命令。
+
+    这条测试把两件事钉死：开关确实是 False（谁翻上去谁红），且
+    ``enabled=False`` 的 execute_claim 是只读路径——一个 adb 命令都不发。
+    """
+    import action_policy
+    assert action_policy.CLAIM_TAP_CHANNEL_READY is False
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("开关关闭时不允许任何 adb 调用")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    image = cv2.imdecode(
+        np.frombuffer(claim_frame(), np.uint8), cv2.IMREAD_COLOR)
+    executor = TapExecutor(session_dir=tmp_path)
+    assert executor.enabled is False
+    outcome = executor.execute_claim(GOLD_CENTER, action="peng", image=image)
+    assert outcome["executed"] is False and outcome["dry_run"] is True
+    assert not (tmp_path / "tap_probe").exists()
 
 
 def test_claim_geometry_whitelist_is_independent_of_hand_whitelist():

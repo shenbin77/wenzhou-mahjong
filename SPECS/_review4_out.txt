@@ -1,0 +1,5 @@
+未通过：仅剩 1 个契约阻塞。
+
+[§2](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:12>) 的语义键包含 `caishen_id`，但重新布防只接受“手牌变化或 round 变化”。茶系财神未选会关闭为 `abstained/caishen_unset`；随后用户补选财神，如果手牌和 round 未变，[§2 重新布防规则](</D:/温州麻将/SPECS/SPEC-002-assist-record.md:14>) 会禁止生成新决策，尽管语义键已经变化。
+
+需将重新布防条件冻结为：**关闭后，仅当新语义键与已关闭决策的语义键不同，才允许生成新决策。** 这样才能同时覆盖手牌、round、mode 和 caishen_id 的变化。

@@ -26,8 +26,12 @@
 
 4. 两段确认 + 点击后验证
    浙江游戏大厅需要先点牌使其抬起，再点同一位置确认出牌。第一次点击后
-   必须看到目标列画面变化；第二次点击后，目标列还必须再次变化，且手牌
-   数量恰好减一。任何一步不满足都 ``TapUnverified``，绝不继续点击。
+   必须看到目标列画面变化；**两次点击之间还要复核手牌状态（审计 B）**：
+   手牌已少一张 → 判定牌已离手、**禁止第二击**；否则必须张数守恒、
+   目标牌仍在原列且几何抬起（``y1`` 低于同帧中位数 ≥
+   ``RAISED_BOX_LIFT_PX``），才允许第二击。第二次点击后，目标列还必须
+   再次变化，且手牌数量恰好减一。任何一步不满足都 ``TapUnverified``，
+   绝不继续点击。
 
 证据落盘（只观察，不改判定）
 ============================
@@ -241,6 +245,8 @@ class _TapEvidence:
     hand_boxes_selected: list | None = None
     hand_boxes_after: list | None = None
     raised_candidates: dict | None = None
+    # 第一次点击后的手牌复核（审计 B 的闸门结果）：只写盘，不参与判定。
+    selected_gate: dict | None = None
     # 行动行点击（execute_claim）专用：动作名、期望/实测圆盘种类、点击前后
     # 的圆盘列表。**只写盘，不参与任何判定**。
     claim: dict | None = None
@@ -331,6 +337,7 @@ class _TapEvidence:
                 "hand_boxes_selected": self.hand_boxes_selected,
                 "hand_boxes_after": self.hand_boxes_after,
                 "raised_candidates": self.raised_candidates,
+                "selected_gate": self.selected_gate,
                 "claim": self.claim,
                 "frames": written,
                 "outcome": outcome,
@@ -559,8 +566,12 @@ class TapExecutor:
             ``dry_run``：``{"executed": False, "dry_run": True,
             "stage": "plan", ...}``，零 adb 调用、零落盘。
             真点成功：``{"executed": True, "dry_run": False,
-            "stage": "verified", "tap": [x, y], "box": [...],
-            "click_metrics": {...}, ...}``。
+            "stage": "clicked", "tap": [x, y], "box": [...],
+            "click_metrics": {...}, "ui_responded": True,
+            "semantic_verified": False, ...}``。**注意** ``stage`` 是
+            ``"clicked"`` 而不是 ``"verified"``：本模块只证明点击送达且
+            UI 有响应（圆盘消失），不证明动作语义成功——那归
+            ``action_policy.verify_after_click``（审计 A）。
 
         Raises:
             TapRejected: 黑名单动作 / 坐标不在行动行 ROI / 坐标不在实测圆盘框
@@ -629,19 +640,38 @@ class TapExecutor:
                     f"行动行点击 ({x},{y}) 后目标圆盘区域画面未变化"
                     f"（diff_mean={metrics['diff_mean']}, "
                     f"changed_ratio={metrics['changed_ratio']}），未证明点击生效")
+            # 审计 A（2026-10-27 Codex 只读审计）：按钮区域变化/按钮消失都不能
+            # 单独证明动作成功——动画结束、被其它 UI 覆盖、游戏超时取消都有
+            # 同样的像素表现。本模块只证明"点击送达且 UI 有响应"：目标圆盘
+            # 必须从 after 帧的实测里消失。**语义级验证**（胡进结算、碰后
+            # 副露+1 等）归 ``action_policy.verify_after_click``（L3），
+            # 调用方必须接，这里绝不冒充。
+            still_there = [b for b in claim_record["buttons_after"]
+                           if self._claim_point_in_box((x, y), b["box"])]
+            if still_there:
+                raise TapUnverified(
+                    f"行动行点击 ({x},{y}) 后目标圆盘仍实测存在于 "
+                    f"{still_there[0]['box']}，点击没有生效，不重试")
         except Exception as exc:  # noqa: BLE001 — 原异常照抛，只是先落盘
             evidence.dump(type(exc).__name__, str(exc))
             raise
         outcome = {
-            "executed": True, "dry_run": False, "stage": "verified",
+            "executed": True, "dry_run": False, "stage": "clicked",
             "action": label, "kind": button.kind,
             "tap": [x, y], "box": list(box),
             "click_metrics": metrics,
             "claim_buttons_before": len(claim_record["buttons_before"]),
             "claim_buttons_after": len(claim_record["buttons_after"]),
-            "reason": f"行动 {label} 已点击 ({x},{y})，目标圆盘区域画面已变化",
+            # 只证明到 UI 层：点击送达、画面响应、圆盘消失。
+            "ui_responded": True,
+            # 语义级（真的碰成了/胡进结算了）本模块证明不了，绝不谎称。
+            "semantic_verified": False,
+            "semantic_verifier": "action_policy.verify_after_click",
+            "reason": (f"行动 {label} 已点击 ({x},{y})，目标圆盘区域画面已变化、"
+                       "目标圆盘已从画面消失（UI 响应确认）；语义级验证须由 "
+                       "action_policy.verify_after_click 完成"),
         }
-        evidence.dump("verified", outcome["reason"])
+        evidence.dump("clicked", outcome["reason"])
         return outcome
 
     def _resolve_claim_session_dir(
@@ -871,9 +901,6 @@ class TapExecutor:
                 time.sleep(self.select_delay)
             selected_image = self._screenshot()
             evidence.selected = selected_image
-            # 抬牌诊断（重跑 count_tiles）刻意不在这里做：它要新建一次
-            # TileVision，会把两次点击之间的间隔拉长，那是对实机时序的改动。
-            # 诊断推迟到点击链结束之后，见 _fill_selected_diagnostics。
             first_metrics = self._target_column_metrics(
                 fresh, selected_image, located["box"])
             evidence.first_click_metrics = first_metrics
@@ -884,6 +911,30 @@ class TapExecutor:
             if selected_guard.blocks_discard:
                 raise TapUnverified(
                     f"第一次点击后出现{selected_guard.reason}，停止确认出牌")
+            # 审计 B（2026-10-27 Codex 只读审计）：两次点击之间必须复核手牌
+            # 状态——只看"目标列画面变了"会假通过，而且第一击已出牌时绝不能
+            # 再点第二下（会点到空牌位或别的控件）。这里多跑一次 count_tiles、
+            # 拉长两击间隔是**有意**的安全代价，不再沿用"诊断推迟到点击链
+            # 结束"的旧约定（_fill_selected_diagnostics 只剩失败路径兜底）。
+            gate = self._selected_hand_gate(
+                selected_image, located["box"], before)
+            evidence.selected_gate = gate
+            evidence.hand_boxes_selected = gate["boxes"]
+            evidence.raised_candidates = self._gate_raised_record(gate)
+            if gate["discarded"]:
+                outcome = {
+                    "executed": True, "dry_run": False,
+                    "stage": "discarded_first_click",
+                    "tile": tap_plan.label, "tile_id": tap_plan.tile_id,
+                    "tap": [x, y], "box": list(located["box"]),
+                    "before_count": before, "after_count": gate["count"],
+                    "reason": gate["reason"],
+                }
+                evidence.after_count = gate["count"]
+                evidence.dump("discarded_first_click", gate["reason"])
+                return outcome
+            if not gate["ready"]:
+                raise TapUnverified(gate["reason"])
 
             # 实机已验证：第一次只选中并抬牌，第二次点同一列才真正出牌。
             self._require_game_foreground()
@@ -925,18 +976,107 @@ class TapExecutor:
         return outcome
 
     def _fill_selected_diagnostics(self, evidence: "_TapEvidence") -> None:
-        """把 selected 帧的抬牌诊断补进证据（点击链结束之后才做）。
+        """把 selected 帧的抬牌诊断补进证据（只剩失败路径兜底）。
 
-        重跑 ``count_tiles`` 要新建一次 TileVision，放在点击之间会拉长两次
-        点击的间隔（实机时序改动），所以统一放到点击链结束、判定已定案之后。
-        它**只读**，不参与任何判定。
+        审计 B 之后，``execute()`` 在两次点击**之间**就用
+        :meth:`_selected_hand_gate` 跑过 ``count_tiles`` 并把结果写进了
+        ``evidence.raised_candidates``；这里只在**还没走到那道闸就失败**
+        的路径上补一次。它**只读**，不参与任何判定。
         """
-        if evidence.selected is None:
+        if evidence.selected is None or evidence.raised_candidates is not None:
             return
         evidence.raised_candidates = self.raised_candidates(evidence.selected)
         evidence.hand_boxes_selected = [
             item["box"] for item in
             (evidence.raised_candidates.get("boxes") or [])]
+
+    def _selected_hand_gate(
+        self,
+        image: np.ndarray,
+        reference_box,
+        before_count: int,
+    ) -> dict:
+        """第一次点击后的手牌复核（审计 B）：不过这道闸就不发第二击。
+
+        判据（顺序即语义，fail-closed）：
+
+        1. **已少一张** → 牌已经离手，``discarded=True``：禁止第二击——
+           再点同一位置可能点到空出来的牌位或别的控件；
+        2. **张数既不少一也不守恒** → 状态异常，禁止第二击；
+        3. 张数守恒 → 目标牌列上必须还有牌（最近框与建议牌框的 x 重叠
+           ≥ 牌宽一半），且它的 ``y1`` 比同帧其它暗手框的中位数低
+           ≥ :data:`RAISED_BOX_LIFT_PX`（几何抬起），才允许第二击确认。
+
+        Returns:
+            ``{"discarded", "ready", "reason", "count", "boxes",
+            "target_box", "median_y1", "lifted"}``；任何一步拿不到数都
+            ``ready=False`` 并写明原因。
+        """
+        result: dict = {"discarded": False, "ready": False, "reason": "",
+                        "count": None, "boxes": [], "target_box": None,
+                        "median_y1": None, "lifted": False}
+        try:
+            vision = self._make_vision()
+            count, boxes = vision.count_tiles(image)
+        except Exception as exc:  # noqa: BLE001 — 拿不到数就禁止第二击
+            result["reason"] = f"第一次点击后重新数牌失败: {exc}；禁止第二击"
+            return result
+        result["count"] = count
+        result["boxes"] = [[int(value) for value in box[:4]]
+                           for box in boxes or []]
+        if count == before_count - 1:
+            result["discarded"] = True
+            result["reason"] = ("第一次点击后手牌已少一张"
+                                f"（{before_count} → {count}），判定牌已离手；"
+                                "禁止第二击（再点同一位置可能点到空牌位/别的控件）")
+            return result
+        if count != before_count:
+            result["reason"] = (f"第一次点击后手牌数量 {count} 既不等于点击前 "
+                                f"{before_count} 也不等于少一张；状态异常，禁止第二击")
+            return result
+        if not result["boxes"]:
+            result["reason"] = "第一次点击后没有数到任何手牌框，禁止第二击"
+            return result
+        ref_x0, _ref_y0, ref_x1, _ref_y1 = (int(v) for v in reference_box[:4])
+        ref_cx = (ref_x0 + ref_x1) // 2
+        target = min(result["boxes"],
+                     key=lambda b: abs((b[0] + b[2]) // 2 - ref_cx))
+        result["target_box"] = list(target)
+        overlap = min(target[2], ref_x1) - max(target[0], ref_x0)
+        if overlap * 2 < (ref_x1 - ref_x0):
+            result["reason"] = (f"第一次点击后目标牌列上的框 {target} 与建议牌框 "
+                                f"x 重叠只有 {overlap}px（不足牌宽一半），"
+                                "目标牌不在原位，禁止第二击")
+            return result
+        median_y1 = float(np.median([b[3] for b in result["boxes"]]))
+        result["median_y1"] = median_y1
+        result["lifted"] = target[3] <= median_y1 - RAISED_BOX_LIFT_PX
+        if not result["lifted"]:
+            result["reason"] = (f"第一次点击后目标牌 y1={target[3]} 未比同帧中位数 "
+                                f"{median_y1:.1f} 抬高 {RAISED_BOX_LIFT_PX}px，"
+                                "牌没有抬起，禁止第二击")
+            return result
+        result["ready"] = True
+        result["reason"] = ("第一次点击后张数守恒、目标牌仍在原列且几何抬起"
+                            f"（y1={target[3]} ≤ 中位数 {median_y1:.1f} - "
+                            f"{RAISED_BOX_LIFT_PX}），允许第二击确认")
+        return result
+
+    @staticmethod
+    def _gate_raised_record(gate: dict) -> dict:
+        """把 :meth:`_selected_hand_gate` 的结果整理成与 ``raised_candidates()`` 同形的证据。"""
+        median_y1 = gate.get("median_y1")
+        items = []
+        for box in gate.get("boxes") or []:
+            items.append({
+                "box": list(box), "y0": box[1], "y1": box[3],
+                "raised": bool(median_y1 is not None
+                               and box[3] <= median_y1 - RAISED_BOX_LIFT_PX),
+            })
+        return {"boxes": items,
+                "raised": [item for item in items if item["raised"]],
+                "median_y1": median_y1, "lift_px": RAISED_BOX_LIFT_PX,
+                "selected_gate": gate.get("reason", "")}
 
     @staticmethod
     def _target_column_metrics(

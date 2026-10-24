@@ -1,0 +1,39 @@
+{
+  "schema": "tea_replay_candidates_v1",
+  "source_video": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\2026-10-19\\833667\\r15\\room833667_round15_9bd1285c.mp4",
+  "source_sha256": "98288598a2b6a6bba5ca5c848607a4bb264ed0f9a668d6855f82bedade860d0c",
+  "sampling": "ffmpeg fps=1; ordinal index is not exact PTS",
+  "counts": {
+    "frames": 29,
+    "visible_2p": 17,
+    "complete_2p": 2
+  },
+  "max_saved": 8,
+  "candidates": [
+    {
+      "file": "candidate_003.png",
+      "sample_index_at_1fps": 3,
+      "sha256": "955d8c7cc132541f9480cc275c122df573ca457f41074155f26e38414fc0cdbf",
+      "tile_ids": [
+        3,
+        7,
+        8,
+        8,
+        41,
+        43,
+        45,
+        46,
+        22,
+        24,
+        26,
+        27,
+        27,
+        27,
+        61,
+        62
+      ],
+      "status": "vision_prediction_not_human_ground_truth"
+    }
+  ],
+  "status": "visible_2p_complete_predictions_only_not_training_gold"
+}

@@ -1,0 +1,19 @@
+你是终审员，只审不改，不要修改任何文件。
+
+任务：审计 SPEC-002 v4 的实现是否符合已冻结契约（记录器已由另一会话实现）。
+
+步骤：
+1. 读 D:\温州麻将\SPECS\SPEC-002-assist-record.md（v4 冻结契约）和 D:\温州麻将\SPECS\QUEUE.md 的相关条目。
+2. 找到记录器实现（D:\温州麻将\温州茶（传统麻将）\bot\recorder.py 及它引用/被引用的相关文件），逐条核对契约，重点：
+   - mode 枚举是否为 tea_2p | tea_4p | shu_4p
+   - 状态机 detected → suggested → resolved | abstained | timeout；suggested 阶段不落盘、关闭时一次性追加落盘
+   - 稳定帧定义：连续 2 帧手牌多重集相同
+   - 活动决策锁：同时最多 1 个未关闭决策
+   - 语义去重键 = sha256(mode + 排序后手牌多重集 + round + caishen_id)；decision_id = {mode}_{语义键前16位}
+   - 重新布防：决策关闭后仅当新语义键与已关闭的不同才生成新决策（须覆盖 caishen 补选场景）
+   - suggested 后 30 秒无稳定结果帧 → timeout、agreed=null
+   - JSONL assist_record/v4 字段齐全与取值约束：tiles[] 每张含 id/score/margin/reason；bot_candidates 为统一对象 Top-5 按 final_score 降序 {tile, final_score, shanten_after, ukeire_count}；diff_failed 时 abstain_reason=null、human_discard=null、agreed=null 且 diff_note="diff_failed"；caishen 未选时 abstained 且 diff_note="caishen_unset"、abstain_reason=null；abstain_reason 仅 status=abstained 时非空；哈希统一 SHA-256；decision_frame/result_frame 含 path 与 sha256
+   - 差分规则：结果帧须稳定帧，净消失恰 1 张已识别才认定 human_discard
+3. 运行与记录器相关的测试文件，报告实际通过/失败数（给出命令与输出摘要）。
+
+输出格式：逐条 [符合/不符合/未实现] + 证据（文件:行号）；不符合项按严重程度排序；最后一句总评：是否可进入真机验收。

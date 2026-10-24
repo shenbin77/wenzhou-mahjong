@@ -21,6 +21,21 @@ from discard_vision import DiscardState, read_discards_sequential
 from harvest_tea import DEFAULT_ADB, DEFAULT_SERIAL, EXPECTED_PACKAGE
 
 
+
+def _caishen_fail_reason(observed) -> str:
+    """Fail-closed user text; never treats candidate as an accepted label."""
+    base = str(getattr(observed, "reason", "") or "未识别")
+    if base != "财神小牌匹配不够确定":
+        return f"未识别本局财神：{base}；仅显示识牌证据，不给建议"
+    score = float(getattr(observed, "score", 0.0) or 0.0)
+    runner = float(getattr(observed, "runner_up", 0.0) or 0.0)
+    cand = getattr(observed, "candidate", None)
+    margin = score - runner
+    detail = f"score={score:.3f} margin={margin:.3f} 需≥0.98/0.02"
+    if cand:
+        detail = f"候选{cand} {detail}"
+    return f"未识别本局财神：{base}（{detail}）；仅显示识牌证据，不给建议"
+
 def _load_image(path: Path) -> tuple[bytes, np.ndarray]:
     data = path.read_bytes()
     image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -295,7 +310,7 @@ def analyze_snapshot(
         return _abstain_with_vision_evidence(
             data, image, source, output, mode=mode, player_count=player_count,
             logs=logs,
-            reason=f"未识别本局财神：{observed.reason}；仅显示识牌证据，不给建议",
+            reason=_caishen_fail_reason(observed),
             on_recognized=on_recognized, caishen_selected=caishen_label,
             caishen_observed=observed.label, caishen_reason=observed.reason,
             **_caishen_fields(caishen_label, observed),

@@ -1,0 +1,50 @@
+## Summary
+
+三项终审偏差已修复，SPEC 契约未修改，阈值、模板、模拟器均未触碰。bot 全量测试真实全绿。
+
+## Changes
+
+1. 弃权生命周期：[recorder.py:424](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:424>)、[recorder.py:460](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:460>)
+   - 首帧仅进入 `detected`，不落盘。
+   - 第二个同语义键稳定帧先进入 `suggested`，再关闭为 `abstained`。
+   - 完整轨迹断言为 `detected → suggested → abstained`。
+
+2. 活动决策锁：[recorder.py:411](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:411>)
+   - `detected` 未关闭时，不同语义键直接忽略。
+   - 不再覆盖 `_ActiveDecision`，旧决策保持原键、帧计数和生命周期。
+
+3. tea 门禁：[recorder.py:157](</D:/温州麻将/温州茶（传统麻将）/bot/recorder.py:157>)
+   - `gate_ok` 仅取决于规则文字可读且人数与 `mode` 一致。
+   - “无中发”仍可作为识别文本附加信息，但不再是门禁条件。
+
+4. 测试与环境：
+   - 生命周期、活动锁、tea 门禁回归见 [test_recorder.py:173](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:173>)、[test_recorder.py:205](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:205>)、[test_recorder.py:231](</D:/温州麻将/温州茶（传统麻将）/bot/tests/test_recorder.py:231>)。
+   - [pytest.ini:2](</D:/温州麻将/温州茶（传统麻将）/bot/pytest.ini:2>) 固定 `basetemp` 到 D 盘项目目录；[conftest.py:14](</D:/温州麻将/温州茶（传统麻将）/bot/conftest.py:14>) 同步固定 `TEMP/TMP/TMPDIR`。
+   - [QUEUE.md:8](</D:/温州麻将/SPECS/QUEUE.md:8>) 已更新为“三项偏差已修复待复审”和最新数字；其余行未改。
+
+## Validation
+
+已执行并通过：
+
+```text
+python -m pytest tests\test_recorder.py
+12 passed in 3.06s
+
+python -m pytest tests
+100 passed in 19.41s
+```
+
+全量无失败、无跳过。另执行 `py_compile` 通过，临时目录实际指向 `D:\温州麻将\温州茶（传统麻将）\bot\.pytest_tmp`。
+
+## Risks
+
+仍有一处既有 SPEC 行文歧义，本次没有修改：
+
+- 第 12 行：“`sha256(mode + 排序后手牌多重集 + round + caishen_id)`”
+- 第 14 行：“仅当稳定手牌多重集与已关闭决策不同，或 round 变化时，才允许生成新决策。”
+
+前者把 `caishen_id` 纳入语义键，后者没有把财神变化列为重新布防条件。当前实现保留既有行为：财神变化产生新语义键并允许重新布防，建议复审时确认这一点。
+
+基线备份位于 `D:\温州麻将\_backups\_backup_20261020_spec002_recorder_finalfix`。
+
+
