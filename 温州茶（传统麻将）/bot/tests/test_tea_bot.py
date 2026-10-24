@@ -11,7 +11,11 @@ BOT_DIR = Path(__file__).resolve().parents[1]
 if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
-from tea_bot import TeaBot, offline_replay_test  # noqa: E402
+from tea_bot import TeaBot, offline_replay_test, vision_to_engine  # noqa: E402
+from tile_vision import TILE_IDS  # noqa: E402
+from brain_v0.engine.tea.shanten import (  # noqa: E402
+    best_discard_by_efficiency, calc_shanten, calc_ting_tiles,
+)
 
 
 WINNING_HAND = [1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 41, 41, 41, 61, 61]
@@ -40,6 +44,16 @@ def test_wait_then_discard_is_advice_only(tmp_path):
     discard = bot.play_one_round(screenshot=b"offline")
     assert discard["decisions"][0]["action"] == "discard"
     assert discard["decisions"][0]["tile"] in DISCARD_HAND
+
+
+def test_sixteen_tile_non_ready_hand_is_not_labelled_ready(tmp_path):
+    hand = [9, 21, 22, 22, 24, 25, 29, 41, 43, 46, 48, 48, 63, 63, 64, 73]
+    bot = TeaBot(caishen_id=21, log_dir=str(tmp_path))
+    thought = bot.think(hand)
+    assert thought.shanten > 0
+    assert thought.discard is None
+    assert "听牌" not in thought.reason
+    assert "等待摸牌" in thought.reason
 
 
 def test_white_tile_is_converted_to_engine_id(tmp_path):
@@ -86,7 +100,8 @@ def test_default_vision_checks_completeness_and_melds(
 
     monkeypatch.setitem(sys.modules, "tile_vision", types.SimpleNamespace(TileVision=FakeVision))
     monkeypatch.setitem(sys.modules, "mode_vision", types.SimpleNamespace(
-        detect_tea_player_count=lambda _: 2))
+        detect_tea_player_count=lambda _: 2,
+        detect_tea_no_zhong_fa=lambda _: True))
     bot = TeaBot(log_dir=str(tmp_path))
     if allowed:
         assert bot.see(_png()) == WINNING_HAND
@@ -94,6 +109,123 @@ def test_default_vision_checks_completeness_and_melds(
         with pytest.raises(ValueError, match="识牌不完整|明牌组"):
             bot.see(_png())
     assert seen["template_dir"].parts[-3:] == ("采集", "templates", "tea_tiles")
+
+
+def test_one_exposed_triplet_reduces_concealed_hand_size_and_keeps_advice_offline(
+        tmp_path, monkeypatch):
+    # A confirmed exposed East triplet leaves 13/14 concealed tiles.
+    complete = [4, 5, 6, 7, 8, 9, 21, 22, 23, 41, 41, 41, 62, 62]
+    turn = complete[:-1] + [63]
+    assert calc_shanten(complete, meld_count=1) == -1
+    assert calc_shanten(complete[:-1], meld_count=1) == 0
+    assert 62 in calc_ting_tiles(complete[:-1], meld_count=1)
+    assert best_discard_by_efficiency(turn, meld_count=1)
+
+    class ExposedEastVision:
+        def __init__(self, template_dir):
+            self.last_complete = True
+            self.last_meld_boxes = [(0, 0, 1, 1)] * 3
+            self.last_melds = [(61, 0, 0, 1, 1)] * 3
+
+        def recognize_hand(self, image):
+            return [(tile, 0, 0, 1, 1) for tile in turn]
+
+    monkeypatch.setitem(sys.modules, "tile_vision", types.SimpleNamespace(
+        TileVision=ExposedEastVision, TILE_IDS=TILE_IDS))
+    monkeypatch.setitem(sys.modules, "mode_vision", types.SimpleNamespace(
+        detect_tea_player_count=lambda _: 2,
+        detect_tea_no_zhong_fa=lambda _: True))
+    bot = TeaBot(log_dir=str(tmp_path))
+    assert bot.see(_png()) == turn
+    assert bot.meld_count == 1
+    assert bot.meld_groups == [[61, 61, 61]]
+    thought = bot.think(turn)
+    assert thought.discard in turn
+    assert bot.act(thought)["dry_run"] is True
+
+
+def test_two_exposed_triplets_leave_ten_or_eleven_concealed_tiles(
+        tmp_path, monkeypatch):
+    complete = [4, 5, 6, 21, 22, 23, 41, 41, 41, 62, 62]
+    turn = complete[:-1] + [63]
+    assert calc_shanten(complete, meld_count=2) == -1
+    assert calc_shanten(complete[:-1], meld_count=2) == 0
+
+    class TwoMeldVision:
+        def __init__(self, template_dir):
+            self.last_complete = True
+            self.last_meld_boxes = [(0, 0, 1, 1)] * 6
+            self.last_melds = [(tile, 0, 0, 1, 1)
+                               for tile in [29, 29, 29, 1, 1, 1]]
+
+        def recognize_hand(self, image):
+            return [(tile, 0, 0, 1, 1) for tile in turn]
+
+    monkeypatch.setitem(sys.modules, "tile_vision", types.SimpleNamespace(
+        TileVision=TwoMeldVision, TILE_IDS=TILE_IDS))
+    monkeypatch.setitem(sys.modules, "mode_vision", types.SimpleNamespace(
+        detect_tea_player_count=lambda _: 2,
+        detect_tea_no_zhong_fa=lambda _: True))
+    bot = TeaBot(log_dir=str(tmp_path))
+    assert bot.see(_png()) == turn
+    assert bot.meld_count == 2
+    assert bot.meld_groups == [[29, 29, 29], [1, 1, 1]]
+    assert bot.think(turn).discard in turn
+
+
+def test_tea_rule_gate_accepts_visible_no_zhong_fa_and_abstains_when_obscured(tmp_path):
+    from mode_vision import (
+        LATCH_SOURCE_LATCHED,
+        detect_tea_no_zhong_fa,
+        detect_tea_player_count,
+        reset_tea_mode_latch,
+    )
+
+    replay = BOT_DIR.parent / "采集" / "2026-10-19"
+    clear = [
+        replay / "833667" / "r01" / "frame_15s.png",
+        replay / "984226" / "r01" / "room984226_round1_3d58eb17_2.png",
+    ]
+    obscured = replay / "984226" / "r02" / "candidates" / "candidate_054.png"
+    for path in clear:
+        image = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+        assert detect_tea_no_zhong_fa(image)
+
+    for path, players in ((clear[1], 2),
+                          (BOT_DIR.parent / "采集" / "2026-10-13" /
+                           "323028" / "r01" / "frame_02.png", 4)):
+        titled = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+        assert detect_tea_player_count(titled) == players
+        titled[140:190, 300:470] = 130
+        assert detect_tea_player_count(titled) is None
+        assert not detect_tea_no_zhong_fa(titled)
+
+    hidden = cv2.imdecode(np.fromfile(str(clear[1]), np.uint8), cv2.IMREAD_COLOR)
+    hidden[140:190, 960:1110] = 130
+    assert detect_tea_player_count(hidden) == 2
+    assert not detect_tea_no_zhong_fa(hidden)
+    real_occlusion = cv2.imdecode(np.fromfile(str(obscured), np.uint8), cv2.IMREAD_COLOR)
+    assert detect_tea_player_count(real_occlusion) == 2
+    assert not detect_tea_no_zhong_fa(real_occlusion)
+
+    # 进程级 DECK_LATCH 会被其它用例弄脏；未确认过时遮挡必须 fail-closed。
+    reset_tea_mode_latch(reason="test_tea_rule_gate_fresh")
+    bot = TeaBot(log_dir=str(tmp_path))
+    with pytest.raises(ValueError, match="未确认无中发规则"):
+        bot.see(cv2.imencode(".png", hidden)[1].tobytes())
+
+    # 玩法/牌组门禁粘滞后：按钮帧遮住「无中发」横幅不得整帧弃权（与 TeaDeckLatch 契约对齐）。
+    clear_img = cv2.imdecode(np.fromfile(str(clear[1]), np.uint8), cv2.IMREAD_COLOR)
+    reset_tea_mode_latch(reason="test_tea_rule_gate_latch")
+    bot2 = TeaBot(log_dir=str(tmp_path / "latched"))
+    players, deck, ui = bot2._read_tea_rules(
+        clear_img, detect_tea_player_count, detect_tea_no_zhong_fa)
+    assert players == 2 and deck is True
+    players2, deck2, ui2 = bot2._read_tea_rules(
+        hidden, detect_tea_player_count, detect_tea_no_zhong_fa)
+    assert players2 == 2 and deck2 is True
+    assert ui2.get("deck_source") == LATCH_SOURCE_LATCHED
+    assert ui2.get("deck_latched") is True
 
 
 def test_offline_replay_counts_rejected_frame_as_failure(tmp_path):
@@ -108,6 +240,25 @@ def test_offline_replay_counts_rejected_frame_as_failure(tmp_path):
     assert report["ok"] == 0
     assert report["fail"] == 1
     assert report["sample_errors"]
+
+
+def test_offline_replay_four_player_uses_its_own_mode_gate(tmp_path):
+    frame = (BOT_DIR.parent / "采集" / "2026-10-13" / "323028" /
+             "r01" / "frame_02.png")
+    shots = tmp_path / "shots"
+    shots.mkdir()
+    (shots / frame.name).write_bytes(frame.read_bytes())
+    caishen_id = vision_to_engine(TILE_IDS["s6"])
+    four = offline_replay_test(
+        str(shots), caishen_id=caishen_id, player_count=4,
+        log_dir=str(tmp_path / "logs4"),
+    )
+    two = offline_replay_test(
+        str(shots), caishen_id=caishen_id, player_count=2,
+        log_dir=str(tmp_path / "logs2"),
+    )
+    assert four["ok"] == 1 and four["fail"] == 0
+    assert two["ok"] == 0 and two["fail"] == 1
 
 
 def test_tea_templates_keep_real_suit_labels_on_archived_two_player_frame():

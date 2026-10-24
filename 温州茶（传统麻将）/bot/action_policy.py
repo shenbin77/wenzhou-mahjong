@@ -54,11 +54,9 @@ confirmed_actions)``，即默认任何动作都需要人工确认。确认一个
     自己的弃牌去碰。归属未标注（``None``）时不拦，只用来牌本身判定。
 * 吃会弹出二次选择面板（面板里有 ``取消``），本版未接线，
   ``config.chi_enabled`` 默认 ``False``。
-* ``tap_executor`` 的行动行通道（:meth:`TapExecutor.execute_claim`）已接线，
-  :data:`CLAIM_TAP_CHANNEL_READY` 为 ``True``：本模块给出决策与 ``tap_point``
-  后可以真的发点击。它走的是**独立**的行动行几何白名单（并要求落点在
-  ``claim_vision.read_claims`` 实测的圆盘连通域框内），出牌用的那条
-  ``y ≥ 720`` 白名单没有放宽。**尚未在真实设备上验证过一次落点。**
+* ``tap_executor`` 的几何白名单只放行手牌 ROI（y ≥ 720），行动圆盘在 y≈600，
+  因此**点击通道尚未打通**：自动点击开关打开后本模块会给出
+  ``tap_point``，实际点击仍需 tap_executor 侧接线（见 :data:`CLAIM_TAP_CHANNEL_READY`）。
 """
 
 from __future__ import annotations
@@ -121,6 +119,8 @@ __all__ = [
     "match_button_glyph",
     "never_tap",
     "read_and_decide",
+    "read_sparkle_sides",
+    "resolve_incoming",
     "verify_after_click",
 ]
 
@@ -160,6 +160,29 @@ INCOMING_SOURCE_SELF: str = "self"
 #: 除 ``"opponent"`` 以外的任何字符串一律拦下（未识别的口径不信任）。
 CLAIMABLE_INCOMING_SOURCES: frozenset[str] = frozenset({INCOMING_SOURCE_OPPONENT})
 
+# ---------------------------------------------------------------------------
+# 归属仲裁：金色闪光标（与 discard_vision 的实测常量同值）
+#
+# 闪光标是游戏自己画的"刚落下这张"指示，位于牌河上方。它**只回答"哪边后打"，
+# 不回答"有没有新弃牌"**——无变化的帧里也有余辉（实测对手侧 17/60、自己侧
+# 28/60），所以只能接在两帧差分**之后**做仲裁，绝不能单独用来判定有来牌。
+# ---------------------------------------------------------------------------
+
+#: 闪光标搜索带（xyxy，原生 1600x900 坐标）：对手牌河上方。
+SPARKLE_BAND_OPPONENT: tuple[int, int, int, int] = (520, 196, 1260, 231)
+#: 自己侧的同一条带：discard-vision 实测"整体下移 254px"。
+SPARKLE_BAND_SELF: tuple[int, int, int, int] = (520, 450, 1260, 485)
+#: 自己侧相对对手侧的下移量（实测 254px，与两条牌河牌面带的间距一致）。
+SPARKLE_BAND_SELF_OFFSET: int = 254
+
+#: 金色的 HSV 口径（照 discard_vision，不另立阈值）。
+SPARKLE_HUE: tuple[int, int] = (10, 35)
+SPARKLE_MIN_SAT: int = 140
+SPARKLE_MIN_VAL: int = 170
+#: 连通域闸门：太小是牌面噪点，太宽是别的东西（一张牌 55px，标 ~30px）。
+SPARKLE_MIN_AREA: int = 80
+SPARKLE_MAX_WIDTH: int = 40
+
 
 # ---------------------------------------------------------------------------
 # 黑名单：永不点击的按钮
@@ -183,10 +206,9 @@ BLACKLISTED_LABELS: frozenset[str] = frozenset(COST_BUTTONS) | frozenset(NEVER_T
 #: "尚未实测"，此时黑名单只按标签（模板名/调用方传入的 label）生效。
 DEFAULT_FORBIDDEN_BOXES: tuple[tuple[int, int, int, int], ...] = ()
 
-#: 点击通道是否打通。``tap_executor`` 有一条**独立**的行动行入口
-#: ``TapExecutor.execute_claim``（自带 y∈[560,660] / x∈[740,1520] 白名单，
-#: 出牌那道 y≥720 的闸一点没放宽），所以现在可以真点了。
-CLAIM_TAP_CHANNEL_READY: bool = True
+#: 点击通道是否打通。``tap_executor`` 的几何白名单只放行手牌 ROI（y≥720），
+#: 行动圆盘在 y≈600，所以当前为 False：本模块只给决策与 tap_point，不点击。
+CLAIM_TAP_CHANNEL_READY: bool = False
 
 
 def never_tap(label: str | None) -> bool:
@@ -478,6 +500,181 @@ def _incoming_of(result: Mapping[str, Any], vision_to_engine) -> int | None:
     return None
 
 
+def _sparkle_centers(image: np.ndarray,
+                     band: tuple[int, int, int, int]) -> tuple[int, ...]:
+    """数一条带里的金色闪光标中心 x（照 ``discard_vision`` 的口径）。"""
+    x0, y0, x1, y1 = (int(value) for value in band[:4])
+    height, width = image.shape[:2]
+    if x0 < 0 or y0 < 0 or x1 > width or y1 > height or x1 <= x0 or y1 <= y0:
+        return ()
+    hsv = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    gold = ((hue >= SPARKLE_HUE[0]) & (hue <= SPARKLE_HUE[1])
+            & (sat > SPARKLE_MIN_SAT) & (val > SPARKLE_MIN_VAL))
+    mask = cv2.morphologyEx(gold.astype(np.uint8), cv2.MORPH_OPEN,
+                            np.ones((3, 3), np.uint8))
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    centers: list[int] = []
+    for index in range(1, count):
+        box_w = int(stats[index, cv2.CC_STAT_WIDTH])
+        area = int(stats[index, cv2.CC_STAT_AREA])
+        if area < SPARKLE_MIN_AREA or box_w > SPARKLE_MAX_WIDTH:
+            continue
+        centers.append(x0 + int(round(float(centroids[index][0]))))
+    return tuple(sorted(centers))
+
+
+def read_sparkle_sides(image: Any) -> dict[str, Any]:
+    """读两侧的金色闪光标，回答"哪一边后打的"。
+
+    Args:
+        image: 1600x900 ``uint8`` BGR 帧；尺寸/类型不符时记 ``no_frame``。
+
+    Returns:
+        ``{"status", "opponent", "self", "usable", "bands"}``。``status`` 取
+        ``"opponent"`` / ``"self"`` / ``"both"`` / ``"none"`` / ``"no_frame"``；
+        只有前两者 ``usable`` 为 ``True``——**两侧都有标等于没标**（无法仲裁）。
+    """
+    result: dict[str, Any] = {
+        "status": "no_frame",
+        "opponent": (),
+        "self": (),
+        "usable": False,
+        "bands": {"opponent": list(SPARKLE_BAND_OPPONENT),
+                  "self": list(SPARKLE_BAND_SELF)},
+    }
+    if image is None or not isinstance(image, np.ndarray):
+        return result
+    if image.ndim != 3 or image.shape[2] < 3 or image.dtype != np.uint8:
+        return result
+    if image.shape[:2] != (FRAME_HEIGHT, FRAME_WIDTH):
+        return result
+    opponent = _sparkle_centers(image, SPARKLE_BAND_OPPONENT)
+    own = _sparkle_centers(image, SPARKLE_BAND_SELF)
+    result["opponent"] = opponent
+    result["self"] = own
+    if opponent and own:
+        status = "both"
+    elif opponent:
+        status = INCOMING_SOURCE_OPPONENT
+    elif own:
+        status = INCOMING_SOURCE_SELF
+    else:
+        status = "none"
+    result["status"] = status
+    result["usable"] = status in (INCOMING_SOURCE_OPPONENT, INCOMING_SOURCE_SELF)
+    return result
+
+
+def arbitrate_incoming_source(
+    image: Any,
+    hand: HandState | None = None,
+    config: ActionPolicyConfig | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    """用闪光标仲裁来牌归属；仲裁不了返回 ``None``（fail-closed）。
+
+    只在"归属没确认"时才有意义：``hand.incoming_source`` 已经有值就不动它
+    （discard_vision 的两帧差分结论优先）。闪光标读不到、两侧都有标、没有
+    画面 → 一律 ``None``，调用方维持原来的弃权。
+
+    Args:
+        image: 本帧画面；``None`` 时直接放弃仲裁。
+        hand: 局面快照（只读）。
+        config: 策略配置；``use_sparkle_arbitration=False`` 时不做仲裁。
+
+    Returns:
+        ``(归属 or None, 闪光标证据)``。
+    """
+    cfg = config or ActionPolicyConfig()
+    if not cfg.use_sparkle_arbitration:
+        return None, {"status": "disabled", "usable": False}
+    if isinstance(hand, HandState) and hand.incoming_source is not None:
+        # 差分已经给出归属：闪光标只当交叉验证，不覆盖。
+        return None, {"status": "already_attributed", "usable": False,
+                      "incoming_source": hand.incoming_source}
+    sides = read_sparkle_sides(image)
+    if not sides["usable"]:
+        return None, sides
+    return str(sides["status"]), sides
+
+
+def _opponent_river_of(result: Mapping[str, Any]) -> tuple[int, ...]:
+    """取对手牌河（视觉编码）；只接受整数，其余一律当没有。"""
+    if not isinstance(result, Mapping):
+        return ()
+    raw: Any = None
+    discards = result.get("discards")
+    if isinstance(discards, Mapping):
+        raw = discards.get("opponent_river")
+    elif discards is not None:
+        raw = getattr(discards, "opponent_river", None)
+    if raw is None:
+        raw = result.get("opponent_river")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(int(tile) for tile in raw
+                 if not isinstance(tile, bool) and isinstance(tile, (int, np.integer)))
+
+
+def _newest_opponent_tile(hand: HandState) -> int | None:
+    """对手牌河最新一张（视觉编码）→ 引擎编码；拿不准返回 ``None``。
+
+    对手牌河**右端锚定、向左延伸**，所以最新一张在 ``opponent_river[0]``。
+    这个约定由 ``discard_vision.RiverReading.newest`` 定义（对手取
+    ``tiles[0]``），测试里直接对着它钉死，不允许漂移。
+    """
+    if not hand.opponent_river:
+        return None
+    raw = hand.opponent_river[0]
+    try:
+        from tea_bot import vision_to_engine
+        from tile_vision import TILE_IDS
+    except Exception:  # noqa: BLE001 - 转码表拿不到就不猜牌
+        return None
+    if int(raw) not in set(TILE_IDS.values()):
+        return None
+    try:
+        return vision_to_engine(int(raw))
+    except Exception:  # noqa: BLE001 - 转码失败等于没有来牌
+        return None
+
+
+def resolve_incoming(
+    image: Any,
+    hand: HandState,
+    config: ActionPolicyConfig | None = None,
+) -> tuple[HandState, dict[str, Any]]:
+    """归属未确认时用闪光标仲裁，必要时补回来牌。
+
+    * ``self`` → 判定自家后打 → L2 的归属闸门把它全拦下（**行为与原来的
+      "无法确认"一致**，只是弃权理由从"无法确认"变成有依据的"自家打出"）；
+    * ``opponent`` → 判定别家后打，且若差分没给出牌就从对手牌河补回来牌；
+    * 仲裁不了 → 原样返回，L2 按"归属未标注 + 来牌未知"弃权。
+
+    Returns:
+        ``(可能更新过的 HandState, 证据)``。原对象不被修改（frozen dataclass）。
+    """
+    cfg = config or ActionPolicyConfig()
+    evidence: dict[str, Any] = {"sparkle": {"status": "skipped", "usable": False},
+                                "arbitrated_source": None,
+                                "recovered_tile": None}
+    if not isinstance(hand, HandState):
+        return hand, evidence
+    source, sides = arbitrate_incoming_source(image, hand, cfg)
+    evidence["sparkle"] = sides
+    evidence["arbitrated_source"] = source
+    if source is None:
+        return hand, evidence
+    updated = replace(hand, incoming_source=source)
+    if (source == INCOMING_SOURCE_OPPONENT and cfg.sparkle_recover_tile
+            and updated.incoming_tile is None):
+        tile = _newest_opponent_tile(updated)
+        if tile is not None:
+            updated = replace(updated, incoming_tile=tile)
+            evidence["recovered_tile"] = tile
+    return updated, evidence
+
+
 def _incoming_source_of(result: Mapping[str, Any]) -> str | None:
     """从返回体里取来牌归属；取不到就 ``None``（不拦，见 :class:`HandState`）。
 
@@ -521,6 +718,9 @@ class HandState:
             ``None`` 表示调用方没给归属（例如手工构造的局面），此时不因
             归属而拦下——生产链路上 ``discard_vision`` 只要给了牌就一定
             给了归属，所以不会出现"有牌没归属"的真空。
+        opponent_river: 对手牌河（视觉编码，从左到右）。只在归属仲裁判为
+            ``"opponent"`` 且来牌缺失时用来补回来牌，取 ``[0]``（对手牌河右端
+            锚定、向左生长，最新一张在最左）。
         player_count: 局面人数（2 或 4）；``None`` 表示未确认。
         source: 证据来源，写进台账便于回溯。
     """
@@ -530,27 +730,42 @@ class HandState:
     caishen: int | None = None
     incoming_tile: int | None = None
     incoming_source: str | None = None
+    opponent_river: tuple[int, ...] = ()
     player_count: int | None = None
     source: str = ""
 
     @property
     def meld_total(self) -> int:
-        """副露总张数（按各组真实张数计，杠算 4 张）。"""
+        """副露物理总张数（按各组真实张数计，杠算 4 张）。
+
+        这是**物理账**（画面可见牌数），只用于诊断与报错文案；张数守恒与
+        暗手推算必须走 :attr:`logical_meld_slots` 的**逻辑账**——杠只占一个
+        面子，第 4 张不扣暗手（契约见 ``shanten.logical_slot_count``）。
+        """
         return sum(len(group) for group in self.melds)
 
     @property
+    def logical_meld_slots(self) -> int:
+        """副露逻辑位：每组一律 3 张（杠与吃/碰同价，契约见 kong-math 通告）。"""
+        return 3 * len(self.melds)
+
+    @property
     def total(self) -> int:
-        """闭手 + 副露的实际张数。"""
+        """闭手 + 副露的物理总张数（仅诊断用，守恒判断见 :attr:`is_valid`）。"""
         return len(self.concealed) + self.meld_total
 
     @property
     def concealed_expected(self) -> int:
-        """等待态闭手应有的张数（16 − 副露张数）。"""
-        return 16 - self.meld_total
+        """等待态闭手应有的张数：16 − 3×副露组数（杠后补牌，暗手不因杠少一张）。
+
+        与 ``brain_v0.engine.tea.shanten.expected_concealed_count(melds=...)``
+        同口径；测试里直接对着契约函数钉死，防止两边漂移。
+        """
+        return 16 - self.logical_meld_slots
 
     @property
     def is_valid(self) -> bool:
-        """张数守恒：闭手 + 副露 == 16（等待态）。不守恒即不许决策。"""
+        """张数守恒：闭手 == 16 − 3×副露组数（等待态）。不守恒即不许决策。"""
         return len(self.concealed) == self.concealed_expected
 
     def counts(self) -> dict[int, int]:
@@ -623,6 +838,7 @@ class HandState:
         return cls(concealed=concealed, melds=tuple(melds), caishen=caishen,
                    incoming_tile=_incoming_of(result, vision_to_engine),
                    incoming_source=_incoming_source_of(result),
+                   opponent_river=_opponent_river_of(result),
                    player_count=count,
                    source="analyze_snapshot")
 
@@ -794,6 +1010,13 @@ class ActionPolicyConfig:
     chi_player_counts: frozenset[int] = frozenset({4})
     allow_pass_without_claim: bool = False
     require_improvement: bool = True
+    # 归属无法确认时的仲裁开关（详见 :func:`resolve_incoming`）：
+    # * use_sparkle_arbitration：False 时完全不读闪光标，归属未确认就维持弃权；
+    # * sparkle_recover_tile：仲裁判为 "opponent" 但两帧差分没给出牌时，是否
+    #   从对手牌河最新一张（opponent_river[0]）补回来牌。补不出（牌河为空 /
+    #   牌不在视觉词汇里）一律不补，按"来牌未知"弃权。
+    use_sparkle_arbitration: bool = True
+    sparkle_recover_tile: bool = True
 
 
 def human_confirm_required(action: str, config: ActionPolicyConfig) -> bool:
@@ -898,8 +1121,9 @@ def evaluate_claim_candidates(hand: HandState,
     if not isinstance(hand, HandState) or not hand.is_valid:
         for action in CLAIM_ACTIONS:
             report[action]["why"] = (
-                f"手牌张数不守恒（闭手{len(hand.concealed)}+副露{hand.meld_total}"
-                f"，等待态应为 {hand.concealed_expected}），L2 弃权"
+                f"手牌张数不守恒（闭手{len(hand.concealed)}，副露{len(hand.melds)}组/"
+                f"逻辑{hand.logical_meld_slots}张，等待态应为 "
+                f"{hand.concealed_expected}），L2 弃权"
                 if isinstance(hand, HandState) else "手牌状态缺失，L2 弃权")
         return report
     tile = hand.incoming_tile
@@ -907,10 +1131,14 @@ def evaluate_claim_candidates(hand: HandState,
         for action in CLAIM_ACTIONS:
             report[action]["why"] = "来牌未知（无读牌链路），L2 无法验证吃碰杠胡"
         return report
-    # 归属闸门：自己刚打出的牌不能拿来吃/碰/杠/胡。真机上行动行有时是在
-    # 自家出牌之后刷出来的（动画残留），没有这道闸就会拿自己的弃牌去碰。
+    # 归属闸门：吃/碰/杠/胡 只接受对手来牌。来源未知一律弃权（证据不足，
+    # 不得把 None 当可执行）；自己刚打出的牌同样 fail-closed。
     source = hand.incoming_source
-    if source is not None and source not in CLAIMABLE_INCOMING_SOURCES:
+    if source is None:
+        for action in CLAIM_ACTIONS:
+            report[action]["why"] = "来牌归属未知，证据不足，L2 弃权"
+        return report
+    if source not in CLAIMABLE_INCOMING_SOURCES:
         for action in CLAIM_ACTIONS:
             report[action]["why"] = (
                 f"来牌归属为 {source!r}（只有 {INCOMING_SOURCE_OPPONENT!r} "
@@ -1255,6 +1483,9 @@ def decide_action(
                         f"L1 模板未过闸（status={evidence['template_status']}，"
                         f"要求 top1≥{TEMPLATE_TOP1_MIN} 且次名差≥{TEMPLATE_MARGIN_MIN}）")
 
+    # 归属未确认时用闪光标仲裁（"哪边后打"）；仲裁结果写进证据。
+    hand, incoming_evidence = resolve_incoming(image, hand, cfg)
+    evidence["incoming"] = incoming_evidence
     report = evaluate_claim_candidates(hand, cfg)
     hu_button = _button_of(claim_state, KIND_HU)
     pass_button = _button_of(claim_state, KIND_PASS)

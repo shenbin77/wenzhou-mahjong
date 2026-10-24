@@ -103,23 +103,23 @@ def state(*buttons: ClaimButton, decision: str | None = None,
 #: 来 1 万可碰、不可杠、不成胡（2 人局不评估吃）。
 PENG_HAND = HandState(concealed=(1, 1, 2, 4, 5, 6, 7, 8, 9,
                                  21, 22, 23, 24, 41, 42, 43),
-                      incoming_tile=1, player_count=2, source="test")
+                      incoming_tile=1, incoming_source="opponent", player_count=2, source="test")
 #: 同一手牌，来牌是手里没有的南 → 碰/杠/吃/胡全不可行。
 NO_CLAIM_HAND = HandState(concealed=(1, 1, 2, 4, 5, 6, 7, 8, 9,
                                      21, 22, 23, 24, 41, 42, 43),
-                          incoming_tile=62, player_count=2, source="test")
+                          incoming_tile=62, incoming_source="opponent", player_count=2, source="test")
 #: 闭手 + 来牌正好成胡。
 HU_HAND = HandState(concealed=(1, 1, 2, 3, 4, 5, 6, 7, 8, 9,
                                21, 22, 23, 41, 42, 43),
-                    incoming_tile=1, player_count=2, source="test")
+                    incoming_tile=1, incoming_source="opponent", player_count=2, source="test")
 #: 手里三张 → 碰与杠同时可行（没有字形模板时不可分辨）。
 KONG_HAND = HandState(concealed=(1, 1, 1, 2, 4, 5, 6, 7, 8, 9,
                                  21, 22, 23, 41, 42, 43),
-                      incoming_tile=1, player_count=2, source="test")
+                      incoming_tile=1, incoming_source="opponent", player_count=2, source="test")
 #: 来 25 筒可碰，但碰完向听变差（2 → 3）：应当改按过。
 WORSEN_HAND = HandState(concealed=(1, 6, 7, 8, 9, 23, 24, 25, 25,
                                    26, 27, 27, 29, 45, 47, 48),
-                        incoming_tile=25, player_count=2, source="test")
+                        incoming_tile=25, incoming_source="opponent", player_count=2, source="test")
 
 
 # ---------------------------------------------------------------------------
@@ -254,13 +254,15 @@ def test_unrecognised_incoming_source_is_blocked() -> None:
     assert not decision.executable
 
 
-def test_unlabelled_incoming_source_still_evaluated() -> None:
-    """调用方没给归属（None）时不因归属拦下——生产链路上有牌必有归属。"""
+def test_unlabelled_incoming_source_abstains() -> None:
+    """来牌归属未知（None）一律弃权：证据不足不得把可执行碰当真。"""
     hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
                      incoming_source=None, player_count=2)
     decision = decide_action(state(gold_button(), pass_button()), hand)
     assert decision is not None
-    assert decision.action == ACTION_PENG
+    assert not decision.executable
+    assert decision.action == ""
+    assert "归属未知" in (decision.l2_reason or decision.blocked_reason or "")
 
 
 @pytest.mark.parametrize("payload,expected", [
@@ -286,7 +288,8 @@ def test_incoming_source_of_accepts_discard_state_object() -> None:
 
 def test_hand_count_not_conserved_blocks() -> None:
     """张数不守恒的手牌不能被用来做任何判定。"""
-    hand = HandState(concealed=(1, 1, 2, 4), incoming_tile=1, player_count=2)
+    hand = HandState(concealed=(1, 1, 2, 4), incoming_tile=1,
+                     incoming_source="opponent", player_count=2)
     decision = decide_action(state(gold_button(), pass_button()), hand)
     assert decision is not None
     assert not decision.executable
@@ -336,7 +339,8 @@ def test_hu_button_without_engine_confirmation_is_blocked() -> None:
 def test_hu_with_melds_is_not_verifiable() -> None:
     """副露局面的胡牌判定未验收 → 即使有胡盘也不认。"""
     hand = HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 41),
-                     melds=((41, 42, 43),), incoming_tile=42, player_count=2)
+                     melds=((41, 42, 43),), incoming_tile=42,
+                     incoming_source="opponent", player_count=2)
     assert hand.is_valid
     decision = decide_action(state(hu_button()), hand)
     assert decision is not None
@@ -410,7 +414,7 @@ def test_end_to_end_read_and_decide_on_synthetic_frame() -> None:
 def test_chi_disabled_by_default() -> None:
     report = ap.evaluate_claim_candidates(
         HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 42, 43),
-                  incoming_tile=2, player_count=4),
+                  incoming_tile=2, incoming_source="opponent", player_count=4),
         ActionPolicyConfig())
     assert not report[ACTION_CHI]["feasible"]
     assert "未接线" in report[ACTION_CHI]["why"]
@@ -421,7 +425,7 @@ def test_chi_needs_four_players() -> None:
     config = ActionPolicyConfig(chi_enabled=True)
     report = ap.evaluate_claim_candidates(
         HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 42, 43),
-                  incoming_tile=2, player_count=2),
+                  incoming_tile=2, incoming_source="opponent", player_count=2),
         config)
     assert not report[ACTION_CHI]["feasible"]
     assert "2 人局" in report[ACTION_CHI]["why"]
@@ -431,7 +435,7 @@ def test_chi_feasible_in_four_player_game() -> None:
     config = ActionPolicyConfig(chi_enabled=True)
     report = ap.evaluate_claim_candidates(
         HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 42, 43),
-                  incoming_tile=2, player_count=4),
+                  incoming_tile=2, incoming_source="opponent", player_count=4),
         config)
     assert report[ACTION_CHI]["feasible"]
     assert report[ACTION_CHI]["options"]
@@ -614,30 +618,9 @@ def test_confirm_action_rejects_unknown_action() -> None:
         confirm_action(ActionPolicyConfig(), "洗牌")
 
 
-def test_claim_tap_channel_is_wired_and_refuses_dangerous_points() -> None:
-    """点击通道已打通（tap_executor.execute_claim），测试把两件事钉住：
-
-    1. 开关确实是 ``True``（有人把通道拆了必须回来改这个断言）；
-    2. ``True`` 背后真的有一条**独立的**行动行入口：它能接住行动圆盘的
-       坐标，同时把充值/游戏中心/开始游戏这类点一个都不放行——也就是这个
-       开关说"能点"绝不等于"放宽了出牌白名单"。
-    """
-    assert ap.CLAIM_TAP_CHANNEL_READY is True
-
-    from tap_executor import TapExecutor, TapRejected
-
-    executor = TapExecutor(session_dir="unused")
-    assert callable(getattr(executor, "execute_claim", None))
-    # 独立几何白名单：行动行的圆盘坐标接得住。
-    assert executor.validate_claim_point((1431, 610)) == (1431, 610)
-    # 危险点一个都不放行（此刻还没发任何 adb 命令）。
-    for point in ((800, 120), (1480, 60), (800, 430)):
-        with pytest.raises(TapRejected):
-            executor.validate_claim_point(point)
-    # 出牌白名单没有被连带放宽：这些点仍然被它拒绝。
-    for point in ((800, 120), (1480, 60), (800, 430), (1431, 610)):
-        with pytest.raises(TapRejected):
-            executor.validate_target(point, [], (900, 1600, 3))
+def test_claim_tap_channel_not_wired_yet() -> None:
+    """点击通道还没打通，测试把这件事钉住：有人接线后必须回来改这个断言。"""
+    assert ap.CLAIM_TAP_CHANNEL_READY is False
 
 
 # ---------------------------------------------------------------------------
@@ -810,3 +793,307 @@ def test_hand_state_from_analysis_empty_is_invalid() -> None:
     hand = HandState.from_analysis(None)
     assert not hand.is_valid
     assert hand.source == "empty"
+
+
+# ---------------------------------------------------------------------------
+# 张数账契约（杠只占一个逻辑面子，kong-math 通告 e82bf00）
+# ---------------------------------------------------------------------------
+
+def _shanten_contract():
+    """导入引擎侧契约函数（expected_concealed_count 等）。"""
+    engine = ap._engine()
+    assert engine is not None
+    root = engine["root"]
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from brain_v0.engine.tea import shanten
+    return shanten
+
+
+@pytest.mark.parametrize("melds,expected", [
+    ((), 16),
+    (((1, 1, 1),), 13),               # 1 组碰：13
+    (((1, 1, 1, 1),), 13),            # 1 组杠：仍是 13（不是旧口径的 12）
+    (((1, 1, 1), (2, 2, 2)), 10),     # 2 组碰：10
+    (((1, 1, 1, 1), (2, 2, 2, 2)), 10),  # 2 组杠：仍是 10
+])
+def test_concealed_expected_matches_engine_contract(melds: tuple,
+                                                    expected: int) -> None:
+    """暗手应有张数必须等于引擎契约函数；杠与吃/碰同价（3 张/组）。"""
+    shanten = _shanten_contract()
+    hand = HandState(concealed=(1,) * expected, melds=tuple(tuple(g) for g in melds))
+    assert hand.concealed_expected == expected
+    assert hand.concealed_expected == shanten.expected_concealed_count(
+        melds=[list(g) for g in melds])
+    assert hand.logical_meld_slots == shanten.logical_slot_count(
+        melds=[list(g) for g in melds])
+    assert hand.meld_total == shanten.visible_physical_count(
+        melds=[list(g) for g in melds])
+    assert hand.is_valid
+
+
+def test_kong_meld_does_not_dock_concealed_count() -> None:
+    """"13 张暗手 + 1 组杠"是合法等待态（旧口径会误判为 12 张而拒掉）。"""
+    hand = HandState(concealed=tuple(range(1, 14)), melds=((21, 21, 21, 21),),
+                     incoming_tile=1, player_count=2)
+    assert hand.meld_total == 4          # 物理账：杠 4 张
+    assert hand.logical_meld_slots == 3  # 逻辑账：只占一个面子
+    assert hand.is_valid
+
+    report = ap.evaluate_claim_candidates(hand, ActionPolicyConfig())
+    # 张数账不再把它误拒；至于引擎怎么判动作由引擎说了算。
+    assert all("张数不守恒" not in report[a]["why"] for a in ap.CLAIM_ACTIONS)
+
+
+def test_logical_count_still_blocks_broken_hands() -> None:
+    """逻辑账不等于放松：17 张等待态照样拒。"""
+    hand = HandState(concealed=(1,) * 17, melds=(), incoming_tile=1,
+                     player_count=2)
+    assert not hand.is_valid
+    report = ap.evaluate_claim_candidates(hand, ActionPolicyConfig())
+    assert all(not report[a]["feasible"] for a in ap.CLAIM_ACTIONS)
+
+
+# ---------------------------------------------------------------------------
+# 闪光标归属仲裁（"哪一边后打的"）
+#
+# 仲裁只在"两帧差分没给出归属"时介入：闪光标只回答"哪边后打"，**不回答
+# "有没有新弃牌"**，所以它永远排在两帧差分之后，不能单独拿来产出动作。
+# ---------------------------------------------------------------------------
+
+SPARKLE_X = 915          # 与 discard_vision 实测的落点同量级（939/1164/1220）
+SPARKLE_HALF_W = 10      # 宽 20 ≤ SPARKLE_MAX_WIDTH(40)
+SPARKLE_HALF_H = 6       # 面积 240 ≥ SPARKLE_MIN_AREA(80)
+
+
+def _sparkle_frame(*sides: str) -> np.ndarray:
+    """在指定一侧（"opponent" / "self"）的光带里画一枚金色闪光标。"""
+    frame = np.zeros((900, 1600, 3), np.uint8)
+    frame[:, :] = TABLE_BGR
+    for side in sides:
+        x0, y0, x1, y1 = (ap.SPARKLE_BAND_OPPONENT if side == "opponent"
+                          else ap.SPARKLE_BAND_SELF)
+        cy = (y0 + y1) // 2
+        cv2.rectangle(frame,
+                      (SPARKLE_X - SPARKLE_HALF_W, cy - SPARKLE_HALF_H),
+                      (SPARKLE_X + SPARKLE_HALF_W, cy + SPARKLE_HALF_H),
+                      tuple(int(c) for c in GOLD_BGR), thickness=-1)
+    return frame
+
+
+def test_sparkle_constants_match_discard_vision() -> None:
+    """闪光标口径必须与 discard_vision 一致，否则仲裁会静默失效。"""
+    import discard_vision
+
+    assert ap.SPARKLE_BAND_OPPONENT == discard_vision._OPPONENT_SPARKLE_BAND
+    assert ap.SPARKLE_HUE == discard_vision._SPARKLE_HUE
+    assert ap.SPARKLE_MIN_SAT == discard_vision._SPARKLE_MIN_SAT
+    assert ap.SPARKLE_MIN_VAL == discard_vision._SPARKLE_MIN_VAL
+    assert ap.SPARKLE_MIN_AREA == discard_vision._SPARKLE_MIN_AREA
+    assert ap.SPARKLE_MAX_WIDTH == discard_vision._SPARKLE_MAX_WIDTH
+
+    # 自家光带没有上游常量可对（discard_vision 只用了对手那条），所以内部
+    # 钉死"同一条带整体下移 SPARKLE_BAND_SELF_OFFSET"，改一侧就得改两个。
+    ox0, oy0, ox1, oy1 = ap.SPARKLE_BAND_OPPONENT
+    sx0, sy0, sx1, sy1 = ap.SPARKLE_BAND_SELF
+    assert (sx0, sx1) == (ox0, ox1)
+    assert (sy0 - oy0) == ap.SPARKLE_BAND_SELF_OFFSET
+    assert (sy1 - oy1) == ap.SPARKLE_BAND_SELF_OFFSET
+
+
+def test_sparkle_detector_agrees_with_discard_vision() -> None:
+    """同一个对手光带，两边必须数出一模一样的中心 x。"""
+    import discard_vision
+
+    frame = _sparkle_frame("opponent")
+    mine = ap._sparkle_centers(frame, ap.SPARKLE_BAND_OPPONENT)
+    theirs = discard_vision.find_discard_sparkles(frame)
+    assert mine == theirs == (SPARKLE_X,)
+
+
+@pytest.mark.parametrize("sides,status", [
+    (("opponent",), "opponent"),
+    (("self",), "self"),
+])
+def test_read_sparkle_sides_one_side(sides: tuple, status: str) -> None:
+    sides_read = ap.read_sparkle_sides(_sparkle_frame(*sides))
+    assert sides_read["status"] == status
+    assert sides_read["usable"] is True
+    assert sides_read[status] == (SPARKLE_X,)
+
+
+def test_read_sparkle_sides_both_is_not_usable() -> None:
+    """两侧都有标 = 无法仲裁（游戏开局/结算常两边同亮）。"""
+    sides = ap.read_sparkle_sides(_sparkle_frame("opponent", "self"))
+    assert sides["status"] == "both"
+    assert sides["usable"] is False
+
+
+def test_read_sparkle_sides_none_is_not_usable() -> None:
+    sides = ap.read_sparkle_sides(_sparkle_frame())
+    assert sides["status"] == "none"
+    assert sides["usable"] is False
+
+
+@pytest.mark.parametrize("image", [None, "not-a-frame", np.zeros((900, 1600), np.uint8),
+                                   np.zeros((720, 1280, 3), np.uint8)])
+def test_read_sparkle_sides_without_frame(image: object) -> None:
+    sides = ap.read_sparkle_sides(image)
+    assert sides["status"] == "no_frame"
+    assert sides["usable"] is False
+
+
+def test_arbitration_self_side_keeps_abstaining() -> None:
+    """自家后打 → 归属判 self → 所有动作被 L2 闸门拦下（行为与"无法确认"一致）。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
+                     incoming_source=None, player_count=2)
+    source, sides = ap.arbitrate_incoming_source(_sparkle_frame("self"), hand,
+                                                 ActionPolicyConfig())
+    assert source == ap.INCOMING_SOURCE_SELF
+    assert sides["status"] == "self"
+
+    decision = decide_action(state(gold_button(), pass_button()), hand,
+                             ActionPolicyConfig(), image=_sparkle_frame("self"))
+    assert decision is not None
+    assert not decision.executable
+    assert decision.tap_point is None
+
+
+def test_arbitration_opponent_side_recovers_the_claim() -> None:
+    """别家后打 → 归属判 opponent，并从对手牌河最新一张补回来牌 → 可碰。
+
+    这正是原先 4 次"两边都长了、归属确认不了"里丢掉的机会。
+    """
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=None,
+                     incoming_source=None, opponent_river=(1, 9, 5),
+                     player_count=2)
+    updated, evidence = ap.resolve_incoming(_sparkle_frame("opponent"), hand,
+                                            ActionPolicyConfig())
+    assert evidence["arbitrated_source"] == ap.INCOMING_SOURCE_OPPONENT
+    assert evidence["recovered_tile"] == 1
+    assert updated.incoming_source == ap.INCOMING_SOURCE_OPPONENT
+    assert updated.incoming_tile == 1
+    # 原对象不被改动（frozen dataclass + replace）。
+    assert hand.incoming_tile is None and hand.incoming_source is None
+
+    decision = decide_action(state(gold_button(), pass_button()), hand,
+                             ActionPolicyConfig(), image=_sparkle_frame("opponent"))
+    assert decision is not None
+    assert decision.action == ACTION_PENG
+    assert decision.l1_evidence["incoming"]["arbitrated_source"] == ap.INCOMING_SOURCE_OPPONENT
+
+
+def test_arbitration_opponent_side_without_river_still_abstains() -> None:
+    """判出 opponent 但补不出牌 → 仍然弃权（不许拿闪光标凭空造一张牌）。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=None,
+                     incoming_source=None, opponent_river=(), player_count=2)
+    updated, evidence = ap.resolve_incoming(_sparkle_frame("opponent"), hand,
+                                            ActionPolicyConfig())
+    assert updated.incoming_source == ap.INCOMING_SOURCE_OPPONENT
+    assert evidence["recovered_tile"] is None
+    assert updated.incoming_tile is None
+
+    decision = decide_action(state(gold_button(), pass_button()), hand,
+                             ActionPolicyConfig(), image=_sparkle_frame("opponent"))
+    assert decision is not None
+    assert not decision.executable
+    assert "来牌未知" in decision.l2_reason
+
+
+@pytest.mark.parametrize("sides", [(), ("opponent", "self")])
+def test_arbitration_unusable_maintains_abstain(sides: tuple) -> None:
+    """两侧同亮 / 没标 → 仲裁不了 → 维持弃权，绝不猜。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
+                     incoming_source=None, player_count=2)
+    source, _ = ap.arbitrate_incoming_source(_sparkle_frame(*sides), hand,
+                                             ActionPolicyConfig())
+    assert source is None
+
+    decision = decide_action(state(gold_button(), pass_button()), hand,
+                             ActionPolicyConfig(), image=_sparkle_frame(*sides))
+    assert decision is not None
+    # 仲裁仍解不出归属 → 证据不足，维持弃权（不得猜成碰）。
+    assert not decision.executable
+    assert decision.action == ""
+    assert "归属未知" in (decision.l2_reason or decision.blocked_reason or "")
+
+
+def test_arbitration_without_image_maintains_abstain() -> None:
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=None,
+                     incoming_source=None, player_count=2)
+    source, sides = ap.arbitrate_incoming_source(None, hand, ActionPolicyConfig())
+    assert source is None
+    assert sides["status"] == "no_frame"
+    assert not sides["usable"]
+
+
+def test_arbitration_can_be_switched_off() -> None:
+    config = ActionPolicyConfig(use_sparkle_arbitration=False)
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=None,
+                     incoming_source=None, player_count=2)
+    source, sides = ap.arbitrate_incoming_source(_sparkle_frame("opponent"), hand,
+                                                 config)
+    assert source is None
+    assert sides["status"] == "disabled"
+
+
+def test_arbitration_never_overrides_a_known_source() -> None:
+    """差分已经给出归属时，闪光标只当交叉验证，绝不覆盖（差分优先）。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=1,
+                     incoming_source=ap.INCOMING_SOURCE_SELF, player_count=2)
+    source, sides = ap.arbitrate_incoming_source(_sparkle_frame("opponent"), hand,
+                                                 ActionPolicyConfig())
+    assert source is None
+    assert sides["status"] == "already_attributed"
+    assert sides["incoming_source"] == ap.INCOMING_SOURCE_SELF
+
+    decision = decide_action(state(gold_button(), pass_button()), hand,
+                             ActionPolicyConfig(), image=_sparkle_frame("opponent"))
+    assert decision is not None
+    assert not decision.executable
+    assert decision.tap_point is None
+
+
+def test_sparkle_alone_never_invents_a_discard() -> None:
+    """闪光标只回答"哪边后打"：没有两帧差分结论时它不产生任何动作。
+
+    这一条把"必须先有两帧差分"钉死：牌河为空、来牌为空，光带再亮也不动。
+    """
+    hand = HandState(concealed=NO_CLAIM_HAND.concealed, incoming_tile=None,
+                     incoming_source=None, opponent_river=(62,), player_count=2)
+    updated, evidence = ap.resolve_incoming(_sparkle_frame("opponent"), hand,
+                                            ActionPolicyConfig())
+    assert updated.incoming_tile == 62        # 补牌来自牌河，不是来自闪光标
+    decision = decide_action(state(gold_button(), pass_button()), hand,
+                             ActionPolicyConfig(), image=_sparkle_frame("opponent"))
+    assert decision is not None
+    assert not decision.executable            # 62（南）碰/吃/杠/胡皆不可行
+
+    blank = HandState(concealed=NO_CLAIM_HAND.concealed, incoming_tile=None,
+                      incoming_source=None, opponent_river=(), player_count=2)
+    untouched, blank_evidence = ap.resolve_incoming(_sparkle_frame("opponent"),
+                                                    blank, ActionPolicyConfig())
+    assert untouched.incoming_tile is None
+    assert blank_evidence["recovered_tile"] is None
+
+
+def test_newest_opponent_tile_uses_the_river_head() -> None:
+    """对手牌河右端锚定、向左延伸 → 最新一张是 opponent_river[0]。"""
+    hand = HandState(concealed=(), opponent_river=(1, 9, 5))
+    assert ap._newest_opponent_tile(hand) == 1
+    assert ap._newest_opponent_tile(HandState(concealed=(), opponent_river=())) is None
+    assert ap._newest_opponent_tile(HandState(concealed=(), opponent_river=(9999,))) is None
+
+
+def test_opponent_river_of_accepts_every_shape() -> None:
+    assert ap._opponent_river_of({"discards": {"opponent_river": (1, 2)}}) == (1, 2)
+    assert ap._opponent_river_of({"opponent_river": [3]}) == (3,)
+    assert ap._opponent_river_of({"opponent_river": None}) == ()
+    assert ap._opponent_river_of({}) == ()
+    assert ap._opponent_river_of(None) == ()
+
+
+def test_opponent_river_is_carried_from_analysis() -> None:
+    hand = HandState.from_analysis({"hand_ids": [1, 2, 3],
+                                    "discards": {"opponent_river": (7, 8)}})
+    assert hand.opponent_river == (7, 8)

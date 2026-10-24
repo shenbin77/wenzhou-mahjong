@@ -39,6 +39,7 @@ from brain_v0.engine.tea.shanten import (  # noqa: E402
     best_discard_by_efficiency,
     calc_shanten,
     calc_ting_tiles,
+    expected_concealed_count,
     validate_tiles,
 )
 from brain_v0.engine.tea.pattern_analyzer import analyze as _pa_analyze  # noqa: E402
@@ -171,58 +172,72 @@ class TeaBot:
             return self.shot_fn()
         raise RuntimeError("未提供离线截图；请传 screenshot 或注入 shot_fn")
 
-    def _read_player_count(self, image, detect_fn) -> tuple[Optional[int], dict]:
-        """读本帧玩法人数，返回 ``(players, action_ui)``。
+    # 两道玩法门禁粘滞都不可用时的 action_ui 兜底骨架：字段一个不少，值全是
+    # "没结论"，让下游按 key 取数永远不会 KeyError。
+    _NEUTRAL_ACTION_UI: dict = {
+        "action_discs_seen": False, "action_disc_count": 0, "action_discs": [],
+        "claim_decision": None, "claim_reason": "", "action_gold_pixel_ratio": None,
+        "deck_score": 0.0, "deck_score_min": 0.94, "deck_latched": False,
+        "deck_source": "unknown",
+        "mode_score": 0.0, "mode_margin": 0.0, "mode_score_min": 0.92,
+        "mode_margin_min": 0.08, "mode_raw_players": None, "mode_players": None,
+        "mode_source": "per_frame", "mode_latched": False, "mode_latch_resets": 0,
+        "mode_latch_age_frames": 0, "mode_latch_age_s": 0.0,
+    }
 
-        优先走 ``mode_vision`` 的粘滞门禁：玩法在一局内不变，确认过一次就锁存，
-        后续帧复用。按钮圆盘压住规则文字、本帧逐帧判定给不出结论时，锁存的结论
-        仍然有效 —— 这正是修掉"按钮一出现整帧弃权"的那一步。
+    def _read_tea_rules(self, image, detect_players,
+                        detect_no_zhong_fa) -> tuple[Optional[int], bool, dict]:
+        """一次读透本帧的两道玩法规则，返回 ``(players, no_zhong_fa, action_ui)``。
+
+        两道门禁（人数 / 牌集无中发）判的都是"这间房用什么规则"，在一局里都不会变，
+        但它们的取样区会被吃/碰/杠/胡 的行动圆盘压住，导致逐帧判定一时读不出 →
+        整帧弃权。这里统一走 ``mode_vision.RULE_GATES`` 的粘滞结论。
 
         ``assist_tea.analyze_snapshot`` 每帧 new 一个 TeaBot，所以粘滞状态放在
-        ``mode_vision.MODE_LATCH``（进程级，带换房/换局重置），不放在 self 上。
+        ``mode_vision`` 的进程级 **gates 容器**里，不放在 self 上。**两把锁共用
+        同一份局身份和同一次作废动作**——不会出现"人数锁重_confirmed了、牌集锁
+        还拿着上一局结论"这种最危险的组合。
 
-        fail-closed 不变：粘滞给不出结论时一律退回逐帧口径的 ``detect_fn``。
-        换句话说，粘滞只会**补**上"读不出但其实早确认过"的帧，永远不会把
-        "没确认过"的画面变成 2 人局。
+        fail-closed 不变：粘滞给不出结论时一律退回逐帧口径。粘滞只会**补**上
+        "读不出但其实早确认过"的帧，永远不会把"没确认过"的画面变成已确认。
 
-        兼容：部分测试用 ``SimpleNamespace`` 顶替整个 ``mode_vision`` 模块
-        （只有 ``detect_tea_player_count`` 一个函数），那时取不到粘滞门禁，
-        就老实走 ``detect_fn``，行为与修改前完全一致。
+        兼容：部分测试用 ``SimpleNamespace`` 顶替整个 ``mode_vision`` 模块（只有
+        那两个 detect 函数），那时取不到 gates，就老实走逐帧口径，行为与修改前
+        完全一致。
 
         Args:
             image: 已解出的 BGR 帧。
-            detect_fn: 逐帧判定函数，也是粘滞不可用/无结论时的事实来源。
+            detect_players: 逐帧人数判定函数（粘滞不可用/无结论时的事实来源）。
+            detect_no_zhong_fa: 逐帧牌集规则判定函数，同上。
 
         Returns:
-            ``(players, action_ui)``；``players`` 为 2/4 或 ``None``（必须弃权）。
+            ``(players, no_zhong_fa, action_ui)``；``players`` 为 2/4 或 ``None``，
+            ``no_zhong_fa`` 为 True/False（False 一律当作"未确认"去弃权）。
         """
-        raw = detect_fn(image)
-        action_ui: dict = {"action_discs_seen": False, "action_disc_count": 0,
-                           "action_discs": [], "claim_decision": None,
-                           "claim_reason": "未走玩法粘滞门禁（模块被替身或门禁不可用）",
-                           "action_gold_pixel_ratio": None,
-                           "mode_score": 0.0, "mode_margin": 0.0,
-                           "mode_score_min": 0.92, "mode_margin_min": 0.08,
-                           "mode_raw_players": raw, "mode_players": raw,
-                           "mode_source": "per_frame", "mode_latched": False,
-                           "mode_latch_resets": 0, "mode_latch_age_frames": 0,
-                           "mode_latch_age_s": 0.0}
+        raw_players = detect_players(image)
+        raw_deck = bool(detect_no_zhong_fa(image))
+        action_ui = dict(self._NEUTRAL_ACTION_UI)
+        action_ui.update({"mode_raw_players": raw_players,
+                          "mode_players": raw_players,
+                          "deck_score": 0.0})
         try:
-            from mode_vision import MODE_LATCH
+            from mode_vision import RULE_GATES
         except Exception:  # noqa: BLE001 - 模块被替身顶掉：按逐帧口径走
-            return raw, action_ui
+            return raw_players, raw_deck, action_ui
         try:
-            reading = MODE_LATCH.observe(image)
+            mode, deck = RULE_GATES.observe(image)
         except Exception as exc:  # noqa: BLE001 - 粘滞出错不许拖垮整帧
             action_ui["claim_reason"] = f"玩法粘滞门禁异常，退回逐帧：{exc}"
-            action_ui["mode_players"] = raw
-            return raw, action_ui
-        action_ui = dict(reading.action_ui)
-        action_ui["mode_raw_players"] = raw
-        # 粘滞给不出结论时按逐帧口径走：两者此刻都理应是 None（lint 兜底另算）。
-        players = reading.players if reading.players is not None else raw
+            return raw_players, raw_deck, action_ui
+        action_ui = dict(mode.action_ui)
+        action_ui["mode_raw_players"] = raw_players
+        # 粘滞没结论 → 按逐帧口径：此刻两者理应都是"没确认"（兼任替身兜底）。
+        players = raw_players if mode.players is None else mode.players
+        no_zhong_fa = raw_deck if deck.value is None else bool(deck.value)
         action_ui["mode_players"] = players
-        return players, action_ui
+        action_ui["deck_latched"] = deck.latched
+        action_ui["deck_source"] = deck.source
+        return players, no_zhong_fa, action_ui
 
     def _default_vision(self, png: bytes) -> list[int]:
         """对采集截图做保守识别；任何漏牌、明牌组或未知牌均停止。"""
@@ -238,13 +253,17 @@ class TeaBot:
         image = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("截图不是有效 PNG 图像")
-        # 玩法门禁：走 mode_vision 的粘滞结论；action_ui 是本帧按钮区 + 门禁
-        # 的分值/是否走粘滞，供看门狗逐帧留证。
-        players, action_ui = self._read_player_count(image, detect_tea_player_count)
+        # 玩法门禁（人数 + 牌集无中发）：走 mode_vision 的粘滞结论。粘滞/逐帧
+        # 两种口径都读不出来的帧，行为跟修改前一样是弃权，绝不放宽门槛。
+        # action_ui 是本帧按钮区 + 两道门禁的分值/是否走了粘滞，给看门狗逐帧留证。
+        players, no_zhong_fa, action_ui = self._read_tea_rules(
+            image, detect_tea_player_count, detect_tea_no_zhong_fa)
         self.last_action_ui = action_ui
         self.log(f"[mode] players={players} source={action_ui.get('mode_source')} "
                  f"score={action_ui.get('mode_score')} "
                  f"latched={action_ui.get('mode_latched')} "
+                 f"deck={no_zhong_fa}/{action_ui.get('deck_source')} "
+                 f"deck_latched={action_ui.get('deck_latched')} "
                  f"discs={action_ui.get('action_disc_count')}")
         if players != self.player_count:
             raise ValueError(
@@ -252,7 +271,7 @@ class TeaBot:
                 if players in (2, 4) else
                 f"画面未确认茶 {self.player_count} 人局，停止决策"
             )
-        if not detect_tea_no_zhong_fa(image):
+        if not no_zhong_fa:
             raise ValueError("未确认无中发规则，当前茶牌集停止决策")
         if self._vision is None:
             self._vision = TileVision(template_dir=_TEMPLATE_DIR)
@@ -407,10 +426,11 @@ class TeaBot:
         png = screenshot if screenshot is not None else self._shot()
         vision_ids = self.vision_fn(png)
         engine_ids = vision_hand_to_engine(vision_ids)
-        # 张数守恒：暗手 + 副露实际张数（吃/碰3张、杠4张）∈ {16,17}。
-        # 用各组真实张数而不是 3×组数，明杠/暗杠才不会被误拒。
-        meld_total = sum(len(g) for g in self.meld_groups)
-        expected = (16 - meld_total, 17 - meld_total)
+        # 张数守恒按逻辑位：每组副露（含杠）只占一个面子=3 逻辑位。
+        # 杠的第 4 张不回灌、不额外扣暗手；等待=16-3n，刚摸=17-3n。
+        concealed_wait = expected_concealed_count(melds=self.meld_groups, drawn=False)
+        concealed_turn = expected_concealed_count(melds=self.meld_groups, drawn=True)
+        expected = (concealed_wait, concealed_turn)
         if len(engine_ids) not in expected:
             raise ValueError(f"暗手应为{expected[0]}或{expected[1]}张，识别到{len(engine_ids)}张")
         validate_tiles(engine_ids, caishen_id=self.caishen_id,
@@ -425,9 +445,9 @@ class TeaBot:
         result = ThinkResult(hand=list(hand), n_tiles=n, shanten=99,
                              is_hu=False)
 
-        meld_total = sum(len(g) for g in self.meld_groups)
-        concealed_wait = 16 - meld_total
-        concealed_turn = concealed_wait + 1
+        # 与 see()/validate_tiles 同一套逻辑位：杠也只占 3，不按实物 4 扣暗手。
+        concealed_wait = expected_concealed_count(melds=self.meld_groups, drawn=False)
+        concealed_turn = expected_concealed_count(melds=self.meld_groups, drawn=True)
         if n not in (concealed_wait, concealed_turn):
             raise ValueError(f"暗手应为{concealed_wait}或{concealed_turn}张，得到{n}张")
         validate_tiles(hand, caishen_id=self.caishen_id,
