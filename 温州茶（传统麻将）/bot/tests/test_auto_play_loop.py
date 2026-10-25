@@ -928,6 +928,20 @@ def test_runner_defaults_to_dry_run_and_needs_both_switches(tmp_path):
     assert runner.resolve_caishen("w1") == "w1"
 
 
+def test_event_callback_is_observer_only_and_request_stop_is_logged(tmp_path):
+    seen = []
+    loop, *_ = make_loop(
+        tmp_path, enabled=False,
+        event_callback=lambda event, analysis: seen.append((event, analysis)))
+    loop.request_stop("UI stop")
+    summary = loop.run()
+
+    assert summary["stopped"] is True
+    assert summary["stop_reason"] == "UI stop"
+    assert seen and seen[-1][0]["event"] == "stop"
+    assert seen[-1][0]["gate"] == "user_stop"
+
+
 def test_runner_exits_nonzero_when_adb_missing(tmp_path, capsys):
     """自检不过：非零退出码，且一帧都不抓（离线，不需要设备）。"""
     import run_auto_play_dev as runner

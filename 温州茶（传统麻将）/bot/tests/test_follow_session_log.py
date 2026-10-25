@@ -37,7 +37,9 @@ def test_embedded_panel_shows_empty_state(tmp_path: Path):
         assert log.compact is True
         body = log.text.get("1.0", "end")
         assert "暂无" in body or FOLLOW_SESSION_FILENAME in body
-        assert str(CLAIM_TAP_CHANNEL_READY) in log.status_var.get()
+        assert "绿=已验证" in log.status_var.get()
+        assert log._collapsed is False
+        assert log._body_frame.winfo_manager() == "pack"
         log.stop()
     finally:
         root.destroy()
@@ -47,11 +49,6 @@ def test_embedded_panel_tails_jsonl(tmp_path: Path):
     root = _tk_root()
     try:
         target = tmp_path / FOLLOW_SESSION_FILENAME
-        # read_follow_lines expects formatted human lines OR uses format_follow_line
-        # Write pre-formatted display lines the reader will return as-is if not JSON?
-        # Actually read_follow_lines parses JSONL and formats — use real records via format helpers.
-        from session_logger import format_follow_line
-
         rows = [
             {"schema": "follow_session/v1", "type": "header"},
             {
@@ -78,7 +75,7 @@ def test_embedded_panel_tails_jsonl(tmp_path: Path):
         body = log.text.get("1.0", "end")
         # At least empty-state replaced; formatted lines or raw presence
         assert body.strip()
-        assert f"CLAIM_TAP_CHANNEL_READY={CLAIM_TAP_CHANNEL_READY}" in log.status_var.get()
+        assert "绿=已验证" in log.status_var.get()
         log.stop()
     finally:
         root.destroy()
@@ -95,26 +92,29 @@ def test_detached_toplevel_still_works(tmp_path: Path):
     finally:
         root.destroy()
 
-def test_embedded_panel_starts_collapsed_and_toggles(tmp_path: Path):
-    """Compact strip stays folded by default so the 1100x740 contract fits."""
+def test_embedded_panel_is_permanently_visible(tmp_path: Path):
+    """Operational log remains visible; the old collapse control is gone."""
     root = _tk_root()
     try:
         frame = ttk.LabelFrame(root, text="log")
         frame.pack(fill="both", expand=True)
         log = FollowSessionLog(root, tmp_path, container=frame, compact=True)
-        assert log._collapsed is True
-        assert log._collapse_btn is not None
-        assert "展开" in log._collapse_btn.cget("text")
-        # Withdrawn Tk roots make winfo_ismapped unreliable; use pack manager.
-        assert log._body_frame.winfo_manager() == ""
+        assert log._collapsed is False
+        assert log._collapse_btn is None
+        assert log._body_frame.winfo_manager() == "pack"
         log._toggle_collapsed()
         assert log._collapsed is False
         root.update_idletasks()
         assert log._body_frame.winfo_manager() == "pack"
-        assert "折叠" in log._collapse_btn.cget("text")
-        # still scrollable when expanded
+        # still scrollable in the permanent console
         assert int(log.text.cget("height")) == FollowSessionLog.EMBED_TEXT_HEIGHT
         log.stop()
     finally:
         root.destroy()
+
+
+def test_log_line_colors_are_semantic():
+    assert FollowSessionLog._line_level("evt=action gate=ready") == "ok"
+    assert FollowSessionLog._line_level("evt=idle abstain=hand") == "wait"
+    assert FollowSessionLog._line_level("evt=stop stop=gate") == "error"
 

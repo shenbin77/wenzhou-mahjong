@@ -283,6 +283,7 @@ class AutoPlayLoop:
         read_discards: bool = True,
         discard_key: str | None = None,
         discard_fn: Callable[[np.ndarray], Any] | None = None,
+        event_callback: Callable[[dict, dict | None], None] | None = None,
     ) -> None:
         if not isinstance(enabled, bool):
             raise TypeError("enabled 必须是显式 bool；True 才允许真实点击")
@@ -307,6 +308,10 @@ class AutoPlayLoop:
         self._round_key = round_key_fn or self._default_round_key
         self._sleep = sleep_fn or time.sleep
         self._clock = clock_fn or time.monotonic
+        # UI observer only: receives a copy after the append-only ledgers are
+        # safely written.  Callback failures must never affect the play loop.
+        self._event_callback = event_callback
+        self._stop_requested_reason: str | None = None
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
         self.session_dir = Path(session_dir) if session_dir else DEV_ROOT / stamp
@@ -507,6 +512,21 @@ class AutoPlayLoop:
         # Structured follow-session row for post-hoc debug (no taps).
         analysis = self._last_result if isinstance(self._last_result, dict) else None
         self._follow_log.append(event, tick=self.tick_index, analysis=analysis)
+        if self._event_callback is not None:
+            try:
+                self._event_callback(dict(event),
+                                     dict(analysis) if analysis is not None else None)
+            except Exception:  # noqa: BLE001 - UI/observer must not break autoplay
+                pass
+
+    def request_stop(self, reason: str = "用户停止全自动代打") -> None:
+        """Request a graceful stop at the next loop boundary.
+
+        This is intentionally not a forceful process kill: any in-flight tap
+        keeps its normal post-click verification, then the loop records a
+        terminal ``user_stop`` event before returning.
+        """
+        self._stop_requested_reason = str(reason or "用户停止全自动代打")
 
     def _save_frame(self, raw: bytes, tag: str) -> Path:
         self._ensure_dirs()
@@ -2084,6 +2104,9 @@ class AutoPlayLoop:
         self.check_gates()
         began = self._clock()
         while not self.stopped:
+            if self._stop_requested_reason:
+                self._stop("user_stop", self._stop_requested_reason)
+                break
             try:
                 self.tick()
             except Exception as exc:  # noqa: BLE001 - 先落台账，再保留原异常语义
@@ -2094,6 +2117,9 @@ class AutoPlayLoop:
                 )
                 raise
             if self.stopped:
+                break
+            if self._stop_requested_reason:
+                self._stop("user_stop", self._stop_requested_reason)
                 break
             if self.actions_done >= self.max_actions:
                 self._stop("max_actions", f"达到 --max-actions={self.max_actions}")

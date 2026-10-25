@@ -26,7 +26,7 @@ class FollowSessionLog:
     REFRESH_MS = 800
     LINE_LIMIT = 250
     EMBED_LINE_LIMIT = 80
-    EMBED_TEXT_HEIGHT = 3
+    EMBED_TEXT_HEIGHT = 7
 
     def __init__(
         self,
@@ -53,7 +53,9 @@ class FollowSessionLog:
         # Sentinel so first refresh paints empty-state when no jsonl yet.
         self._last_signature = object()
         self._detach_callback = None
-        self._collapsed = True  # compact embed starts folded to keep 1100x740
+        # The embedded log is a permanent operational console.  It never
+        # collapses: account/stage/errors must remain visible during play.
+        self._collapsed = False
         self._body_frame = None
         self._path_label_widget = None
         self._status_label_widget = None
@@ -92,20 +94,14 @@ class FollowSessionLog:
                 side="left", padx=4
             )
         else:
-            ttk.Button(controls, text="清空", command=self.clear_view).pack(
-                side="left", padx=4
-            )
             ttk.Button(
                 controls, text="弹出完整窗口", command=self._request_detach
             ).pack(side="left", padx=4)
-            self._collapse_btn = ttk.Button(
-                controls, text="展开日志", command=self._toggle_collapsed
-            )
-            self._collapse_btn.pack(side="left", padx=4)
         ttk.Label(
             controls,
-            text=f"CLAIM通道={CLAIM_TAP_CHANNEL_READY}",
-            foreground="#888888",
+            text=("自动动作通道：已就绪" if CLAIM_TAP_CHANNEL_READY
+                  else "自动动作通道：未就绪"),
+            foreground=("#146c2e" if CLAIM_TAP_CHANNEL_READY else "#c62828"),
         ).pack(side="right")
 
         wrap = 720 if self.compact else 760
@@ -137,6 +133,10 @@ class FollowSessionLog:
             self._body_frame, orient="horizontal", command=self.text.xview
         )
         self.text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.text.tag_configure("ok", foreground="#66d17a")
+        self.text.tag_configure("wait", foreground="#f0b24a")
+        self.text.tag_configure("error", foreground="#ff6b6b")
+        self.text.tag_configure("normal", foreground="#e8e8e8")
         self.text.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
@@ -153,10 +153,8 @@ class FollowSessionLog:
             self._apply_collapsed()
 
     def _toggle_collapsed(self) -> None:
-        """Fold/unfold the embedded log body so the 1100x740 contract stays intact."""
-        if not self.compact:
-            return
-        self._collapsed = not self._collapsed
+        """Compatibility no-op: the embedded operational log stays visible."""
+        self._collapsed = False
         self._apply_collapsed()
 
     def _apply_collapsed(self) -> None:
@@ -168,31 +166,14 @@ class FollowSessionLog:
         btn = self._collapse_btn
         if body is None:
             return
-        if self._collapsed:
-            try:
-                body.pack_forget()
-            except tk.TclError:
-                pass
-            if path is not None:
-                try:
-                    path.pack_forget()
-                except tk.TclError:
-                    pass
-            if status is not None:
-                try:
-                    status.pack_forget()
-                except tk.TclError:
-                    pass
-            if btn is not None:
-                btn.configure(text="展开日志")
-        else:
-            if path is not None:
-                path.pack(fill="x", padx=6)
-            body.pack(fill="both", expand=True)
-            if status is not None:
-                status.pack(fill="x", padx=6, pady=(0, 4))
-            if btn is not None:
-                btn.configure(text="折叠日志")
+        self._collapsed = False
+        if path is not None:
+            path.pack(fill="x", padx=6)
+        body.pack(fill="both", expand=True)
+        if status is not None:
+            status.pack(fill="x", padx=6, pady=(0, 4))
+        if btn is not None:
+            btn.pack_forget()
 
     def set_detach_callback(self, callback) -> None:
         """Optional: More-menu / 弹出完整窗口 opens the detached viewer."""
@@ -253,24 +234,24 @@ class FollowSessionLog:
                 signature = None
         if signature != self._last_signature:
             self._last_signature = signature
-            body = "\n".join(lines)
             self.text.configure(state="normal")
             self.text.delete("1.0", "end")
-            if body:
-                self.text.insert("1.0", body + "\n")
+            if lines:
+                for line in lines:
+                    self.text.insert("end", line + "\n", self._line_level(line))
             else:
                 self.text.insert(
                     "1.0",
                     "（暂无门控/弃权/决策行。开始自动对局或跟随后，"
                     f"{FOLLOW_SESSION_FILENAME} 有内容时会显示在这里。）\n",
+                    "wait",
                 )
             self.text.configure(state="disabled")
             if self.follow.get():
                 self.text.see("end")
             count = len(lines)
-            ready = CLAIM_TAP_CHANNEL_READY
             self.status_var.set(
-                f"已显示最近 {count} 行 · CLAIM_TAP_CHANNEL_READY={ready} · 只读"
+                f"已显示最近 {count} 行 · 绿=已验证/正常 · 橙=等待/弃权 · 红=停手/错误"
             )
         if self.timer is not None:
             try:
@@ -281,6 +262,19 @@ class FollowSessionLog:
             self.timer = self.host.after(self.REFRESH_MS, self.refresh)
         except tk.TclError:
             self.timer = None
+
+    @staticmethod
+    def _line_level(line: str) -> str:
+        """Map operational meaning to color without changing stored evidence."""
+        text = str(line).lower()
+        if ("stop=" in text or "error" in text or "failed" in text
+                or "aborted" in text or "unhandled_exception" in text):
+            return "error"
+        if "evt=action" in text or "evt=invitation_declined" in text:
+            return "ok"
+        if "abstain=" in text or "evt=idle" in text or "gate=wait" in text:
+            return "wait"
+        return "normal"
 
     def stop(self) -> None:
         """Cancel refresh timer without destroying an embedded host frame."""

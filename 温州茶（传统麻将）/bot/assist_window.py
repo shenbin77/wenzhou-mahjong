@@ -1,9 +1,10 @@
-"""One compact, always-on-top viewer for Wenzhou tea 2/4 and Shu 4.
+"""Single front end for recommendation follow and explicitly armed autoplay.
 
-Read-only: no click, no key event, no emulator input.  Display and recording
-are decoupled: every processed frame is rendered immediately, while the
-``AssistRecorder`` keeps its own stable-frame state machine and frozen
-SPEC-002 JSONL contract.
+``开始跟随`` is read-only observation/recommendation.  ``开启全自动代打`` is
+the separate hand-off to the guarded ``AutoPlayLoop`` and is currently limited
+to the development target (tea 2-player; full-match acceptance is pending).
+Both paths keep immutable
+evidence; neither ever clicks start-game, payment, leave-table or settlement UI.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from queue import Empty, Queue
 from threading import Event
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -25,11 +27,11 @@ from PIL import Image, ImageTk
 import cv2
 import numpy as np
 
-from assist_shu import analyze_shu_manual_hand, import_shu_and_analyze
-from assist_tea import analyze_manual_hand, import_and_analyze
+from assist_shu import analyze_shu_manual_hand
+from assist_tea import analyze_manual_hand
 from caishen_vision import detect_caishen
 from harvest_tea import DEFAULT_SERIAL
-from live_capture import (LiveCapture, analyze_bytes, capture_result,
+from live_capture import (LiveCapture, capture_result,
                           session_folder, save_frame)
 from live_state import (BASE_INTERVAL_MS, FrameTiming, LatencyTracker,
                         LiveRefreshState, describe_age)
@@ -37,7 +39,6 @@ from recognition_audit import (append_frame_event, build_frame_event,
                                read_appended_events)
 from recognition_review import FLAG_NAMES, draw_recognition_boxes
 from recorder import AssistRecorder
-from tap_executor import TapAborted, TapExecutor
 from tea_bot import tile_name, vision_to_engine
 from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
@@ -47,8 +48,8 @@ TEA_ROOT = Path(__file__).resolve().parent.parent
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "温州麻将辅助器.ico"
 LAST_ACCOUNT_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".last_account"
 WINDOW_STATE_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".window_state.json"
-DEFAULT_SIZE = (1100, 740)
-SIZE_RANGE = {"w": (840, 1600), "h": (600, 1200)}
+DEFAULT_SIZE = (1180, 860)
+SIZE_RANGE = {"w": (900, 1600), "h": (760, 1200)}
 STALE_SECONDS = 3.0
 OFFLINE_SOURCES = {"offline_preflight", "imported_image", "mp4_1fps", "manual_correction"}
 OFFLINE_NOTICES = {
@@ -197,7 +198,7 @@ def clamp_geometry(x: int, y: int, width: int, height: int,
 class TeaAssistWindow:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("温州麻将辅助器 · 实时跟随（只读）")
+        root.title("温州麻将辅助器 · 推荐跟随 / 全自动代打")
         if ICON_PATH.is_file():
             root.iconbitmap(str(ICON_PATH))
         state = load_window_state()
@@ -224,6 +225,7 @@ class TeaAssistWindow:
             datetime.now().strftime("%Y%m%d_%H%M%S")
         )
         self.executor = ThreadPoolExecutor(max_workers=1)
+        self.auto_executor = ThreadPoolExecutor(max_workers=1)
         self.future: Future | None = None
         self.video_future: Future | None = None
         self.video_stop = Event()
@@ -247,14 +249,19 @@ class TeaAssistWindow:
         self.refresh = LiveRefreshState()
         self.latency_log: list[dict] = []
         self.images: dict[str, ImageTk.PhotoImage] = {}
-        # 半自动代点（单次点击）：默认完全关闭，见 _build 的 tap_panel。
-        self.tap_armed = tk.BooleanVar(value=False)
-        self.tap_status = tk.StringVar(
-            value="半自动代点：未启用（勾选后按空格或点按钮，每帧只点一张）")
-        self._tap_executor: TapExecutor | None = None
-        self._tap_future: Future | None = None
+        # Kept as a capture-loop guard; the obsolete one-shot semi-auto path
+        # was removed in favor of recommendation mode + explicit full auto.
         self._tap_pending = False
-        self._tap_frame_key: str | None = None
+        self.full_auto_running = False
+        self._auto_loop = None
+        self._auto_future: Future | None = None
+        self._auto_poll_timer: str | None = None
+        self._auto_events: Queue = Queue()
+        self.full_auto_status = tk.StringVar(
+            value="全自动未开启；先开始跟随核对推荐，再手动交给 BOT。")
+        self.bound_status = tk.StringVar(value="账号：未绑定 · 设备：未确认")
+        self.phase_status = tk.StringVar(value="阶段：尚未开始")
+        self.problem_status = tk.StringVar(value="状态：等待开始跟随")
 
         last_account = (LAST_ACCOUNT_PATH.read_text(encoding="utf-8").strip()
                         if LAST_ACCOUNT_PATH.is_file() else "")
@@ -269,7 +276,7 @@ class TeaAssistWindow:
         self.always_on_top = tk.BooleanVar(value=bool(state.get("topmost", True)))
         self.manual_caishen = tk.BooleanVar(value=False)
         self.actual_tile = tk.StringVar()
-        self.status = tk.StringVar(value="先选玩法并核对眼前牌局；填写账号标记后勾选“已核对本局玩法”会自动跟随。")
+        self.status = tk.StringVar(value="先选玩法并核对眼前牌局；填写账号标记并勾选后，再点“开始跟随”。")
         self.hand = tk.StringVar(value="手牌：—")
         self.suggestion = tk.StringVar(value="尚未开始")
         self.reason = tk.StringVar(value="离线预检结果不能用于当前对局。")
@@ -278,8 +285,9 @@ class TeaAssistWindow:
         self.period = tk.StringVar(value=f"周期 {BASE_INTERVAL_MS} ms")
         self.live_info = tk.StringVar(value="只读画面，不会代点；停止后最后一帧可能已过期。")
         self.preview_title = tk.StringVar(value="实时跟随 · 尚未开始")
-        self.preview_flags = tk.StringVar(value="可先点“离线预检”检查所选玩法；预检使用旧截图，不能用于当前对局。")
-        self.preview_meta = tk.StringVar(value="绿色=识牌预测；橙色=未识别；红色=建议牌。")
+        self.preview_flags = tk.StringVar(value="进入牌桌后点“开始跟随”；离线预检在“更多”中，仅检查旧截图。")
+        self.preview_meta = tk.StringVar(
+            value="状态色：绿=正常/已验证，橙=等待/需复核，红=停手/错误；牌框颜色仅表示识牌证据。")
         self.offline_notice = tk.StringVar(value="")
         self.hud_wall = tk.StringVar(value="余牌：未识别")
         self.hud_countdown = tk.StringVar(value="倒计时：未识别")
@@ -312,7 +320,7 @@ class TeaAssistWindow:
         )
         self.mode_choice.grid(row=0, column=1, padx=(2, 12), sticky="w")
         self.mode_choice.bind("<<ComboboxSelected>>", self._on_mode_change)
-        ttk.Label(controls, text="账号标记（必填）").grid(row=0, column=2, sticky="w")
+        ttk.Label(controls, text="绑定账号（本地标记）").grid(row=0, column=2, sticky="w")
         ttk.Entry(controls, textvariable=self.account, width=14).grid(
             row=0, column=3, padx=(2, 10), sticky="w")
         ttk.Checkbutton(
@@ -321,22 +329,37 @@ class TeaAssistWindow:
         ).grid(row=0, column=4, padx=2)
         self.start_button = ttk.Button(controls, text="开始跟随", command=self._toggle)
         self.start_button.grid(row=0, column=5, padx=4)
-        ttk.Button(controls, text="离线预检", command=self.preflight_selected_mode).grid(
-            row=0, column=6, padx=4)
         ttk.Button(controls, text="更多", width=5, command=self._open_menu).grid(
-            row=0, column=7, sticky="e")
-        controls.grid_columnconfigure(7, weight=1)
+            row=0, column=6, sticky="e")
+        controls.grid_columnconfigure(6, weight=1)
         ttk.Label(
             controls,
             text="“已核对本局玩法”只表示眼前牌局与所选玩法一致，不代表识牌或建议已核准；"
-                 "填写账号标记（仅本地记录）后才会自动跟随。",
+                 "填写账号标记（仅本地记录）后才可开始跟随。",
             foreground="#a55700", wraplength=1040,
-        ).grid(row=1, column=0, columnspan=8, sticky="w", pady=(3, 0))
+        ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(3, 0))
+
+        # Always-visible operational summary: identity, stage and the latest
+        # actionable problem.  Color is semantic, not decorative.
+        self.operational_strip = tk.Frame(self.root, bg="#f3f5f7", padx=8, pady=5)
+        self.operational_strip.pack(fill="x", padx=8, pady=(0, 4))
+        self.bound_label = tk.Label(
+            self.operational_strip, textvariable=self.bound_status,
+            bg="#f3f5f7", fg="#263238", anchor="w")
+        self.bound_label.pack(side="left", padx=(0, 18))
+        self.phase_label = tk.Label(
+            self.operational_strip, textvariable=self.phase_status,
+            bg="#f3f5f7", fg="#a55700", anchor="w")
+        self.phase_label.pack(side="left", padx=(0, 18))
+        self.problem_label = tk.Label(
+            self.operational_strip, textvariable=self.problem_status,
+            bg="#f3f5f7", fg="#a55700", anchor="w")
+        self.problem_label.pack(side="left", fill="x", expand=True)
 
         # Bottom strip: read-only follow_session.jsonl (gate/abstain/decision).
         # Pack before main so the strip stays at the window bottom.
         self.follow_log_frame = ttk.LabelFrame(
-            self.root, text="跟随会话日志 · 只读（可折叠）", padding=(4, 2)
+            self.root, text="运行日志 · 始终显示（阶段 / 动作 / 弃权 / 错误）", padding=(4, 2)
         )
         self.follow_log_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
 
@@ -350,7 +373,7 @@ class TeaAssistWindow:
                   foreground="#a55700", wraplength=550).pack(fill="x", pady=(2, 4))
         self.picture = ttk.Label(
             self.preview_panel,
-            text="尚未开始实时跟随。打牌前可先点“离线预检”检查保存样本。",
+            text="尚未开始。进入真实牌桌后点“开始跟随”；离线预检在“更多”中。",
             anchor="center", justify="center", wraplength=500,
         )
         self.picture.pack(fill="both", expand=True)
@@ -416,23 +439,20 @@ class TeaAssistWindow:
         self.advice_panel.pack(fill="x", padx=6, pady=(2, 0))
         self.advice_face = ttk.Label(self.advice_panel)
         self.advice_face.pack(anchor="w")
-        # 半自动代点：置顶窗口内一个大按钮 + 空格键，见 confirm_tap()。
+        # Full-auto is a separate, explicit hand-off after recommendation
+        # follow.  The previous one-shot/spacebar semi-auto is intentionally
+        # removed from the primary workflow.
         self.tap_panel = ttk.Frame(sidebar)
         self.tap_panel.pack(fill="x", padx=6, after=self.advice_panel)
-        self.tap_armed_check = ttk.Checkbutton(
-            self.tap_panel, text="允许代点（半自动）", variable=self.tap_armed,
-            command=self._on_tap_arm_toggle)
-        self.tap_armed_check.pack(side="left")
-        self.tap_button = ttk.Button(
-            self.tap_panel, text="确认出这张（空格）", width=16,
-            command=self.confirm_tap)
-        self.tap_button.pack(side="left", padx=4)
+        self.auto_button = ttk.Button(
+            self.tap_panel, text="开启全自动代打", width=18,
+            command=self._toggle_full_auto)
+        self.auto_button.pack(anchor="w")
         self.tap_status_label = ttk.Label(
-            self.tap_panel, textvariable=self.tap_status,
+            self.tap_panel, textvariable=self.full_auto_status,
             foreground="#555555", wraplength=360,
             font=("Microsoft YaHei UI", 9))
-        self.tap_status_label.pack(fill="x", padx=(4, 0))
-        self.root.bind("<space>", self._on_space)
+        self.tap_status_label.pack(fill="x", pady=(2, 0))
         self.candidate_face = ttk.Label(sidebar)
         self.candidate_face.pack(anchor="w", padx=6)
         self.latency_label = ttk.Label(sidebar, textvariable=self.latency,
@@ -441,27 +461,30 @@ class TeaAssistWindow:
 
         bottom = ttk.Frame(sidebar, padding=(6, 2))
         bottom.pack(side="bottom", fill="x")
-        ttk.Label(bottom, text="我实际打的牌").grid(row=0, column=0, padx=2)
+        ttk.Label(bottom, text="复盘纠错（可选）").grid(
+            row=0, column=0, columnspan=6, sticky="w", padx=2)
+        ttk.Label(bottom, text="实际出牌").grid(row=1, column=0, padx=2)
         self.actual_choice = ttk.Combobox(
             bottom, textvariable=self.actual_tile, state="readonly", width=11,
         )
-        self.actual_choice.grid(row=0, column=1, padx=2)
-        ttk.Button(bottom, text="可用", width=5,
-                   command=lambda: self.feedback("useful")).grid(row=0, column=2, padx=1)
-        ttk.Button(bottom, text="不对", width=5,
-                   command=lambda: self.feedback("wrong_advice")).grid(row=0, column=3, padx=1)
-        ttk.Button(bottom, text="识错", width=5,
-                   command=lambda: self.feedback("wrong_vision")).grid(row=0, column=4, padx=1)
-        ttk.Button(bottom, text="记录", width=5,
-                   command=self.open_folder).grid(row=0, column=5, padx=1)
+        self.actual_choice.grid(row=1, column=1, padx=2)
+        ttk.Button(bottom, text="建议可用", width=8,
+                   command=lambda: self.feedback("useful")).grid(row=1, column=2, padx=1)
+        ttk.Button(bottom, text="建议不对", width=8,
+                   command=lambda: self.feedback("wrong_advice")).grid(row=1, column=3, padx=1)
+        ttk.Button(bottom, text="识牌错误", width=8,
+                   command=lambda: self.feedback("wrong_vision")).grid(row=1, column=4, padx=1)
+        ttk.Button(bottom, text="打开记录", width=8,
+                   command=self.open_folder).grid(row=1, column=5, padx=1)
         ttk.Label(bottom, textvariable=self.live_info, wraplength=430,
                   font=("Microsoft YaHei UI", 8)).grid(
-            row=1, column=0, columnspan=6, sticky="w")
+            row=2, column=0, columnspan=6, sticky="w")
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="填入模拟器序列号", command=self._edit_serial)
         self.menu.add_command(label="账号", command=self._edit_account)
         self.menu.add_command(label="房间号", command=self._edit_room)
+        self.menu.add_command(label="离线预检（旧截图）", command=self.preflight_selected_mode)
         self.menu.add_checkbutton(label="窗口置顶", variable=self.always_on_top,
                                   command=self._set_always_on_top)
         self.caishen_menu = tk.Menu(self.menu, tearoff=0)
@@ -499,7 +522,8 @@ class TeaAssistWindow:
         self.embedded_follow_log = FollowSessionLog(
             self.root,
             self.session_dir,
-            search_roots=self._follow_log_search_roots(),
+            # Main window must never silently display an older session.
+            search_roots=[],
             container=self.follow_log_frame,
             compact=True,
         )
@@ -883,7 +907,7 @@ class TeaAssistWindow:
         if picture is not None and hasattr(picture, "configure"):
             picture.configure(image="")
             if isinstance(picture, ttk.Label):
-                picture.configure(text="等待新画面；可先做离线预检。")
+                picture.configure(text="等待新画面；离线预检在“更多”中。")
         images = getattr(self, "images", None)
         if images is not None:
             images.pop("preview", None)
@@ -902,6 +926,11 @@ class TeaAssistWindow:
         self._reset_round_display("已切换玩法，请重新核对本局")
         self.status.set(
             "已切换玩法；“已核对本局玩法”已取消。请核对眼前牌局后重新勾选。")
+        if getattr(self, "auto_button", None) is not None:
+            state = "normal" if self._mode_key() == "tea_2p" else "disabled"
+            self.auto_button.configure(state=state)
+        self._set_operational_status(
+            "待核对", "玩法已切换，等待重新核对", level="wait")
 
     def _on_confirm(self) -> None:
         if not self.confirm_mode.get():
@@ -917,7 +946,9 @@ class TeaAssistWindow:
             self.status.set(
                 "已核对玩法，但账号标记为空；填写后才会自动跟随（仅本地记录）。")
             return
-        self._maybe_autostart()
+        self.status.set("玩法已核对；点击“开始跟随”进入实时推荐。")
+        self._set_operational_status(
+            "已核对", "可以开始推荐跟随", level="ok")
 
     def _on_manual_caishen(self) -> None:
         if not self.manual_caishen.get():
@@ -991,7 +1022,32 @@ class TeaAssistWindow:
         except ValueError as exc:
             self.status.set(str(exc))
             return False
+        bound_status = getattr(self, "bound_status", None)
+        serial = getattr(self, "serial", None)
+        if bound_status is not None:
+            bound_status.set(
+                f"账号：{account.get().strip() if account is not None else '未绑定'} · "
+                f"设备：{serial.get().strip() if serial is not None else '未填写'}")
         return True
+
+    def _set_operational_status(self, phase: str, problem: str,
+                                *, level: str = "wait") -> None:
+        """Update the fixed identity/stage/problem strip with semantic color."""
+        if not all(hasattr(self, name) for name in (
+                "bound_status", "phase_status", "problem_status")):
+            return
+        account = self.account.get().strip() if hasattr(self, "account") else ""
+        serial = self.serial.get().strip() if hasattr(self, "serial") else ""
+        self.bound_status.set(
+            f"账号：{account or '未绑定'} · 设备：{serial or '未确认'}")
+        self.phase_status.set(f"阶段：{phase}")
+        self.problem_status.set(f"状态：{problem}")
+        colors = {"ok": "#146c2e", "wait": "#a55700", "error": "#c62828"}
+        color = colors.get(level, colors["wait"])
+        for widget in (getattr(self, "phase_label", None),
+                       getattr(self, "problem_label", None)):
+            if widget is not None:
+                widget.configure(fg=color)
 
     def _context(self) -> tuple:
         caishen = getattr(self, "caishen", None)
@@ -1072,17 +1128,8 @@ class TeaAssistWindow:
         self.recorder_timer = self.root.after(500, self._poll_recorder)
 
     def _maybe_autostart(self) -> None:
-        """开窗完成前置输入后，自动进入连续观察（仍受账号/玩法门禁约束）。"""
-        if getattr(self, "_autostart_done", False) or self.continuous:
-            return
-        account = getattr(self, "account", None)
-        confirm = getattr(self, "confirm_mode", None)
-        if account is None or not account.get().strip():
-            return
-        if confirm is None or not confirm.get():
-            return
-        self._autostart_done = True
-        self.start()
+        """Do not auto-start: recommendation and autoplay need explicit clicks."""
+        return
 
     def _record_result(self, result: dict) -> dict | None:
         recorder = self._ensure_recorder()
@@ -1099,6 +1146,9 @@ class TeaAssistWindow:
 
     # -- continuous refresh ---------------------------------------------
     def _toggle(self) -> None:
+        if getattr(self, "full_auto_running", False):
+            self._stop_full_auto()
+            return
         if self.continuous:
             self.stop()
         else:
@@ -1147,6 +1197,14 @@ class TeaAssistWindow:
         self.live_info.set(
             f"实时跟随中：只读画面，不会代点；已写入 {log_path}"
         )
+        full_auto_status = getattr(self, "full_auto_status", None)
+        if full_auto_status is not None:
+            full_auto_status.set(
+                "推荐跟随已启动；确认识牌和建议正常后，可开启全自动代打。")
+        set_operational = getattr(self, "_set_operational_status", None)
+        if callable(set_operational):
+            set_operational(
+                "实时推荐", "正常观察中；尚未授权 BOT 点击", level="ok")
         title = getattr(self, "preview_title", None)
         if title is not None:
             title.set("实时跟随 · 等待当前画面")
@@ -1156,6 +1214,8 @@ class TeaAssistWindow:
         self._schedule(0)
 
     def stop(self) -> None:
+        if getattr(self, "full_auto_running", False):
+            self._stop_full_auto()
         stopped_live = (
             self.continuous and getattr(self, "display_source", None) == "live")
         self.continuous = False
@@ -1172,6 +1232,11 @@ class TeaAssistWindow:
                 "连续观察已停止；上方是最后一帧，可能已过期，不能用于当前出牌。")
         if stopped_live:
             self._invalidate_live_advice()
+        set_operational = getattr(self, "_set_operational_status", None)
+        if (not getattr(self, "full_auto_running", False)
+                and callable(set_operational)):
+            set_operational(
+                "已停止", "没有自动点击；最后一帧已作废", level="wait")
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None
@@ -1420,12 +1485,27 @@ class TeaAssistWindow:
             update_hud(result, state)
         self._update_latency_bar()
         initial = self.actual_choice.get() == ""
-        self.actual_choice["values"] = sorted(
-            {label for label in state.hand_labels if label})
-        if initial:
+        actual_values = sorted({label for label in state.hand_labels if label})
+        self.actual_choice["values"] = actual_values
+        if not initial and self.actual_tile.get() not in actual_values:
             self.actual_tile.set("")
+        if getattr(self, "full_auto_running", False):
+            phase = "全自动代打"
         else:
-            self.actual_tile.set("")
+            phase = "实时推荐"
+        set_operational = getattr(self, "_set_operational_status", None)
+        if callable(set_operational):
+            if result.get("status") == "advise" and state.actionable:
+                set_operational(
+                    phase, f"建议：打 {state.suggestion}", level="ok")
+            elif result.get("status") in {"error", "stopped"}:
+                set_operational(
+                    "安全停手", str(result.get("reason") or "识别/管线异常"),
+                    level="error")
+            else:
+                set_operational(
+                    phase, str(result.get("reason") or state.reason or "等待稳定证据"),
+                    level="wait")
         self._refresh_view(state)
 
     def _render_live_frame(self, result: dict) -> None:
@@ -1451,7 +1531,7 @@ class TeaAssistWindow:
         self.preview_meta.set(
             f"{event.get('mode', '')} · {event.get('at', '')} · "
             f"{len(event.get('diagnostics') or [])} 个识牌区域"
-            " · 绿=预测，橙=未识别，红=建议")
+            " · 牌框：绿=预测，橙=未识别，红=当前建议")
         set_notice = getattr(self, "_set_offline_notice", None)
         if set_notice is not None:
             set_notice()
@@ -1629,7 +1709,7 @@ class TeaAssistWindow:
                 }
         if not isinstance(display, dict):
             # Offline / one-shot / pipeline miss: light HUD only (no jsonl).
-            from assist_hud import build_follow_hud, load_result_bgr
+            from assist_hud import build_follow_hud
             from follow_pipeline import format_frame_facts_display, build_frame_facts
             from table_state import build_table_state
             # Offline: do not re-run countdown CV (keeps preflight snappy under suite load).
@@ -1740,7 +1820,7 @@ class TeaAssistWindow:
         offline = getattr(self, "display_source", None) in OFFLINE_SOURCES
         actionable = state.actionable and not offline
         self.advice_label.configure(foreground="#146c2e" if actionable else "#9a9a9a")
-        self.info_label.configure(foreground="#555555" if actionable else "#c62828")
+        self.info_label.configure(foreground="#146c2e" if actionable else "#a55700")
         self._refresh_caishen_rows(show=self._mode_key().startswith("tea_"))
 
     def _refresh_caishen_rows(self, show: bool) -> None:
@@ -1964,107 +2044,178 @@ class TeaAssistWindow:
         self._show(result, time.perf_counter())
         self.status.set(f"已按修正手牌重算（{outcome['elapsed']:.2f} 秒）。")
 
-    # -- 半自动代点（单次点击，人工确认后才执行） ------------------------
-    def _on_tap_arm_toggle(self) -> None:
-        if self.tap_armed.get():
-            self.tap_status.set(
-                "已允许代点：出现绿色建议后按空格或点“确认出这张”，每帧只点一张。")
-            self.tap_status_label.configure(foreground="#a55700")
+    # -- explicit full-auto hand-off -----------------------------------
+    def _toggle_full_auto(self) -> None:
+        if self.full_auto_running:
+            self._stop_full_auto()
         else:
-            self.tap_status.set("已关闭代点：本窗口回到纯只读状态。")
-            self.tap_status_label.configure(foreground="#555555")
+            self._start_full_auto()
 
-    def _on_space(self, event) -> str | None:
-        """空格 = 点一次“确认出这张”；输入框聚焦时不拦截。"""
-        if not self.tap_armed.get():
-            return None
-        try:
-            focus = self.root.focus_get()
-        except (KeyError, tk.TclError):
-            focus = None
-        if isinstance(focus, (tk.Entry, ttk.Entry, ttk.Combobox)):
-            return None
-        self.confirm_tap()
-        return "break"
+    def _start_full_auto(self) -> None:
+        """Hand the current tea-2p table to the guarded continuous BOT."""
+        if self._mode_key() != "tea_2p":
+            self.full_auto_status.set("全自动目前只开放温州茶 2 人；该玩法保持推荐模式。")
+            self._set_operational_status(
+                "推荐模式", "当前玩法未完成全自动实机验收", level="wait")
+            return
+        if not self.continuous:
+            self.full_auto_status.set("请先点“开始跟随”，核对实时识牌和推荐后再开启全自动。")
+            self._set_operational_status(
+                "等待推荐", "尚未启动实时跟随，拒绝交出点击权", level="error")
+            return
+        if not self._ready():
+            self._set_operational_status(
+                "门禁拦截", self.status.get(), level="error")
+            return
 
-    def _tap_target_result(self) -> dict | None:
-        """只允许对实时、新鲜、有完整建议的 advise 帧代点。"""
-        result = self.current or {}
-        if self.display_source in OFFLINE_SOURCES:
-            return None
-        if not self.continuous or self._tap_pending:
-            return None
-        if result.get("status") != "advise":
-            return None
-        if not result.get("suggestion_id") or not result.get("suggested_boxes"):
-            return None
-        return result
-
-    def confirm_tap(self) -> None:
-        """人工确认入口：对当前这一帧的建议牌执行一次受控点击。"""
-        if self._tap_pending:
-            self.tap_status.set("上一次点击还在验证中，请等待结果。")
-            return
-        result = self._tap_target_result()
-        if result is None:
-            self.tap_status.set("当前没有可执行的建议（需要实时 advise 帧）。")
-            return
-        if not self.tap_armed.get():
-            self.tap_status.set("先勾选“允许代点（半自动）”，再按空格确认。")
-            return
-        mode = str(result.get("mode") or self._mode_key())
-        if not mode.startswith("tea_"):
-            self.tap_status.set("代点目前只支持温州茶局面。")
-            return
-        frame_key = (f"{result.get('image') or result.get('frame_path')}"
-                     f"#{result.get('captured_at')}")
-        if frame_key == self._tap_frame_key:
-            self.tap_status.set("这一帧已经执行过代点；等待下一帧建议。")
-            return
+        account = self.account.get().strip()
         serial = self.serial.get().strip()
-        if not serial:
-            self.tap_status.set("先在“更多”里填写模拟器序列号，才能代点。")
-            return
-        if self._tap_executor is None or self._tap_executor.serial != serial:
-            # enabled=True 只由这行代码显式传入；勾选框本身不碰执行器开关。
-            self._tap_executor = TapExecutor(
-                enabled=True, adb_path=DEFAULT_ADB_PATH, serial=serial)
-        # 放在 if 外面：执行器会被复用，而会话目录每局都会变。这样 tap 证据
-        # 落进当前这一局的会话目录，而不是执行器第一次被造出来时的那一局。
-        self._tap_executor.session_dir = self.session_dir
-        self._tap_frame_key = frame_key
-        self._tap_pending = True
-        self.tap_status.set("正在重新截屏并核对建议牌……")
-        self.tap_status_label.configure(foreground="#a55700")
-        self._tap_future = self.executor.submit(
-            self._tap_executor.execute, dict(result))
-        self.root.after(80, self._poll_tap)
+        safe_account = "".join(ch for ch in account if ch.isalnum())[:16] or "account"
+        safe_serial = "".join(ch for ch in serial if ch.isalnum())[-12:] or "device"
+        auto_session = (
+            TEA_ROOT / "采集" / "dev_auto_play" /
+            f"ui_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_serial}_{safe_account}"
+        )
 
-    def _poll_tap(self) -> None:
-        future = self._tap_future
-        if future is None:
+        # Stop the duplicate read-only ADB capture before the BOT takes over.
+        # The BOT's own analyzed frames are streamed back through _auto_events.
+        self.stop()
+        from action_policy import recommended_runner_config
+        from auto_play_loop import AutoPlayLoop
+
+        self._auto_loop = AutoPlayLoop(
+            enabled=True,
+            serial=serial,
+            adb_path=DEFAULT_ADB_PATH,
+            mode="tea_2p",
+            caishen_label="",
+            session_dir=auto_session,
+            max_actions=5000,
+            duration_s=12 * 60 * 60,
+            interval_s=1.2,
+            claim_auto_click=True,
+            claim_policy=recommended_runner_config(
+                auto_click_enabled=True, include_chi=True),
+            event_callback=lambda event, analysis: self._auto_events.put(
+                (event, analysis)),
+        )
+        self.session_dir = auto_session
+        self.full_auto_running = True
+        self._auto_future = self.auto_executor.submit(self._auto_loop.run)
+        self.start_button.configure(text="停止全部")
+        self.auto_button.configure(text="关闭全自动（仅推荐）")
+        self.full_auto_status.set(
+            "全自动已接管：出牌、过和安全鸣牌会自动执行；证据不足立即弃权或停手。")
+        self.live_info.set(
+            "BOT 接管中；绝不点击开始游戏、结算、离桌、充值或分享。")
+        self._set_operational_status(
+            "全自动代打", "正在做启动门禁自检", level="wait")
+        for attr in ("embedded_follow_log", "follow_session_log"):
+            viewer = getattr(self, attr, None)
+            if viewer is not None:
+                viewer.session_dir = auto_session
+                viewer.path = self._auto_loop.follow_log_path
+                viewer._last_signature = None
+        self._auto_poll_timer = self.root.after(150, self._poll_full_auto)
+
+    def _stop_full_auto(self) -> None:
+        loop = getattr(self, "_auto_loop", None)
+        if loop is not None:
+            loop.request_stop("用户在辅助器中关闭全自动代打")
+        self.full_auto_status.set("正在安全停手：若有点击正在验证，会先完成验证再退出。")
+        self._set_operational_status(
+            "正在停手", "等待当前动作验证完成", level="wait")
+        if getattr(self, "auto_button", None) is not None:
+            self.auto_button.configure(state="disabled")
+
+    def _poll_full_auto(self) -> None:
+        self._auto_poll_timer = None
+        while True:
+            try:
+                event, analysis = self._auto_events.get_nowait()
+            except Empty:
+                break
+            try:
+                self._on_auto_event(event, analysis)
+            except Exception as exc:  # noqa: BLE001 - UI must not break BOT
+                self._set_operational_status(
+                    "界面异常", f"BOT 仍按台账运行；界面刷新失败：{exc}",
+                    level="error")
+
+        future = self._auto_future
+        if future is not None and future.done():
+            self._auto_future = None
+            self.full_auto_running = False
+            self._auto_loop = None
+            self.start_button.configure(text="开始跟随")
+            self.auto_button.configure(text="开启全自动代打", state="normal")
+            try:
+                summary = future.result()
+            except Exception as exc:  # noqa: BLE001 - surface and keep stopped
+                self.full_auto_status.set(f"全自动启动/运行失败：{exc}")
+                self._set_operational_status(
+                    "已停手", f"全自动异常：{exc}", level="error")
+                return
+            reason = summary.get("stop_reason") or "运行已结束"
+            user_stop = "用户" in reason
+            self.full_auto_status.set(
+                f"全自动已停止；已验证动作 {summary.get('actions', 0)} 次。{reason}")
+            self._set_operational_status(
+                "已停手", reason, level="wait" if user_stop else "error")
             return
-        if not future.done():
-            self.root.after(80, self._poll_tap)
-            return
-        self._tap_future = None
-        self._tap_pending = False
-        try:
-            outcome = future.result()
-        except TapAborted as exc:
-            self.tap_status.set(f"❌ 已中止，未重试：{exc}")
-            self.tap_status_label.configure(foreground="#c62828")
-            self.status.set(f"代点中止：{exc}")
-            return
-        except Exception as exc:  # noqa: BLE001 - report, never crash the window
-            self.tap_status.set(f"❌ 代点出错：{exc}")
-            self.tap_status_label.configure(foreground="#c62828")
-            return
-        x, y = outcome["tap"]
-        self.tap_status.set(
-            f"✅ 已点出 {outcome['tile']} @({x},{y})，"
-            f"手牌 {outcome['before_count']}→{outcome['after_count']}，验证通过。")
-        self.tap_status_label.configure(foreground="#146c2e")
+        if self.full_auto_running:
+            self._auto_poll_timer = self.root.after(200, self._poll_full_auto)
+
+    def _on_auto_event(self, event: dict, analysis: dict | None) -> None:
+        """Render BOT evidence and update fixed stage/problem status."""
+        kind = str(event.get("event") or "idle")
+        reason = str(event.get("reason") or "")
+        if event.get("round_seq"):
+            self.round_no = int(event["round_seq"])
+            self.round_text.set(f"第 {self.round_no} 局")
+        if kind == "stop":
+            level, phase = "error", "安全停手"
+        elif kind == "error":
+            level, phase = "error", "异常复核"
+        elif kind in {"action", "invitation_declined"}:
+            level, phase = "ok", "动作已验证"
+        elif kind == "round_reset":
+            level, phase = "wait", "换局重建"
+        else:
+            level, phase = "wait", "观察/弃权"
+        self._set_operational_status(
+            phase, reason or f"事件：{kind}", level=level)
+
+        frame = event.get("frame")
+        if isinstance(analysis, dict) and frame and Path(frame).is_file():
+            result = dict(analysis)
+            result.setdefault("mode", "tea_2p")
+            result["source"] = "live"
+            result["image"] = str(frame)
+            result["frame_path"] = str(frame)
+            result["record_frame"] = False
+            loop = getattr(self, "_auto_loop", None)
+            if loop is not None and loop.ledger_path.is_file():
+                result["record"] = str(loop.ledger_path)
+            try:
+                raw = Path(frame).read_bytes()
+                result["audit_event"] = build_frame_event(
+                    raw, Path(frame), result, mode="tea_2p", source="live")
+            except OSError:
+                pass
+            self._show(result, time.perf_counter())
+
+        loop = getattr(self, "_auto_loop", None)
+        if loop is not None and loop.follow_log_path.is_file():
+            viewer = getattr(self, "embedded_follow_log", None)
+            if viewer is not None:
+                viewer.path = loop.follow_log_path
+                viewer._last_signature = None
+                viewer.refresh()
+        # Rendering may update the generic recommendation state; restore the
+        # authoritative autoplay event status last.
+        self._set_operational_status(
+            phase, reason or f"事件：{kind}", level=level)
 
     # -- feedback / misc -------------------------------------------------
     def feedback(self, verdict: str) -> None:
@@ -2098,6 +2249,12 @@ class TeaAssistWindow:
     def close(self) -> None:
         self.stop()
         self.stop_video_review()
+        if getattr(self, "_auto_poll_timer", None) is not None:
+            try:
+                self.root.after_cancel(self._auto_poll_timer)
+            except tk.TclError:
+                pass
+            self._auto_poll_timer = None
         emb = getattr(self, "embedded_follow_log", None)
         if emb is not None:
             emb.stop()
@@ -2119,6 +2276,7 @@ class TeaAssistWindow:
                 for row in self.latency_log:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.auto_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
 

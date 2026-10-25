@@ -293,8 +293,11 @@ def test_previous_compact_window_opens_as_primary_live_view(monkeypatch):
     window = assist_window.TeaAssistWindow(root)
     try:
         root.update()
-        assert requested[0].startswith("1100x740")
+        assert requested[0].startswith("1180x860")
         assert window.start_button.cget("text") == "开始跟随"
+        assert window.auto_button.cget("text") == "开启全自动代打"
+        assert window.embedded_follow_log._collapsed is False
+        assert not hasattr(window, "tap_armed_check")
         assert window.picture.cget("text")
         window._ready = lambda: True
         window._schedule = lambda _delay: None
