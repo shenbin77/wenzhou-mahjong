@@ -26,7 +26,7 @@ def test_unbind_requests_stop_before_clear(monkeypatch):
     win._stop_full_auto = lambda: steps.append("stop")
     win._set_operational_status = lambda *a, **k: None
     win._refresh_binding_views = lambda: None
-    monkeypatch.setattr(assist_window, "clear_binding", lambda: steps.append("clear"))
+    monkeypatch.setattr(assist_window, "clear_binding", lambda *_a: steps.append("clear"))
     win._unbind()
     assert steps == ["stop", "clear"]
     assert win._binding is None

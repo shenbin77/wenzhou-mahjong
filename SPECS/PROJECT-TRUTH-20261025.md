@@ -12,9 +12,9 @@
 
 | 类型 | 真实位置 | 读写策略 |
 |---|---|---|
-| Git主工作区 | `D:\温州麻将` | 当前开发分支 `gpt/hardening-20261025`，HEAD `683cef9`（检查时） |
+| Git主工作区 | `D:\温州麻将` | 当前开发分支和 HEAD 均以现场 `git branch --show-current` / `git rev-parse --short HEAD` 为准；本行早期快照不得替代最新提交 |
 | 唯一统一产品源码 | `温州茶（传统麻将）\bot\` | **这里**是主UI、识别、推荐、真实代打入口与测试的活动代码；不在平行目录里重新建BOT |
-| 真正UI入口 | `bot\assist_window.py` | 推荐跟随+二次交接 `AutoPlayLoop`；运行进程 `pythonw.exe` |
+| 真正UI入口 | `bot\assist_window.py`（由 `bot\launch_multi.py` 启动） | **多窗共用同一份UI源码**、每serial一个配置目录，内部交接相同的 `AutoPlayLoop`；老单实例窗口需要关闭重开 |
 | 真正连续代打入口 | `bot\run_auto_play_dev.py` → `bot\auto_play_loop.py` → `bot\tap_executor.py` | 只保留一套连续代打状态机；CLI缺省dry_run，真点双开关 |
 | 引擎与历史底层库 | `温州茶（传统麻将）\代打BOT\majiang-bot\brain_v0\` | 算牌引擎依赖/历史底层，不是第二个应该重建的桌面BOT产品 |
 | 真正实战开发局会话 | `温州茶（传统麻将）\采集\dev_auto_play\<会话>\<serial>\actions.jsonl` | 双端各自会话，真实事件；必须逐行完整JSON解码，不能只grep行首；不可清理 |

@@ -279,7 +279,7 @@ def test_previous_compact_window_opens_as_primary_live_view(monkeypatch):
     import tkinter as tk
     import assist_window
 
-    monkeypatch.setattr(assist_window, "load_window_state", lambda: {
+    monkeypatch.setattr(assist_window, "load_window_state", lambda *_a: {
         "x": 0, "y": 0, "w": 440, "h": 560, "topmost": True})
     monkeypatch.setattr(assist_window, "save_window_state", lambda *_args, **_kwargs: None)
     root = tk.Tk()
@@ -301,6 +301,9 @@ def test_previous_compact_window_opens_as_primary_live_view(monkeypatch):
         assert window.picture.cget("text")
         window._ready = lambda: True
         window._schedule = lambda _delay: None
+        # This layout test starts follow on an already validated game table.
+        # The new lobby observer is separately covered in test_lobby_follow.
+        window._lobby_in_game_verified = True
         window.start()
         assert window.start_button.cget("text") == "停止跟随"
         window.stop()

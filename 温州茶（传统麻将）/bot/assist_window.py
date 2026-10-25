@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import argparse
 import os
 import time
 import tkinter as tk
@@ -43,6 +44,7 @@ from tea_bot import tile_name, vision_to_engine
 from mode_vision import detect_shu_rule_text, score_tea_player_count
 from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
+from instance_profile import profile_paths, read_binding_for_serial, safe_serial
 
 
 TEA_ROOT = Path(__file__).resolve().parent.parent
@@ -290,12 +292,14 @@ def clamp_geometry(x: int, y: int, width: int, height: int,
 
 
 class TeaAssistWindow:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, *, serial: str | None = None):
         self.root = root
-        root.title("温州麻将辅助器 · 推荐跟随 / 全自动代打")
+        self._profile_paths = profile_paths(
+            TEA_ROOT / "采集" / "assist_sessions", serial or DEFAULT_SERIAL)
+        root.title(f"温州麻将辅助器 · {self._profile_paths.serial}")
         if ICON_PATH.is_file():
             root.iconbitmap(str(ICON_PATH))
-        state = load_window_state()
+        state = load_window_state(self._profile_paths.geometry)
         screen = (root.winfo_screenwidth(), root.winfo_screenheight())
         saved_width = int(state.get("w", DEFAULT_SIZE[0]))
         saved_height = int(state.get("h", DEFAULT_SIZE[1]))
@@ -316,7 +320,8 @@ class TeaAssistWindow:
         root.attributes("-topmost", bool(state.get("topmost", True)))
         self.session_dir = (
             TEA_ROOT / "采集" / "assist_sessions" /
-            datetime.now().strftime("%Y%m%d_%H%M%S")
+            (datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+             + "_" + self._profile_paths.serial)
         )
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.auto_executor = ThreadPoolExecutor(max_workers=1)
@@ -348,6 +353,11 @@ class TeaAssistWindow:
         self._tap_pending = False
         self.full_auto_running = False
         self._auto_loop = None
+        self._lobby_bootstrap_enabled = True
+        self._lobby_active = False
+        self._lobby_in_game_verified = False
+        self._lobby_future: Future | None = None
+        self._lobby_timer: str | None = None
         self._auto_future: Future | None = None
         self._auto_poll_timer: str | None = None
         self._auto_events: Queue = Queue()
@@ -372,18 +382,19 @@ class TeaAssistWindow:
         self.phase_status = tk.StringVar(value="阶段：尚未开始")
         self.problem_status = tk.StringVar(value="状态：—")
 
-        last_account = (LAST_ACCOUNT_PATH.read_text(encoding="utf-8").strip()
-                        if LAST_ACCOUNT_PATH.is_file() else "")
+        account_path = self._profile_paths.account
+        last_account = (account_path.read_text(encoding="utf-8").strip()
+                        if account_path.is_file() else "")
         self.account = tk.StringVar(value=last_account)
         self.room_id = tk.StringVar()
         self.round_text = tk.StringVar(value="—")
-        self.serial = tk.StringVar(value=DEFAULT_SERIAL)
+        self.serial = tk.StringVar(value=self._profile_paths.serial)
         self.mode = tk.StringVar(value="温州茶 · 2人")
         self.caishen = tk.StringVar()
         self.caishen_title = tk.StringVar(value="财神：—")
         self.always_on_top = tk.BooleanVar(value=bool(state.get("topmost", True)))
         self.manual_caishen = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="先选玩法、填写账号标记并点“绑定”；开始跟随时将自动核对牌桌玩法。")
+        self.status = tk.StringVar(value="选择玩法、绑定雷电设备；开始跟随会先检查大厅/房卡，进入牌局后核对玩法。")
         self.hand = tk.StringVar(value="手牌：—")
         self.suggestion = tk.StringVar(value="尚未开始")
         self.reason = tk.StringVar(value="离线预检结果不能用于当前对局。")
@@ -392,7 +403,7 @@ class TeaAssistWindow:
         self.period = tk.StringVar(value=f"周期 {BASE_INTERVAL_MS} ms")
         self.live_info = tk.StringVar(value="只读画面，不会代点。")
         self.preview_title = tk.StringVar(value="实时跟随")
-        self.preview_flags = tk.StringVar(value="进入牌桌后点“开始跟随”；离线预检在“更多”中，仅检查旧截图。")
+        self.preview_flags = tk.StringVar(value="绑定设备后可从大厅开始观察；当前暂不自动入座，不会自动扣房卡。")
         self.preview_meta = tk.StringVar(
             value="")
         self.offline_notice = tk.StringVar(value="")
@@ -499,7 +510,7 @@ class TeaAssistWindow:
                   foreground="#a55700", wraplength=550).pack(fill="x", pady=(2, 4))
         self.picture = ttk.Label(
             self.preview_panel,
-            text="进入真实牌桌后点“开始跟随”。",
+            text="绑定雷电设备后点“开始跟随”，可先观察大厅。",
             anchor="center", justify="center", wraplength=500,
         )
         self.picture.pack(fill="both", expand=True)
@@ -800,9 +811,30 @@ class TeaAssistWindow:
             self.status.set("正在停止录像复核；已保存的截图与记录会保留。")
 
     def _edit_serial(self) -> None:
+        if getattr(self, "_profile_paths", None) is not None:
+            self.status.set(
+                "本窗口设备已固定。多开或切换设备请用“启动多开辅助器.bat”，"
+                "每个雷电设备将打开独立窗口。")
+            return
+        if self._is_bound() or self.continuous or self.full_auto_running:
+            self.status.set("解绑并停止当前窗口后才能切换设备。")
+            return
         value = simpledialog.askstring("模拟器", "ADB 序列号", initialvalue=self.serial.get())
         if value:
-            self.serial.set(value.strip())
+            try:
+                profile = profile_paths(TEA_ROOT / "采集" / "assist_sessions", value)
+            except ValueError as exc:
+                self.status.set(str(exc))
+                return
+            self._profile_paths = profile
+            self.serial.set(profile.serial)
+            self._binding = None
+            self._check_state = "unchecked"
+            self._check_mode_key = None
+            self.account.set(profile.account.read_text(encoding="utf-8").strip()
+                             if profile.account.is_file() else "")
+            self._restore_binding()
+            self.root.title(f"温州麻将辅助器 · {profile.serial}")
             refresh = getattr(self, "_refresh_binding_views", None)
             if callable(refresh):
                 refresh()
@@ -1062,9 +1094,27 @@ class TeaAssistWindow:
             refresh()
 
     # -- binding + automatic mode check --------------------------------
+    def _binding_file(self) -> Path:
+        profile = getattr(self, "_profile_paths", None)
+        return profile.binding if profile is not None else BINDING_PATH
+
+    def _last_account_file(self) -> Path:
+        profile = getattr(self, "_profile_paths", None)
+        return profile.account if profile is not None else LAST_ACCOUNT_PATH
+
+    def _geometry_file(self) -> Path:
+        profile = getattr(self, "_profile_paths", None)
+        return profile.geometry if profile is not None else WINDOW_STATE_PATH
+
     def _restore_binding(self) -> None:
-        """Re-apply the persisted binding (single identity source)."""
-        binding = load_binding()
+        """Only restore the binding belonging to this serial."""
+        binding = load_binding(self._binding_file())
+        if binding is None and getattr(self, "_profile_paths", None) is not None:
+            legacy = read_binding_for_serial(BINDING_PATH, self._profile_paths.serial)
+            if legacy is not None and save_binding(legacy, self._binding_file()):
+                # One-time migration: otherwise unbind would resurrect legacy.
+                clear_binding(BINDING_PATH)
+                binding = legacy
         if not binding:
             return
         self._binding = binding
@@ -1140,7 +1190,7 @@ class TeaAssistWindow:
                            if getattr(self, "mode", None) is not None else ""),
             "bound_at": datetime.now().isoformat(timespec="seconds"),
         }
-        if not save_binding(binding):
+        if not save_binding(binding, self._binding_file()):
             self.status.set("绑定保存失败：本地文件写入出错。")
             self._set_operational_status(
                 "未绑定", "绑定写入失败", level="error")
@@ -1159,7 +1209,11 @@ class TeaAssistWindow:
             self._stop_full_auto()
         elif getattr(self, "continuous", False):
             self.stop()
-        clear_binding()
+        clear_binding(self._binding_file())
+        profile = getattr(self, "_profile_paths", None)
+        if profile is not None and read_binding_for_serial(
+                BINDING_PATH, profile.serial) is not None:
+            clear_binding(BINDING_PATH)
         self._binding = None
         self._check_state = "unchecked"
         self._check_mode_key = None
@@ -1273,7 +1327,8 @@ class TeaAssistWindow:
         if button is None:
             return
         running = (bool(getattr(self, "continuous", False))
-                   or bool(getattr(self, "full_auto_running", False)))
+                   or bool(getattr(self, "full_auto_running", False))
+                   or bool(getattr(self, "_lobby_active", False)))
         try:
             button.configure(
                 state="normal" if (running or self._is_bound()) else "disabled")
@@ -1680,8 +1735,9 @@ class TeaAssistWindow:
                 self.session_dir / "assist_record.jsonl", account=account,
                 room_id=room_id, round_no=self.round_no,
             )
-            LAST_ACCOUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            LAST_ACCOUNT_PATH.write_text(account, encoding="utf-8")
+            last = self._last_account_file()
+            last.parent.mkdir(parents=True, exist_ok=True)
+            last.write_text(account, encoding="utf-8")
         elif account != self.recorder.account:
             raise ValueError("本次记录会话账号已锁定；更换账号请重新开窗。")
         else:
@@ -1750,13 +1806,86 @@ class TeaAssistWindow:
         if getattr(self, "full_auto_running", False):
             self._stop_full_auto()
             return
-        if self.continuous:
+        if self.continuous or getattr(self, "_lobby_active", False):
             self.stop()
         else:
             self.start()
 
+    def _begin_lobby_follow(self) -> None:
+        """Observe the lobby without spending cards or touching seats."""
+        self._lobby_active = True
+        self._lobby_in_game_verified = False
+        self._lobby_future = None
+        self.start_button.configure(text="停止大厅观察")
+        self.status.set("正在检查当前雷电画面和房卡；仅观察，不会自动入座或消耗房卡。")
+        self._set_operational_status("大厅检查", "未授权入座点击", level="wait")
+        self._schedule_lobby_probe(0)
+
+    def _schedule_lobby_probe(self, delay_ms: int) -> None:
+        if getattr(self, "_lobby_active", False):
+            self._lobby_timer = self.root.after(delay_ms, self._poll_lobby_probe)
+
+    def _poll_lobby_probe(self) -> None:
+        self._lobby_timer = None
+        if not getattr(self, "_lobby_active", False):
+            return
+        if self._lobby_future is None:
+            from lobby_follow import probe
+            self._lobby_future = self.executor.submit(
+                probe, self.serial.get().strip(), DEFAULT_ADB_PATH, self.session_dir)
+        if not self._lobby_future.done():
+            self._schedule_lobby_probe(120)
+            return
+        future, self._lobby_future = self._lobby_future, None
+        try:
+            assessment = future.result()
+        except Exception as exc:
+            self._lobby_active = False
+            self.start_button.configure(text="开始跟随")
+            self.status.set(f"大厅检查失败：{exc}；没有发送任何点击。")
+            self._set_operational_status("大厅检查失败", str(exc), level="error")
+            return
+        if assessment.state == "in_game":
+            self._lobby_active = False
+            self._lobby_in_game_verified = True
+            self.start_button.configure(text="开始跟随")
+            self.status.set("检测到已经发牌的对局，转交现有实时跟随识牌流程。")
+            self.start()
+            return
+        self.status.set(assessment.warning)
+        self._set_operational_status(
+            "大厅/等候室", assessment.warning, level="wait")
+        # LOGIN, unknown, settlement or an empty account must never retry blindly.
+        if assessment.state not in ("lobby", "waiting_room"):
+            self._lobby_active = False
+            self.start_button.configure(text="开始跟随")
+            return
+        self._schedule_lobby_probe(1500)
+
+    def _stop_lobby_follow(self) -> None:
+        self._lobby_active = False
+        self._lobby_in_game_verified = False
+        self._lobby_future = None
+        timer = self._lobby_timer
+        self._lobby_timer = None
+        if timer is not None:
+            try:
+                self.root.after_cancel(timer)
+            except tk.TclError:
+                pass
+
     def start(self) -> None:
         if self.continuous or getattr(self, "video_future", None) is not None:
+            return
+        if getattr(self, "_lobby_active", False):
+            return
+        if (getattr(self, "_lobby_bootstrap_enabled", False)
+                and self._mode_key() == "tea_2p"
+                and not getattr(self, "_lobby_in_game_verified", False)):
+            if not self._is_bound():
+                self.status.set("先绑定当前账号与雷电设备，再开始跟随。")
+                return
+            self._begin_lobby_follow()
             return
         self._pending_action = "follow"
         try:
@@ -1834,6 +1963,9 @@ class TeaAssistWindow:
         self._schedule(0)
 
     def stop(self) -> None:
+        if getattr(self, "_lobby_active", False):
+            self._stop_lobby_follow()
+        self._lobby_in_game_verified = False
         if getattr(self, "full_auto_running", False):
             self._stop_full_auto()
         follow_session = None
@@ -3014,7 +3146,7 @@ class TeaAssistWindow:
         os.startfile(self.session_dir)
 
     def _remember_geometry(self) -> None:
-        state = load_window_state()
+        state = load_window_state(self._geometry_file())
         try:
             state.update({
                 "x": self.root.winfo_x(), "y": self.root.winfo_y(),
@@ -3023,7 +3155,7 @@ class TeaAssistWindow:
             })
         except tk.TclError:
             return
-        save_window_state(state)
+        save_window_state(state, self._geometry_file())
 
     def close(self) -> None:
         self._suppress_review = True
@@ -3083,6 +3215,19 @@ if not Path(DEFAULT_ADB_PATH).is_file():
 
 
 if __name__ == "__main__":
-    app_root = tk.Tk()
-    TeaAssistWindow(app_root)
-    app_root.mainloop()
+    parser = argparse.ArgumentParser(description="温州麻将辅助器：每个serial独立窗口")
+    parser.add_argument("--serial", default=DEFAULT_SERIAL)
+    args = parser.parse_args()
+    safe_serial(args.serial)
+    from serial_lease import SerialBusy, hold_serial
+    try:
+        # Separate namespace from the BOT live-click lease.
+        with hold_serial("ui:" + args.serial):
+            app_root = tk.Tk()
+            TeaAssistWindow(app_root, serial=args.serial)
+            app_root.mainloop()
+    except SerialBusy:
+        from tkinter import messagebox
+        messagebox.showwarning(
+            "设备窗口已打开",
+            f"{args.serial} 已有一个辅助器窗口，禁止重复绑定同一设备。")

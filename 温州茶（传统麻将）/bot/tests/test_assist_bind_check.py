@@ -456,24 +456,27 @@ def test_idle_copy_is_not_duplicated():
     source = (BOT / "assist_window.py").read_text(encoding="utf-8")
     assert "实时跟随 · 尚未开始" not in source
     assert "尚未开始。进入真实牌桌" not in source
-    assert 'text="进入真实牌桌后点“开始跟随”。"' in source
+    assert 'text="绑定雷电设备后点“开始跟随”，可先观察大厅。"' in source
 
 
 # ------------------------------------------------------------- real Tk window
 def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
     import tkinter as tk
 
-    target = tmp_path / ".binding.json"
+    monkeypatch.setattr(assist_window, "TEA_ROOT", tmp_path)
+    from instance_profile import profile_paths
+    target = profile_paths(tmp_path / "采集" / "assist_sessions",
+                           "emulator-5558").binding
     assist_window.save_binding(
         {"account": "玉姐", "serial": "emulator-5558", "mode": "tea_4p",
          "mode_label": "温州茶 · 4人"}, target)
     monkeypatch.setattr(assist_window, "BINDING_PATH", target)
-    monkeypatch.setattr(assist_window, "load_window_state", lambda: {})
+    monkeypatch.setattr(assist_window, "load_window_state", lambda *_a: {})
     monkeypatch.setattr(assist_window, "save_window_state",
                         lambda *_a, **_k: None)
     root = tk.Tk()
     root.withdraw()
-    window = TeaAssistWindow(root)
+    window = TeaAssistWindow(root, serial="emulator-5558")
     try:
         assert window.account.get() == "玉姐"
         assert window.serial.get() == "emulator-5558"
