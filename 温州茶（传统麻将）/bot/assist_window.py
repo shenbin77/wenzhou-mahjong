@@ -135,6 +135,14 @@ def format_review_summary(result: dict) -> tuple[str, str]:
     return f"自动复盘：疑似问题 {count} 个（{summary}）{suffix}", "wait"
 
 
+def format_match_summary(round_no=None, round_total=None, score=None) -> str:
+    """Compact, honest match progress; never invent an unread score."""
+    current = str(round_no) if isinstance(round_no, int) and round_no > 0 else "—"
+    total = str(round_total) if isinstance(round_total, int) and round_total > 0 else "—"
+    score_text = f"{score:+d}" if isinstance(score, int) else "待结算识别"
+    return f"本场进度：{current}/{total} · 累计积分：{score_text}"
+
+
 def tea_round_fingerprint(image_path: str | Path | None) -> bytes | None:
     """Identify the visible room/round HUD; unknown screens cannot lock a session."""
     if not image_path or not Path(image_path).is_file():
@@ -388,6 +396,9 @@ class TeaAssistWindow:
         account_path = self._profile_paths.account
         last_account = (account_path.read_text(encoding="utf-8").strip()
                         if account_path.is_file() else "")
+        if self._is_device_placeholder_account(
+                last_account, self._profile_paths.serial):
+            last_account = ""
         self.account = tk.StringVar(value=last_account)
         self.room_id = tk.StringVar()
         self.round_text = tk.StringVar(value="—")
@@ -417,6 +428,8 @@ class TeaAssistWindow:
         # Extended unified-path facts (玩法/房号局数/财神/暗手/副露/最近出牌).
         self.hud_mode = tk.StringVar(value="玩法：未识别")
         self.hud_room_round = tk.StringVar(value="房号/局数：未识别")
+        self.match_summary = tk.StringVar(
+            value=format_match_summary(round_total=16))
         self.hud_caishen = tk.StringVar(value="财神：未识别")
         self.hud_concealed = tk.StringVar(value="暗手：未识别")
         self.hud_melds = tk.StringVar(value="副露：未识别")
@@ -537,6 +550,10 @@ class TeaAssistWindow:
             sidebar, textvariable=self.hud_room_round,
             font=("Microsoft YaHei UI", 10), foreground="#455a64")
         self.room_identity_label.pack(fill="x", padx=6, pady=(3, 4))
+        self.match_summary_label = ttk.Label(
+            sidebar, textvariable=self.match_summary,
+            font=("Microsoft YaHei UI", 10, "bold"), foreground="#263238")
+        self.match_summary_label.pack(fill="x", padx=6, pady=(0, 4))
         self.tap_panel = ttk.Frame(sidebar)
         self.tap_panel.pack(fill="x", padx=6, pady=(2, 6))
         auto_row = ttk.Frame(self.tap_panel)
@@ -1123,6 +1140,15 @@ class TeaAssistWindow:
             return "雷电" + serial.removeprefix("emulator-")
         return "设备 " + serial if serial else "本地设备"
 
+    @classmethod
+    def _is_device_placeholder_account(cls, account: str, serial: str) -> bool:
+        """Reject the short-lived UI regression that stored a device as a player."""
+        value = str(account or "").strip()
+        serial = str(serial or "").strip()
+        return bool(value and serial and value in {
+            serial, cls._default_instance_label(serial), f"设备 {serial}",
+        })
+
     def _binding_file(self) -> Path:
         profile = getattr(self, "_profile_paths", None)
         return profile.binding if profile is not None else BINDING_PATH
@@ -1145,8 +1171,19 @@ class TeaAssistWindow:
             # to another emulator. Discard it and keep the constructor serial.
             clear_binding(self._binding_file())
             binding = None
+        if (binding is not None and profile is not None
+                and self._is_device_placeholder_account(
+                    binding.get("account"), profile.serial)):
+            # Older UI builds wrote "雷电5556" as if it were a player.
+            # That corrupts attribution, so require a real local player tag.
+            clear_binding(self._binding_file())
+            binding = None
         if binding is None and profile is not None:
             legacy = read_binding_for_serial(BINDING_PATH, profile.serial)
+            if (legacy is not None and self._is_device_placeholder_account(
+                    legacy.get("account"), profile.serial)):
+                clear_binding(BINDING_PATH)
+                legacy = None
             if legacy is not None and save_binding(legacy, self._binding_file()):
                 # One-time migration: otherwise unbind would resurrect legacy.
                 clear_binding(BINDING_PATH)
@@ -1205,7 +1242,8 @@ class TeaAssistWindow:
 
     def _bind(self) -> None:
         fields = self._current_binding_fields()
-        if not fields["account"]:
+        if (not fields["account"] or self._is_device_placeholder_account(
+                fields["account"], fields["serial"])):
             self.status.set("账号标记为空：请填写玩家名或便于追溯的本地标记。")
             self._set_operational_status("未绑定", "缺少账号标记", level="error")
             return
@@ -1286,7 +1324,8 @@ class TeaAssistWindow:
         self._refresh_binding_views()
 
     def _save_verified_binding(self, fields: dict) -> bool:
-        if not fields["account"]:
+        if (not fields["account"] or self._is_device_placeholder_account(
+                fields["account"], fields["serial"])):
             self.status.set("账号标记为空：未保存绑定。")
             self._set_operational_status("未绑定", "缺少账号标记", level="error")
             return False
@@ -2654,6 +2693,23 @@ class TeaAssistWindow:
                     var.set(value)
                 except Exception:
                     pass
+        facts = result.get("frame_facts")
+        if isinstance(facts, dict):
+            round_no = facts.get("round_no")
+            round_total = facts.get("round_total")
+        else:
+            round_no = round_total = None
+        if not isinstance(round_no, int):
+            round_no = getattr(self, "round_no", None)
+        try:
+            mode_key = self._mode_key()
+        except Exception:
+            mode_key = ""
+        if not isinstance(round_total, int) and mode_key == "tea_2p":
+            round_total = 16
+        summary = getattr(self, "match_summary", None)
+        if summary is not None:
+            summary.set(format_match_summary(round_no, round_total))
         # Keep embedded follow log scrolling only while 开始跟随 is live.
         if getattr(self, "continuous", False):
             emb = getattr(self, "embedded_follow_log", None)

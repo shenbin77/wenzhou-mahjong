@@ -15,7 +15,7 @@ if str(BOT) not in sys.path:
     sys.path.insert(0, str(BOT))
 
 import assist_window
-from assist_window import TeaAssistWindow
+from assist_window import TeaAssistWindow, format_match_summary
 
 
 class Var:
@@ -105,6 +105,12 @@ def test_load_binding_rejects_empty_account(tmp_path):
     assert assist_window.load_binding(target) is None
 
 
+def test_match_summary_never_invents_unread_score():
+    assert format_match_summary(round_total=16) == (
+        "本场进度：—/16 · 累计积分：待结算识别")
+    assert format_match_summary(3, 16, -20) == "本场进度：3/16 · 累计积分：-20"
+
+
 # ------------------------------------------------------------- table reading
 def test_detect_table_mode_uses_existing_recognizers(monkeypatch):
     image = np.zeros((900, 1600, 3), dtype=np.uint8)
@@ -185,6 +191,19 @@ def test_restore_binding_refills_window(tmp_path, monkeypatch):
     assert window.serial.get() == "emulator-5558"
     assert window.mode.get() == "温州茶 · 4人"
     assert window._is_bound()
+
+
+def test_restore_rejects_device_name_as_player_identity(tmp_path, monkeypatch):
+    from instance_profile import profile_paths
+    profile = profile_paths(tmp_path, "emulator-5556")
+    assist_window.save_binding(
+        {"account": "雷电5556", "serial": "emulator-5556", "mode": "tea_2p"},
+        profile.binding)
+    window = _bare_window()
+    window._profile_paths = profile
+    window._restore_binding()
+    assert window._binding is None
+    assert not profile.binding.exists()
 
 
 # -------------------------------------------------------------- mode check
@@ -509,6 +528,8 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         sidebar = window.caishen_row.master
         ordered = sidebar.pack_slaves()
         assert window.room_identity_label.winfo_manager() == "pack"
+        assert window.match_summary_label.winfo_manager() == "pack"
+        assert window.match_summary.get() == "本场进度：—/16 · 累计积分：待结算识别"
         assert window.tap_panel.winfo_manager() == "pack"
         assert ordered.index(window.caishen_row) < ordered.index(window.room_identity_label)
         assert ordered.index(window.room_identity_label) < ordered.index(window.tap_panel)
