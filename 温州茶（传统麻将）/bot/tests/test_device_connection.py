@@ -14,6 +14,7 @@ import device_connection
 import assist_window
 from instance_profile import profile_paths
 from assist_window import TeaAssistWindow
+from player_identity import PlayerIdentity
 
 
 class Var:
@@ -83,6 +84,11 @@ def setup_window(tmp_path):
     win._binding_future=None
     win._binding_fields_pending=None
     win._check_executor=Exec()
+    win._identity_state="unchecked"
+    win._identity_key=None
+    win._identity_events=None
+    win._identity_reader=lambda _serial,_account:PlayerIdentity(
+        "match", "玉姐", "玉姐", 1.0, .45, "画面本人昵称已核验为“玉姐”")
     win.root=Root()
     win._set_operational_status=lambda *args,**kw:None
     win._refresh_binding_views=lambda:None
@@ -99,7 +105,9 @@ def test_successful_probe_saves_binding(monkeypatch,tmp_path):
     win._poll_binding_probe()
     assert win._is_bound() and win._profile_paths.binding.exists()
     assert win.account.get()=="玉姐"
-    assert "连接成功" in win.status.get()
+    win._poll_identity_check()
+    assert win._identity_gate_ok()
+    assert "身份已核验" in win.status.get()
 
 
 def test_failure_does_not_persist(monkeypatch,tmp_path):

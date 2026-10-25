@@ -342,6 +342,8 @@ def test_ready_requires_binding_and_passed_mode_check():
     assert "绑定" in window.status.get()
     window._binding = {
         "account": "玩家1", "serial": "emulator-5556", "mode": "tea_2p"}
+    window._identity_state = "match"
+    window._identity_key = ("玩家1", "emulator-5556")
     window._check_state = "match"
     window._check_mode_key = "tea_2p"
     window._ensure_recorder = lambda: None

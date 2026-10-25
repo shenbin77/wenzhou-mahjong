@@ -16,6 +16,7 @@ if str(BOT) not in sys.path:
 
 import assist_window
 from assist_window import TeaAssistWindow, format_match_summary
+from player_identity import PlayerIdentity
 
 
 class Var:
@@ -81,6 +82,12 @@ def _bare_window():
     window.timer = None
     window.video_future = None
     window._binding = None
+    window._identity_state = "unchecked"
+    window._identity_key = None
+    window._identity_detail = ""
+    window._identity_detected = None
+    window._identity_pending = None
+    window._identity_events = Queue()
     window._check_state = "unchecked"
     window._check_mode_key = None
     window._check_detected = None
@@ -151,7 +158,7 @@ def test_bind_empty_account_writes_nothing(tmp_path, monkeypatch):
     window._bind()
     assert not target.exists()
     assert window._binding is None
-    assert "账号标记为空" in window.status.get()
+    assert "玩家昵称为空" in window.status.get()
 
 
 def test_bind_persists_and_unbind_clears(tmp_path, monkeypatch):
@@ -212,6 +219,8 @@ def _check_window(result, starts):
     window.account.set("玉姐")
     window._binding = {"account": "玉姐", "serial": "emulator-5556",
                        "mode": "tea_2p"}
+    window._identity_state = "match"
+    window._identity_key = ("玉姐", "emulator-5556")
     window._check_state = "unchecked"
     window._check_mode_key = None
     window._check_detail = ""
@@ -282,6 +291,60 @@ def test_check_result_for_previous_mode_is_discarded():
     assert starts == []
 
 
+# ----------------------------------------------------------- player identity
+def _identity_window(result, starts):
+    window = _bare_window()
+    window.account.set("玉姐")
+    window._binding = {"account": "玉姐", "serial": "emulator-5556",
+                       "mode": "tea_2p"}
+    window._check_executor = ImmediateExecutor()
+    window.root = FakeRoot()
+    window._identity_reader = lambda _serial, _account: result
+    window._set_operational_status = lambda *a, **k: None
+    window.start = lambda: starts.append("follow")
+    return window
+
+
+def test_identity_match_releases_pending_follow():
+    starts = []
+    result = PlayerIdentity("match", "玉姐", "玉姐", 1.0, .45,
+                            "画面本人昵称已核验为“玉姐”")
+    window = _identity_window(result, starts)
+    assert not window._ready(pending="follow")
+    assert window._identity_state == "checking"
+    window._poll_identity_check()
+    assert window._identity_gate_ok()
+    assert starts == ["follow"]
+    assert "身份已核验" in window.status.get()
+
+
+def test_identity_mismatch_blocks_follow_and_marks_red():
+    starts = []
+    result = PlayerIdentity("mismatch", "玉姐", "拾则", .99, .44,
+                            "配置玩家是“玉姐”，画面本人是“拾则”")
+    window = _identity_window(result, starts)
+    window.lamp_status = Var("")
+    window.lamp_dot = FakeWidget()
+    window.lamp_label = FakeWidget()
+    assert not window._ready(pending="follow")
+    window._poll_identity_check()
+    assert not window._identity_gate_ok() and starts == []
+    assert "已阻止跟随和代打" in window.status.get()
+    assert "玩家不一致" in window.lamp_status.get()
+    assert window.lamp_dot.config["fg"] == "#c62828"
+
+
+def test_identity_hidden_name_blocks_without_guessing():
+    starts = []
+    result = PlayerIdentity("unknown", "玉姐", None, 0.0, 0.0,
+                            "左下本人昵称未显示或被遮挡")
+    window = _identity_window(result, starts)
+    assert not window._ready(pending="follow")
+    window._poll_identity_check()
+    assert starts == [] and window._identity_state == "unknown"
+    assert "已阻止推荐和代打" in window.status.get()
+
+
 # ---------------------------------------------------------------------- lamp
 def _lamp_window():
     window = _bare_window()
@@ -305,6 +368,8 @@ def test_lamp_states():
     assert window.lamp_dot.config["fg"] == "#a55700"
     window._binding = {"account": "玉姐", "serial": "emulator-5556",
                        "mode": "tea_2p"}
+    window._identity_state = "match"
+    window._identity_key = ("玉姐", "emulator-5556")
     window._check_state = "match"
     window._check_mode_key = "tea_2p"
     window._refresh_lamp()
@@ -338,6 +403,8 @@ def test_auto_gate_state_transitions():
     assert window.auto_state.get() == "不可开启：未绑定、玩法未核对、未开始跟随"
     window._binding = {"account": "玉姐", "serial": "emulator-5556",
                        "mode": "tea_2p"}
+    window._identity_state = "match"
+    window._identity_key = ("玉姐", "emulator-5556")
     window._check_state = "match"
     window._check_mode_key = "tea_2p"
     window.continuous = True
@@ -362,7 +429,12 @@ def test_bound_text_hides_unbound_input_values():
                        "mode": "tea_2p"}
     window.account.set("玉姐")
     window._binding["account"] = "玉姐"
-    assert window._bound_text() == "账号：玉姐 · 雷电：emulator-5556 已连接"
+    assert window._bound_text() == (
+        "账号：玉姐（待画面核验） · 雷电：emulator-5556 已连接")
+    window._identity_state = "match"
+    window._identity_key = ("玉姐", "emulator-5556")
+    assert window._bound_text() == (
+        "账号：玉姐（画面已核验） · 雷电：emulator-5556 已连接")
 
 
 def test_start_bind_flag_gates_follow_binding_state():
@@ -519,7 +591,7 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         # The compact log no longer consumes half the idle window.
         assert window.follow_log_frame.pack_info()["expand"] == 0
         assert window.picture.pack_info()["expand"] == 1
-        assert window.preflight_button.cget("text") == "玩法自检"
+        assert window.preflight_button.cget("text") == "身份/玩法核验"
         assert window._hud_expanded is False
         assert window.hud_panel.winfo_manager() == ""
         assert window.hud_idle_label.winfo_manager() == "pack"
@@ -567,6 +639,6 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         window.account.set("")
         window._bind()
         assert not target.exists()
-        assert "账号标记为空" in window.status.get()
+        assert "玩家昵称为空" in window.status.get()
     finally:
         window.close()

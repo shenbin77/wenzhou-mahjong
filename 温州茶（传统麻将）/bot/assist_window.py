@@ -46,6 +46,7 @@ from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
 from instance_profile import profile_paths, read_binding_for_serial, safe_serial
 from device_connection import verify_device
+from player_identity import PlayerIdentity, detect_player_identity
 
 
 TEA_ROOT = Path(__file__).resolve().parent.parent
@@ -289,6 +290,23 @@ def read_table_mode(serial: str) -> tuple[str | None, str]:
     return detect_table_mode(image)
 
 
+def read_player_identity(serial: str, expected_account: str) -> PlayerIdentity:
+    """Grab one fresh native frame and verify the bottom-left local player."""
+    try:
+        from live_capture import capture_frame
+
+        raw, _timing = capture_frame(
+            mode="tea_2p", adb_path=DEFAULT_ADB_PATH, serial=serial,
+            session_dir=TEA_ROOT / "采集" / "assist_sessions")
+    except Exception as exc:  # noqa: BLE001 - identity failure must fail closed
+        return PlayerIdentity(
+            "unknown", expected_account, None, 0.0, 0.0,
+            f"身份核验抓图失败：{exc}",
+        )
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    return detect_player_identity(image, expected_account)
+
+
 def clamp_geometry(x: int, y: int, width: int, height: int,
                    screen: tuple[int, int]) -> tuple[int, int, int, int]:
     """Keep a remembered window at least partly on the current screen."""
@@ -376,6 +394,15 @@ class TeaAssistWindow:
         self._review_events: Queue = Queue()
         self._review_poll_timer: str | None = None
         self._binding: dict | None = None
+        self._identity_state = "unchecked"
+        self._identity_generation = 0
+        self._identity_key: tuple[str, str] | None = None
+        self._identity_detail = ""
+        self._identity_detected: str | None = None
+        self._identity_verified_at: float | None = None
+        self._identity_pending: str | None = None
+        self._identity_events: Queue = Queue()
+        self._identity_poll_timer: str | None = None
         self._check_state = "unchecked"
         self._check_mode_key: str | None = None
         self._check_detail = ""
@@ -457,7 +484,7 @@ class TeaAssistWindow:
         )
         self.mode_choice.grid(row=0, column=1, padx=(2, 12), sticky="w")
         self.mode_choice.bind("<<ComboboxSelected>>", self._on_mode_change)
-        ttk.Label(controls, text="账号标记").grid(row=0, column=2, sticky="w")
+        ttk.Label(controls, text="玩家昵称").grid(row=0, column=2, sticky="w")
         self.account_entry = ttk.Entry(
             controls, textvariable=self.account, width=12)
         self.account_entry.grid(row=0, column=3, padx=(2, 10), sticky="w")
@@ -475,16 +502,16 @@ class TeaAssistWindow:
             controls, text="开始跟随", width=10, command=self._toggle)
         self.start_button.grid(row=0, column=8, padx=4)
         self.preflight_button = ttk.Button(
-            controls, text="玩法自检", width=9,
-            command=lambda: self._begin_mode_check(pending=None))
+            controls, text="身份/玩法核验", width=12,
+            command=self._verify_identity_and_mode)
         self.preflight_button.grid(row=0, column=9, padx=2)
         ttk.Button(controls, text="更多", width=5, command=self._open_menu).grid(
             row=0, column=10, sticky="e")
         controls.grid_columnconfigure(10, weight=1)
         ttk.Label(
             controls,
-            text=("账号标记只用于本机日志；雷电编号由启动器自动读取，无需手填。"
-                  "再次打开桌面快捷方式会连接下一台在线模拟器。"),
+            text=("填写当前游戏玩家昵称；程序会读取左下本人昵称并匹配，"
+                  "一致后才允许推荐和代打。雷电编号由启动器自动读取，无需手填。"),
             foreground="#a55700", wraplength=1040,
         ).grid(row=1, column=0, columnspan=11, sticky="w", pady=(3, 0))
 
@@ -847,6 +874,7 @@ class TeaAssistWindow:
             self._profile_paths = profile
             self.serial.set(profile.serial)
             self._binding = None
+            self._reset_identity_check()
             self._check_state = "unchecked"
             self._check_mode_key = None
             self.account.set(profile.account.read_text(encoding="utf-8").strip()
@@ -1237,15 +1265,24 @@ class TeaAssistWindow:
     def _bound_text(self) -> str:
         if self._is_bound():
             current = self._current_binding_fields()
-            return f"账号：{current['account']} · 雷电：{current['serial']} 已连接"
+            state = getattr(self, "_identity_state", "unchecked")
+            if self._identity_gate_ok():
+                identity = "画面已核验"
+            elif state == "mismatch":
+                detected = getattr(self, "_identity_detected", None) or "其他玩家"
+                identity = f"画面是{detected}，不一致"
+            else:
+                identity = "待画面核验"
+            return (f"账号：{current['account']}（{identity}） · "
+                    f"雷电：{current['serial']} 已连接")
         return "账号：未绑定 · 雷电：尚未连接"
 
     def _bind(self) -> None:
         fields = self._current_binding_fields()
         if (not fields["account"] or self._is_device_placeholder_account(
                 fields["account"], fields["serial"])):
-            self.status.set("账号标记为空：请填写玩家名或便于追溯的本地标记。")
-            self._set_operational_status("未绑定", "缺少账号标记", level="error")
+            self.status.set("玩家昵称为空：请填写游戏内显示的本人昵称。")
+            self._set_operational_status("未绑定", "缺少玩家昵称", level="error")
             return
         try:
             serial = safe_serial(fields["serial"])
@@ -1318,16 +1355,17 @@ class TeaAssistWindow:
             self._refresh_binding_views()
             return
         if self._save_verified_binding(pending):
-            self.status.set(f"{result.detail}；绑定已保存。")
+            self.status.set(f"{result.detail}；配置已保存，正在核验画面本人昵称。")
             self._set_operational_status(
-                "设备连接成功", f"{pending['serial']} · 截图验证通过", level="ok")
+                "设备连接成功", "等待画面本人昵称与配置匹配", level="wait")
+            self._begin_identity_check(pending=None)
         self._refresh_binding_views()
 
     def _save_verified_binding(self, fields: dict) -> bool:
         if (not fields["account"] or self._is_device_placeholder_account(
                 fields["account"], fields["serial"])):
-            self.status.set("账号标记为空：未保存绑定。")
-            self._set_operational_status("未绑定", "缺少账号标记", level="error")
+            self.status.set("玩家昵称为空：未保存绑定。")
+            self._set_operational_status("未绑定", "缺少玩家昵称", level="error")
             return False
         binding = {
             "account": fields["account"],
@@ -1343,11 +1381,12 @@ class TeaAssistWindow:
                 "未绑定", "绑定写入失败", level="error")
             return False
         self._binding = binding
+        self._reset_identity_check()
         self.status.set(
             f"已绑定：{binding['serial']} · {binding['mode_label']}；"
-            "已保存，下次启动自动读取。")
+            "已保存；画面本人昵称核验通过后才允许跟随。")
         self._set_operational_status(
-            "已绑定", f"账号 {binding['account']} · {binding['serial']}", level="ok")
+            "已绑定", f"账号 {binding['account']} · 等待画面核验", level="wait")
         self._refresh_binding_views()
         return True
 
@@ -1364,6 +1403,7 @@ class TeaAssistWindow:
                 BINDING_PATH, profile.serial) is not None:
             clear_binding(BINDING_PATH)
         self._binding = None
+        self._reset_identity_check()
         self._check_state = "unchecked"
         self._check_mode_key = None
         self._check_pending = None
@@ -1390,7 +1430,11 @@ class TeaAssistWindow:
         if var is None:
             return
         colors = {"ok": "#146c2e", "wait": "#a55700", "error": "#c62828"}
-        if getattr(self, "_check_state", "unchecked") == "mismatch":
+        if getattr(self, "_identity_state", "unchecked") == "mismatch":
+            expected = self.account.get().strip()
+            detected = getattr(self, "_identity_detected", None) or "其他玩家"
+            text, level = f"异常：玩家不一致（配置{expected}，画面{detected}）", "error"
+        elif getattr(self, "_check_state", "unchecked") == "mismatch":
             detected = getattr(self, "_check_detected", None)
             label = next((name for name, key in MODES.items()
                           if key == detected), detected or "其它玩法")
@@ -1402,6 +1446,13 @@ class TeaAssistWindow:
             elif not self._is_bound():
                 missing.append(
                     f"绑定已失效（{self._binding_mismatch_reason()}）")
+            if self._is_bound() and not self._identity_gate_ok():
+                state = getattr(self, "_identity_state", "unchecked")
+                missing.append({
+                    "checking": "玩家核验中",
+                    "unknown": "本人昵称未显示",
+                    "unsupported": "玩家昵称无模板",
+                }.get(state, "玩家未核验"))
             if not self._mode_gate_ok():
                 state = getattr(self, "_check_state", "unchecked")
                 missing.append({"checking": "玩法核对中",
@@ -1446,6 +1497,9 @@ class TeaAssistWindow:
             if not self._is_bound():
                 missing.append("未绑定" if getattr(self, "_binding", None) is None
                                else "绑定已失效")
+            if self._is_bound() and not self._identity_gate_ok():
+                state = getattr(self, "_identity_state", "unchecked")
+                missing.append("玩家不一致" if state == "mismatch" else "玩家未核验")
             if not self._mode_gate_ok():
                 missing.append("玩法未核对")
             if not getattr(self, "continuous", False):
@@ -1453,7 +1507,8 @@ class TeaAssistWindow:
             if not self._channel_ready():
                 missing.append("动作通道未就绪")
             if missing:
-                text, level = f"不可开启：{'、'.join(missing)}", "wait"
+                level = ("error" if "玩家不一致" in missing else "wait")
+                text = f"不可开启：{'、'.join(missing)}"
                 state = "disabled"
             else:
                 text, level, state = "● 可开启", "ok", "normal"
@@ -1543,6 +1598,162 @@ class TeaAssistWindow:
         self._refresh_start_gate()
         self._refresh_bind_controls()
         self._refresh_flag_button()
+
+    def _identity_context(self) -> tuple[str, str]:
+        account = (self.account.get().strip()
+                   if getattr(self, "account", None) is not None else "")
+        serial = (self.serial.get().strip()
+                  if getattr(self, "serial", None) is not None else "")
+        return account, serial
+
+    def _reset_identity_check(self) -> None:
+        self._identity_generation = getattr(self, "_identity_generation", 0) + 1
+        self._identity_state = "unchecked"
+        self._identity_key = None
+        self._identity_detail = ""
+        self._identity_detected = None
+        self._identity_verified_at = None
+        self._identity_pending = None
+
+    def _identity_gate_ok(self, *, max_age_seconds: float | None = None) -> bool:
+        matched = (
+            getattr(self, "_identity_state", "unchecked") == "match"
+            and getattr(self, "_identity_key", None) == self._identity_context()
+        )
+        if not matched or max_age_seconds is None:
+            return matched
+        verified_at = getattr(self, "_identity_verified_at", None)
+        return (verified_at is not None
+                and time.perf_counter() - verified_at <= max_age_seconds)
+
+    def _begin_identity_check(self, pending: str | None = None) -> None:
+        """Read the local-seat nickname before any advice or click authority."""
+        context = self._identity_context()
+        if getattr(self, "_identity_state", "unchecked") == "checking" \
+                and getattr(self, "_identity_key", None) == context:
+            if pending:
+                self._identity_pending = pending
+            return
+        self._identity_state = "checking"
+        self._identity_generation = getattr(self, "_identity_generation", 0) + 1
+        generation = self._identity_generation
+        self._identity_key = context
+        self._identity_detail = ""
+        self._identity_detected = None
+        self._identity_pending = pending
+        events = getattr(self, "_identity_events", None)
+        if events is None:
+            self._identity_events = events = Queue()
+        else:
+            while True:
+                try:
+                    events.get_nowait()
+                except Empty:
+                    break
+        status = getattr(self, "status", None)
+        if status is not None:
+            status.set("正在读取左下本人昵称，核对配置账号与当前雷电画面…")
+        self._set_operational_status(
+            "玩家核验", "只读抓图，不发送点击", level="wait")
+        self._refresh_binding_views()
+        account, serial = context
+        reader = getattr(self, "_identity_reader", None)
+        if not callable(reader):
+            reader = read_player_identity
+
+        def work() -> None:
+            began = time.perf_counter()
+            try:
+                result = reader(serial, account)
+            except Exception as exc:  # noqa: BLE001 - failure must fail closed
+                result = PlayerIdentity(
+                    "unknown", account, None, 0.0, 0.0,
+                    f"身份核验失败：{exc}",
+                )
+            elapsed = int((time.perf_counter() - began) * 1000)
+            events.put((generation, context, result, elapsed))
+
+        executor = (getattr(self, "_check_executor", None)
+                    or getattr(self, "executor", None))
+        if executor is None:
+            events.put((generation, context, PlayerIdentity(
+                "unknown", account, None, 0.0, 0.0,
+                "身份核验执行器不可用"), 0))
+        else:
+            executor.submit(work)
+        root = getattr(self, "root", None)
+        if root is not None:
+            self._identity_poll_timer = root.after(
+                120, self._poll_identity_check)
+
+    def _poll_identity_check(self) -> None:
+        self._identity_poll_timer = None
+        events = getattr(self, "_identity_events", None)
+        if events is None:
+            return
+        latest = None
+        while True:
+            try:
+                candidate = events.get_nowait()
+                if candidate[0] == getattr(self, "_identity_generation", 0):
+                    latest = candidate
+            except Empty:
+                break
+        if latest is None:
+            if getattr(self, "_identity_state", None) == "checking":
+                root = getattr(self, "root", None)
+                if root is not None:
+                    self._identity_poll_timer = root.after(
+                        120, self._poll_identity_check)
+            return
+        _generation, context, result, elapsed = latest
+        if context != self._identity_context() or not self._is_bound():
+            self._reset_identity_check()
+            self._refresh_binding_views()
+            return
+        self._identity_key = context
+        self._identity_state = result.status
+        self._identity_detail = result.detail
+        self._identity_detected = result.detected
+        pending = getattr(self, "_identity_pending", None)
+        self._identity_pending = None
+        if result.matched:
+            self._identity_verified_at = time.perf_counter()
+            self.status.set(
+                f"玩家身份已核验：{result.detail}（只读 {elapsed}ms，未点击）。")
+            self._set_operational_status(
+                "玩家已核验", f"{context[0]} 与当前画面一致", level="ok")
+            self._refresh_binding_views()
+            if pending == "follow":
+                self.start()
+            elif pending == "full_auto":
+                self._start_full_auto()
+            elif pending == "mode_check":
+                self._begin_mode_check(pending=None)
+            return
+        if result.status == "mismatch":
+            self.status.set(f"玩家身份不一致：{result.detail}；已阻止跟随和代打。")
+            self._set_operational_status(
+                "身份不一致", result.detail, level="error")
+        else:
+            self.status.set(
+                f"玩家身份未核验：{result.detail}；已阻止推荐和代打。"
+                "请关闭遮挡本人昵称的面板或进入牌桌后重试。")
+            self._set_operational_status(
+                "身份待核验", result.detail, level="wait")
+        self._refresh_binding_views()
+
+    def _verify_identity_and_mode(self) -> None:
+        """Manual read-only recheck; identity must pass before mode reading."""
+        if not self._is_bound():
+            self.status.set("先填写玩家昵称并完成连接绑定，再核验当前画面。")
+            self._set_operational_status(
+                "未绑定", "无法核验玩家与玩法", level="wait")
+            return
+        self._reset_identity_check()
+        self._check_state = "unchecked"
+        self._check_mode_key = None
+        self._begin_identity_check(pending="mode_check")
 
     def _mode_gate_ok(self) -> bool:
         if getattr(self, "_check_state", "unchecked") != "match":
@@ -1790,7 +2001,7 @@ class TeaAssistWindow:
         self.root.attributes("-topmost", self.always_on_top.get())
 
     def _ready(self, pending: str | None = None) -> bool:
-        """Start gate: bound identity + automatic table-mode check.
+        """Start gate: binding + visual player identity + table-mode check.
 
         ``pending`` names the action to resume once a fresh check passes
         (``"follow"`` / ``"full_auto"``); when a check first has to run,
@@ -1811,6 +2022,16 @@ class TeaAssistWindow:
                 self._set_operational_status(
                     "未绑定", f"绑定已失效：{reason}", level="wait")
             self._refresh_lamp()
+            return False
+        if not self._identity_gate_ok():
+            state = getattr(self, "_identity_state", "unchecked")
+            fresh = getattr(self, "_identity_key", None) == self._identity_context()
+            if state == "checking" and fresh:
+                if pending:
+                    self._identity_pending = pending
+                self.status.set("正在核对当前画面中的本人昵称…")
+                return False
+            self._begin_identity_check(pending=pending)
             return False
         if self._mode_gate_ok():
             try:
@@ -2131,6 +2352,11 @@ class TeaAssistWindow:
         self.continuous = False
         self.continuous_round = None
         self.continuous_caishen = None
+        if (not getattr(self, "full_auto_running", False)
+                and not getattr(self, "_handoff_to_auto", False)):
+            reset_identity = getattr(self, "_reset_identity_check", None)
+            if callable(reset_identity):
+                reset_identity()
         # Keep follow_session.jsonl; only drop the live writer handle.
         self._follow_pipeline = None
         if getattr(self, "start_button", None) is not None:
@@ -3005,7 +3231,19 @@ class TeaAssistWindow:
             self._set_operational_status(
                 "等待推荐", "尚未启动实时跟随，拒绝交出点击权", level="error")
             return
+        if not self._identity_gate_ok(max_age_seconds=10.0):
+            self._begin_identity_check(pending="full_auto")
+            self.full_auto_status.set(
+                "全自动开启前正在重新核验当前画面本人昵称。")
+            self._set_operational_status(
+                "玩家核验", "重新确认当前账号后才交出点击权", level="wait")
+            return
         if not self._ready():
+            if getattr(self, "_identity_state", None) == "checking":
+                self._identity_pending = "full_auto"
+                self.full_auto_status.set(
+                    "正在核对当前画面本人昵称；一致后才会开启全自动。")
+                return
             if getattr(self, "_check_state", None) == "checking":
                 self._check_pending = "full_auto"
                 self.full_auto_status.set(
@@ -3034,7 +3272,11 @@ class TeaAssistWindow:
         # Stop the duplicate read-only ADB capture before the BOT takes over.
         # The BOT's own analyzed frames are streamed back through _auto_events.
         self._suppress_review = True
-        self.stop()
+        self._handoff_to_auto = True
+        try:
+            self.stop()
+        finally:
+            self._handoff_to_auto = False
         from action_policy import recommended_runner_config
         from auto_play_loop import AutoPlayLoop
 
@@ -3108,6 +3350,7 @@ class TeaAssistWindow:
             self._auto_future = None
             self.full_auto_running = False
             self._auto_loop = None
+            self._reset_identity_check()
             ended_session = Path(self.session_dir)
             schedule = getattr(self, "_schedule_session_review", None)
             if callable(schedule):

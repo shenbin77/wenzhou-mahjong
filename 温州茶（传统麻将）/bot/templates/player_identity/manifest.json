@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "roi": [32, 638, 78, 42],
+  "templates": [
+    {
+      "account": "玉姐",
+      "file": "yujie.png"
+    },
+    {
+      "account": "拾则",
+      "file": "shize.png"
+    }
+  ]
+}
