@@ -2,6 +2,8 @@
 
 流程：Hana 出 spec → Codex 预审 spec → Flash 实现 → Codex 终审+回归
 
+> **2026-10-25 状态更正**：下列SPEC-003“待实施”是2026-10-20早期规格流程状态，已过时，**不代表代打从未实现/从未实机运行**。现在统一BOT入口 `温州茶（传统麻将）/bot/auto_play_loop.py` 与 `assist_window.py` 已完成接线；已有真实自动出牌、过牌和整局记录。下一步是对已修复的局间财神/claim落定进行最新版实机复验，16局零人工尚未过关。先读 `开发档案.md`、`SPECS/PROJECT-TRUTH-20261025.md` 和真实 `actions.jsonl` 再判断。
+
 | Spec | 内容 | 状态 |
 |---|---|---|
 | SPEC-001-cleanup.md | 根目录整理 | ✅ 已执行（2026-10-20，Hana 直接执行，Flash 额度暂不可用） |
