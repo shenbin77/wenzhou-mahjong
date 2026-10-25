@@ -1,579 +1,592 @@
 {
-  "roi": [
-    622,
-    348,
-    677,
-    423
-  ],
-  "image_size": [
-    1600,
-    900
-  ],
-  "templates": [
-    {
-      "label": "s9",
-      "file": "s9.png",
-      "source": "2026-10-12/010478/r01/_ac.png",
-      "source_sha256": "5ca39c7d219ba1abda935b2df33563cad6b056afcf518fe0738d58f5a4529232",
-      "asset_sha256": "c7c90a1f62656bf08f1ba3df2ea2cf97eaa22b4fe6505be185b42256a7ae698b",
-      "cluster_frames": 171
-    },
-    {
-      "label": "s6",
-      "file": "s6.png",
-      "source": "2026-10-13/323028/r01/_ac.png",
-      "source_sha256": "fb70fa7539030bdea9f2609f463f7b300e9e035d698a4c56c93b0f346c018872",
-      "asset_sha256": "2b4008f7dea285e6e49947a0e9bc786ea1088ca9a39825de4e6069fa85e62484",
-      "cluster_frames": 119
-    },
-    {
-      "label": "s2",
-      "file": "s2.png",
-      "source": "2026-10-13/207547/r02/_ac.png",
-      "source_sha256": "bf195cebdb3520e7d2d82415c2020dfff303350e9ed8a202c3c73a58607e434b",
-      "asset_sha256": "d0664a3992c902c28a9b77c492c07b539dc94f9424b479c304a8ccbd558c2694",
-      "cluster_frames": 105
-    },
-    {
-      "label": "t5",
-      "file": "t5.png",
-      "source": "2026-10-13/207547/r01/_ac.png",
-      "source_sha256": "bc7f6b629dd3582768c9b9850d3057bc9915c78d77391d36a5515191ea257ecd",
-      "asset_sha256": "b0945d9592d248edeae6e8f9e0558ca5f1a3bd9eef5a4b8f7d7048ea7a59dc2e",
-      "cluster_frames": 75
-    },
-    {
-      "label": "t1",
-      "file": "t1.png",
-      "source": "2026-10-13/207547/r05/_ac.png",
-      "source_sha256": "21a6151d79f1f651f12234bfd57d25a9c2d2e0ab92be0e2a8f0dbf20e7372432",
-      "asset_sha256": "bb0e058dcd5382b0efc9fbc2fad5be230a98437c8b3798239308e9dbed868cce",
-      "cluster_frames": 72
-    },
-    {
-      "label": "w8",
-      "file": "w8.png",
-      "source": "2026-10-13/323028/r07/frame_01.png",
-      "source_sha256": "1ca44113d56d4163a17619c944bc60b13a2c47f12a03505d71b105e281620199",
-      "asset_sha256": "13d1e0fe98407b73e51e0fba08066efe84563028b4702ba1377bafaaca93d1f3",
-      "cluster_frames": 65
-    },
-    {
-      "label": "t6",
-      "file": "t6.png",
-      "source": "2026-10-15/291755/r05/_ac.png",
-      "source_sha256": "ba299bcb456ea8d4c5015776bdab1947f3522187dcc83090887cab83d3e67a02",
-      "asset_sha256": "0ab505d6e05cc66f4f8085f1f7d18f359405251f1d82550164fedc5ef7ef3725",
-      "cluster_frames": 4,
-      "relabel_20261025": {
-        "from": "t7",
-        "to": "t6",
-        "by": "Hark hark/caishen-count",
-        "evidence": "裁框上 2 绿横排+下 4 红=六筒，与本游戏手牌模板 tea_4p_r03_t6 同形；2026-10-15/291755/r05 同帧手牌财角标牌亦为 6筒。旧\"按 label 不按文件名\"的结论把 6/7 弄反了"
-      }
-    },
-    {
-      "label": "w7",
-      "file": "w7.png",
-      "source": "2026-10-13/207547/r06/frame_01.png",
-      "source_sha256": "ca0444ee8c90888c424a4185973454914d846239e531059b8d453e37643a66b2",
-      "asset_sha256": "90b90300fd5eb4ecc74aa5dfe0bfe581ff383b4dceed83afbec95e5d40244fcb",
-      "cluster_frames": 56
-    },
-    {
-      "label": "t8",
-      "file": "t8.png",
-      "source": "2026-10-12/756609/r01/frame_02.png",
-      "source_sha256": "b48e31688f2b61b8b0624ff1187ca7e312921ca63e25e19fdbcc43479584e6b2",
-      "asset_sha256": "2738ac35a93bdb1ba4b1dbe15ba22675832456d9c99066c07ce7258168a03bc1",
-      "cluster_frames": 39
-    },
-    {
-      "label": "w4",
-      "file": "w4.png",
-      "source": "2026-10-13/698763/r04/_ac.png",
-      "source_sha256": "10f69afd9f67b8e0f90a8cf232fc4273f826339bcc3655a6ec5ee56687632466",
-      "asset_sha256": "8566a465abc2a22758e7dafa21de6de29540cd81abd605bd4d442c03b69e35ee",
-      "cluster_frames": 36
-    },
-    {
-      "label": "bei",
-      "file": "bei.png",
-      "source": "2026-10-13/323028/r08/_ac.png",
-      "source_sha256": "cc52486f3da34b9ccec24a2861bf0d46e248097acf5997be1214e758e01a1f05",
-      "asset_sha256": "2bb7560a3a8b072e3f25a785225b4f262daf12188d6c0c91d008ba75641cf93e",
-      "cluster_frames": 35
-    },
-    {
-      "label": "xi",
-      "file": "xi.png",
-      "source": "2026-10-13/323028/r05/frame_01.png",
-      "source_sha256": "9b87770ca2a2809c2ebe248c829c98eafb57e4359dff3395154b045fea21dbc7",
-      "asset_sha256": "bb52741cae5e35b1577e13570a8e2bacb88dedf2e2f62c2b32f2a7dfa1fe321b",
-      "cluster_frames": 33
-    },
-    {
-      "label": "w2",
-      "file": "w2.png",
-      "source": "2026-10-13/748439/r05/_ac.png",
-      "source_sha256": "ee8361d2546265e47bad7d1d500741049ec25b94e3e4960391361f01e54f58dc",
-      "asset_sha256": "f21636184e3c2abe52d3ce81e8a8d1b30fd1d7d1ffdb6e49f27e8505b8f60ab5",
-      "cluster_frames": 33
-    },
-    {
-      "label": "w9",
-      "file": "w9.png",
-      "source": "2026-10-13/529766/r03/_ac.png",
-      "source_sha256": "5a9fb633b83514dfc0f7a717eb6c58291310589148d62f1c18fe398f2eca53ff",
-      "asset_sha256": "725f4d2fb4eb0ab032e37364eaf7b8edd49523133cc51ba308563247f106fc28",
-      "cluster_frames": 32
-    },
-    {
-      "label": "w3",
-      "file": "w3.png",
-      "source": "2026-10-14/034929/r04/_ac.png",
-      "source_sha256": "b96b30ed68441ff07a9e619f5036ef43064f978d5dccf81095247e91bfeff716",
-      "asset_sha256": "62d15947e4c618dbf2720e86e491412c0878f3ebf21bd93dcefd5f286284766d",
-      "cluster_frames": 32
-    },
-    {
-      "label": "s7",
-      "file": "s7.png",
-      "source": "2026-10-13/529766/r01/_ac.png",
-      "source_sha256": "02d7ccc6bf4774ba39ea01e666f3d3e56428f08e629e481bf7372b16d371fe4b",
-      "asset_sha256": "10cc1828e85a49fb2bafe7b02dc7fd33c983be387033f13d6178bfa535eccd97",
-      "cluster_frames": 31
-    },
-    {
-      "label": "t4",
-      "file": "t4.png",
-      "source": "2026-10-14/425556/r06/_ac.png",
-      "source_sha256": "0b5e929b13ed33558ad7d17d0ed251842d72fdb4e73d91e0f4067137fafb10f4",
-      "asset_sha256": "7635f35b613bc2263cb47dc8c4db785d3658104ef6a2e9a823d931fde8cc4927",
-      "cluster_frames": 31
-    },
-    {
-      "label": "s4",
-      "file": "s4.png",
-      "source": "2026-10-13/323028/r06/frame_01.png",
-      "source_sha256": "e4e6409555e133f554b473b9aa6d12b483d435706607e832a2d45160bd9fc940",
-      "asset_sha256": "8efe087dc7bf02c8a0c97eeca5b02f16dbf5920914ff603af9c409234ee29a5d",
-      "cluster_frames": 30
-    },
-    {
-      "label": "w5",
-      "file": "w5.png",
-      "source": "2026-10-13/529766/r05/_ac.png",
-      "source_sha256": "c28e0b6c5ecbbbc1ef55ff257ac378b982abe79647c590a9f9765bedd40d1faa",
-      "asset_sha256": "243e039c3f5f1f729ab22a145f05b1d6696ca53dfdff613920f815da434005bf",
-      "cluster_frames": 30
-    },
-    {
-      "label": "w1",
-      "file": "w1.png",
-      "source": "2026-10-13/748439/r04/_ac.png",
-      "source_sha256": "41e3a728c134454fc461f473945d3a8d23cf62f8d7f0b75b3aacc14e0ece9f21",
-      "asset_sha256": "7efabed421a251dc89507165d59603976861b31df93f7bbfc9dd797ce59733e0",
-      "cluster_frames": 27
-    },
-    {
-      "label": "bai",
-      "file": "bai.png",
-      "source": "2026-10-13/748439/r06/frame_02.png",
-      "source_sha256": "dd82667a8e9cab11adb85ed09030f5d071546990edc43c4c6c319ad93cac1499",
-      "asset_sha256": "54de3534dd212fe1f0f6fd72335b8506a0c1e37ca2b15d0577d07a6f6b7865fb",
-      "cluster_frames": 27
-    },
-    {
-      "label": "s1",
-      "file": "s1.png",
-      "source": "2026-10-13/323028/r03/frame_01.png",
-      "source_sha256": "85d19bc923b2702bac23ca57bf4e57ce26c5106c2b2ce01e31c1dfa478e49c22",
-      "asset_sha256": "38cd090c03776542bcedcb1091b256ba116463c1686f815b1237f5d157fa7f4e",
-      "cluster_frames": 26
-    },
-    {
-      "label": "t3",
-      "file": "t3.png",
-      "source": "2026-10-15/059418/r14/_ac.png",
-      "source_sha256": "5b4ac42735fce19bbd3925b48ffacc723fbc0af8effeabddb284b8b6ef0830de",
-      "asset_sha256": "380c8ba9ad60ccce1ac0f689171c161190dddca7bd574bf9ea76dfdcdbfd3fca",
-      "cluster_frames": 21
-    },
-    {
-      "label": "s8",
-      "file": "s8.png",
-      "source": "2026-10-13/698763/r03/_ac.png",
-      "source_sha256": "9ffcd7f4bd9b9edaad3ec4d06453db481b94a55c405f5fe39cc4a4ad9c339a05",
-      "asset_sha256": "6b7fc7036abee16d27c073555be722608c58fc76b9634b64270b2b87a56692fa",
-      "cluster_frames": 20
-    },
-    {
-      "label": "nan",
-      "file": "nan.png",
-      "source": "2026-10-13/529766/r06/_ac.png",
-      "source_sha256": "409922a0d4ef823810253a30ca559cacf8f3357e48923d508c9ec3d4299ce8a9",
-      "asset_sha256": "c4b98532742fed61ee9c75641f3b6237edca0469ff96a0ea182f8ee01b1ed38d",
-      "cluster_frames": 19
-    },
-    {
-      "label": "dong",
-      "file": "dong.png",
-      "source": "2026-10-13/323028/r04/frame_01.png",
-      "source_sha256": "8a06e8ed6dcc7786ac24af5f824d7c257a2940bb545d6d0bac60c410368a7e71",
-      "asset_sha256": "a1034b4eb0f54a4d49947f78763fd4e2ef7df87c23557f271622e66c7c2ee259",
-      "cluster_frames": 18
-    },
-    {
-      "label": "s3",
-      "file": "s3.png",
-      "source": "2026-10-13/748439/r02/_ac.png",
-      "source_sha256": "d688ff0db6726e12c6c066fbaff0c9a8f57944c391c78faa6e1842e722e4544e",
-      "asset_sha256": "686c2cc6509a42e64fce42ce76beb18cc7ee3682288cc4512daa29541d65ffed",
-      "cluster_frames": 10
-    },
-    {
-      "label": "s5",
-      "file": "s5.png",
-      "source": "2026-10-15/286734/r11/_ac.png",
-      "source_sha256": "5542e1e9c484baf8d2219ad705d18abe1c8779fbbebeb21fe0c067d4b20e0821",
-      "asset_sha256": "a282fc601ec31f2bc895bc2e1a73a2fca92bdbf209cfd5c6e95781a444777a6f",
-      "cluster_frames": 9
-    },
-    {
-      "label": "t9",
-      "file": "t9.png",
-      "source": "2026-10-14/614395/r05/_ac.png",
-      "source_sha256": "a722c8ce4c21acd90a462e0be429145c791e94f01c72d75c7bbff714e2bdf056",
-      "asset_sha256": "2fada11e9164567a2ce1ad68aa89dc33e90e4589906d5f1b045e8c18004cb93c",
-      "cluster_frames": 8
-    },
-    {
-      "label": "t7",
-      "file": "t7.png",
-      "source": "2026-10-13/207547/r03/_ac.png",
-      "source_sha256": "f11b4f39aacbacd74da43afffe36f2ab40f16310057a6c5e4e1f5776ade51a35",
-      "asset_sha256": "28021bb122f3726a7fbd7998efb89cad9489c4ca9d1c2548915e2235a4b35e95",
-      "cluster_frames": 58,
-      "relabel_20261025": {
-        "from": "t6",
-        "to": "t7",
-        "by": "Hark hark/caishen-count",
-        "evidence": "裁框上 3 绿斜排+下 4 红=七筒，与手牌模板 tea_p2a_r05_t7 同形；2026-10-13/207547/r03 同帧手牌财角标牌亦为 7筒"
-      }
-    },
-    {
-      "label": "w6",
-      "file": "w6.png",
-      "source": "2026-10-15/905891/r05/_ac.png",
-      "source_sha256": "723e93deb38e1e821e9415336378b1998c47318c3c062e216d7ae93567264035",
-      "asset_sha256": "f9e73023e396c7d6c320ca936fec35e33c9a77145f4f81125f80ba3644115204",
-      "cluster_frames": 4
-    },
-    {
-      "label": "t3",
-      "file": "t3_live.png",
-      "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205404_403250_abb9d7.png",
-      "source_sha256": "ed2ed17ae343221b06400e560dec4102d05bffcbde2c707a39ff29a0d1550ee1",
-      "asset_sha256": "4347cb18dc92352f9cf4bbf325d84ff82a62626b5444fb984030c83d5bbad520",
-      "cluster_frames": 63,
-      "visual_check": "三个圆环沿对角线排列"
-    },
-    {
-      "label": "dong",
-      "file": "dong_live.png",
-      "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205716_405083_d96078.png",
-      "source_sha256": "a5ac4d461255840af19bb7ea45614a1eab12fa82b9480100424729ba68694199",
-      "asset_sha256": "d9ab2e8ed8400fdabbd0ff445876b46bc912d4720ae21ef89d6e6f63540beb57",
-      "cluster_frames": 48,
-      "visual_check": "单个黑体「東」"
-    },
-    {
-      "label": "nan",
-      "file": "nan_live.png",
-      "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205858_483921_22f71d.png",
-      "source_sha256": "ed74aa1a7bc7b427f0bbf91f0378fbfd11a8f864dba7727b698b201e3d799ae6",
-      "asset_sha256": "1121044ff05b590772f0df9cbaa02847f975a7c0b51bd7a4c1699b5187210259",
-      "cluster_frames": 47,
-      "visual_check": "单个黑体「南」"
-    },
-    {
-      "label": "w1",
-      "file": "w1_live.png",
-      "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_210043_608900_da5d98.png",
-      "source_sha256": "96d159b178bd17cb93142dc232c1ebaf53b7b8085ef3d31691d0c5f54fe01725",
-      "asset_sha256": "300a3b8f3e1778c9fc5524968f961d7ed2b41064d063756d6994fc5fdf1b9f3a",
-      "cluster_frames": 27,
-      "visual_check": "红「一」+ 红「萬」"
-    },
-    {
-      "label": "s5",
-      "file": "s5_live.png",
-      "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205630_775235_879693.png",
-      "source_sha256": "f31b9292fe13261e6431037f38ef67992628539aa0f5d4455fd240c15d696818",
-      "asset_sha256": "1e735812e23f97397d0319707f1470e0c14e689aaf7173a30bd12ca929f3a2e3",
-      "cluster_frames": 19,
-      "visual_check": "四根绿条 + 中央红色小条"
-    },
-    {
-      "label": "w9",
-      "file": "w9_live.png",
-      "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_210151_647099_108bd2.png",
-      "source_sha256": "8647de1066f44b3c15261770dcfe0dc83b1e3e269929d623bb8865c93fe4ad4b",
-      "asset_sha256": "b2cb458d1908901c7d6b50abf85ff06a4764e8308abb416a1bb59da0fc90a407",
-      "cluster_frames": 8,
-      "visual_check": "黑「九」+ 红「萬」"
-    },
-    {
-      "label": "s4",
-      "file": "s4_live.png",
-      "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205345_749900_23750c.png",
-      "source_sha256": "a121edc036901a9e8a87b730868c1810131ba4b88b79ae9dee60c299687dc430",
-      "asset_sha256": "71a292a4221af17dd7ba70f2b2c83dd8b59a65d4c359dd1a1407af377c4c2113",
-      "cluster_frames": 4,
-      "visual_check": "四根绿条 2×2"
-    },
-    {
-      "label": "w8",
-      "file": "w8_live.png",
-      "source": "assist_sessions/20261023_223759/live/tea_2p/20261023_224556_780863_dd7e8d.png",
-      "source_sha256": "e809b512de706b110c4301084c0dd8e510b9b708509478c8db152020a207714f",
-      "asset_sha256": "143fe63b559dfcf1e2bb78c05172b154fd370d7e54f066081f49665042f97554",
-      "cluster_frames": 0,
-      "visual_check": "8x放大目视核对：财字角标+黑色'八'+红色'萬'，为八萬；主理人核对于2026-10-23 22:47"
-    },
-    {
-      "label": "s9",
-      "file": "s3_live2.png",
-      "source": "assist_sessions/20261023_220643/live/tea_2p\\20261023_220646_775714_eba342.png",
-      "source_sha256": "01899ce56b10498d2efdcb08352121fd1fe85c3c43f6796ad7a71e4c6adfa4fc",
-      "asset_sha256": "ae4c0b91fba09cba501e5baa2c6031ab61282db3075411b20a68d51ed66d10bd",
-      "cluster_frames": 0,
-      "visual_check": "8x目视核对为s3（三条）；主理人核对于2026-10-23 22:53",
-      "relabel_20261025": {
-        "from": "s3",
-        "to": "s9",
-        "by": "Hark hark/caishen-count",
-        "evidence": "同帧手牌带\"财\"角标的牌为 9条（20261023_220646/220648），裁框为 3x3 竖条中列红=九条；被误标 s3"
-      }
-    },
-    {
-      "label": "t4",
-      "file": "t2_live3.png",
-      "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223804_580031_20e553.png",
-      "source_sha256": "452449b78c4c58d0cd2e3f56e1d68d767d534b5f39981a68476b168f37ccd9ff",
-      "asset_sha256": "18f2672942fe712423a373f25200dc898ea4a06cdff3d19615445c1ba371deeb",
-      "cluster_frames": 0,
-      "visual_check": "8x目视核对为t2（二筒）；主理人核对于2026-10-23 22:53",
-      "relabel_20261025": {
-        "from": "t2",
-        "to": "t4",
-        "by": "Hark hark/caishen-count",
-        "evidence": "同帧手牌财角标牌为 4筒（20261023_223804），裁框 2x2 圆=四筒；被误标 t2"
-      }
-    },
-    {
-      "label": "t4",
-      "file": "t2_live4.png",
-      "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223830_885292_a0f9bc.png",
-      "source_sha256": "4922b39a7d6991e01f19caf9b583cb7faf2e68b0767426ecdec3b79646d08f8c",
-      "asset_sha256": "a4087abb2bdbbf4ded1df606ae881ce54e2e296f021300c1581bcfc2b596ddab",
-      "cluster_frames": 0,
-      "visual_check": "8x目视核对为t2（二筒斜排）；主理人核对于2026-10-23 22:53",
-      "relabel_20261025": {
-        "from": "t2",
-        "to": "t4",
-        "by": "Hark hark/caishen-count",
-        "evidence": "同帧手牌财角标牌为 4筒（20261023_223830），裁框 2x2 圆=四筒；被误标 t2"
-      }
-    },
-    {
-      "label": "t6",
-      "file": "t4_live5.png",
-      "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223841_216899_40bdc9.png",
-      "source_sha256": "b0b2798d4f013ec88b2cf80f5701a127e7339cf53899b468099c2d9bc371bc05",
-      "asset_sha256": "c4e19a4483982272a763d4dfa18c695955fd016a3e5310ba05b44a24878418de",
-      "cluster_frames": 0,
-      "visual_check": "8x目视核对为t4（四筒）；主理人核对于2026-10-23 22:53",
-      "relabel_20261025": {
-        "from": "t4",
-        "to": "t6",
-        "by": "Hark hark/caishen-count",
-        "evidence": "同帧手牌财角标牌为 6筒（20261023_223841），裁框上 2 绿横排+下 4 红=六筒；被误标 t4"
-      }
-    },
-    {
-      "label": "w7",
-      "file": "w7_live6.png",
-      "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_224608_903047_e2baa6.png",
-      "source_sha256": "89409f5c717a6d1a1cb4232113682959d0a22aaafd2e7ac9e9b0e5a26a2d9060",
-      "asset_sha256": "83436baa92cbac7b9c6d6468e542b830b3b1f13045045b6ffbf7485a9f61bca4",
-      "cluster_frames": 0,
-      "visual_check": "8x目视核对为w7（七萬）；主理人核对于2026-10-23 22:53"
-    },
-    {
-      "label": "w2",
-      "file": "w2_live.png",
-      "source": "assist_sessions/20261023_225317/live/tea_2p\\20261023_225657_264864_6580c8.png",
-      "source_sha256": "644ef7d0d117510cf18e02cf482d37e62a1ff74d8289bb1c5ffa52826af9649a",
-      "asset_sha256": "f3a1cc4bdadf97f861bf78d37181d3cb7292e033b65d3173affb29a3741bcbcd",
-      "cluster_frames": 0,
-      "visual_check": "8x目视核对：黑色'二'+红色'萬'，为二萬；主理人核对于2026-10-23 22:57"
-    },
-    {
-      "label": "t2",
-      "file": "t2_20261023_234439_5ba96f6c.png",
-      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261023_225827\\live\\tea_2p\\20261023_234222_268552_4a7b6e.png",
-      "source_sha256": "54986158f9b5a7a317e31590464dcc1ad6a274f36b70d7782aa7adf5639156e0",
-      "asset_sha256": "5ba96f6c5e789a802998797be53547ada7d9b9f7e153797293763ca59fc04111",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-23 23:45:06; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261023_225827"
-    },
-    {
-      "label": "t8",
-      "file": "t8_20261024_000701_5b1c4a6b.png",
-      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261023_235121\\live\\tea_2p\\20261024_000655_685328_089121.png",
-      "source_sha256": "d5ed6693adcadbfa8e34c342b1255304a5f82dc85503e31b198d617e9c3389ef",
-      "asset_sha256": "5b1c4a6b4f6971d9b90eee464cd2bcf76b5d3a11726de7581a29371ce5500e15",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:16:50; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261023_235121"
-    },
-    {
-      "label": "s2",
-      "file": "s2_20261024_004359_58069cb8.png",
-      "source": "..\\采集\\assist_sessions\\20261024_002903\\live\\tea_2p\\20261024_003231_828201_4b43a1.png",
-      "source_sha256": "9321246de20d3f2cd4a18c0d243283c33c1a896be2576cf7ba5f6773edd1934b",
-      "asset_sha256": "58069cb82bf7f24ffd17c1b6b0801b8f0de8ae08ffa8bf804fb5acba00c5f7e0",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:44:51; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_002903"
-    },
-    {
-      "label": "s1",
-      "file": "s1_20261024_004628_2b6bf6d1.png",
-      "source": "..\\采集\\assist_sessions\\20261024_002903\\live\\tea_2p\\20261024_004545_426885_4a2921.png",
-      "source_sha256": "5371185f166966130b24fef819920fcae86259ccee96be731706e03e58e4eab1",
-      "asset_sha256": "2b6bf6d1bebe448c3ec46d5d86ea7dc2091ab05fd0ecd565805953fa615329b0",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:47:29; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_002903"
-    },
-    {
-      "label": "w3",
-      "file": "w3_20261024_005447_74feba42.png",
-      "source": "..\\采集\\assist_sessions\\20261023_235121\\live\\tea_2p\\20261024_000406_560725_3d03ba.png",
-      "source_sha256": "70ba6d8d6090739410c0401cc8dc22c0b7480294a1ae4c4ddb9dc1f22a0ab62a",
-      "asset_sha256": "74feba42e8d7943be43ff7220c34a9492ec63a1f6a5dd4d27eac3040ab78929f",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:55:11; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261023_235121"
-    },
-    {
-      "label": "w6",
-      "file": "w6_20261024_005447_1b91114d.png",
-      "source": "..\\采集\\assist_sessions\\diagnostics\\20261024_tea2_probe\\live\\tea_2p\\20261024_001541_470388_588753.png",
-      "source_sha256": "e993d760dd04f00c19b550be388073817d29874cba2bfc7790d22024c3bbebaf",
-      "asset_sha256": "1b91114db935f800ff167834aa7129a7d3272afd122888e08eb90d087a870f5f",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:55:11; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "diagnostics"
-    },
-    {
-      "label": "s8",
-      "file": "s8_20261024_020117_a1675ecc.png",
-      "source": "采集/assist_sessions/20261024_015005/live/tea_2p\\20261024_015501_454576_8ddce2.png",
-      "source_sha256": "4b80e29075c7eabaa13857ff1522a3f8bc39a6f27c328c7c73042e5af32e6534",
-      "asset_sha256": "a1675ecca1f23f9a7fed5921a8720adba25ce796fce7602c793211ec785f8e2a",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 02:01:44; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_015005"
-    },
-    {
-      "label": "s3",
-      "file": "s3_20261024_020117_cdf442bf.png",
-      "source": "采集/assist_sessions/20261024_015005/live/tea_2p\\20261024_015901_174293_5e694d.png",
-      "source_sha256": "1052c91a2f95ea7e46325e66759692cb7dd9276de0952d94292f87e4010a8071",
-      "asset_sha256": "cdf442bf39533af0c9c689590bee5152d12f7a910e445f9a1385cef5ad8a37a2",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 02:01:46; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_015005"
-    },
-    {
-      "label": "t1",
-      "file": "t1_20261024_020558_92926306.png",
-      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261024_002903\\live\\tea_2p\\20261024_004902_334879_4f692d.png",
-      "source_sha256": "26928e21c34bee833af32b0e0818032c652b50f34898c109394226275d12fcd0",
-      "asset_sha256": "929263069877aab9547ace942040ba518ee8edf8732a77e3cfe0582c6c7515eb",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 02:06:12; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_002903"
-    },
-    {
-      "label": "bei",
-      "file": "bei_20261024_103417_fbfabd3c.png",
-      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\diagnostics\\codex_caishen_current_20261024.png",
-      "source_sha256": "5216bd7aa0fb99abd8edf54e852d2a1bc2b41f32f3f8ecdc95f901ae2c204767",
-      "asset_sha256": "fbfabd3c96d65d38ad874530bb4828da37c0111e80dbc9f35a35fa50d66dcd26",
-      "cluster_frames": 0,
-      "visual_check": "confirmed: live native frame and user screenshot show red 财 badge plus black 北; reviewed 2026-10-24 10:35",
-      "session_id": "diagnostics"
-    },
-    {
-      "label": "t9",
-      "file": "t9_20261024_112650_a669f293.png",
-      "source": "采集/assist_sessions/20261024_035412/live/tea_2p/20261024_110911_867393_f1fe70.png",
-      "source_sha256": "b904fdea4ab6c27a3046bc914414e82d72d74b39762cb0ebe6b5c1a7b02be270",
-      "asset_sha256": "a669f29396d5fca85925c493b62a1d014aba66186a3350a69e3f171ac94187cc",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 11:28:20; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_035412"
-    },
-    {
-      "label": "s7",
-      "file": "s7_20261024_112650_6b1b65e2.png",
-      "source": "采集/assist_sessions/20261024_035412/live/tea_2p/20261024_104839_549465_396b27.png",
-      "source_sha256": "f73185663ae2d91a668fb600da69a09f72707578ad305af1af774d812df0d215",
-      "asset_sha256": "6b1b65e20fc18dd5cf86d51d5b7107934a654f1a4c91759b5a5484bee748b211",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 11:28:21; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_035412"
-    },
-    {
-      "label": "s6",
-      "file": "s6_20261024_120207_f2a64ed9.png",
-      "source": "D:/温州麻将/.tmp/wb_probe_now.png",
-      "source_sha256": "825506e315b940c07fceb83c0aeaff7e73d580acc6adab4fbe6b574941c9e0d0",
-      "asset_sha256": "f2a64ed901672337640b163912cbab103eb80c59d37d2ddf9fadebb627108d30",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 12:02:16; operator read the 财-marked sprite by eye on the live table",
-      "session_id": "20261024_035412"
-    },
-    {
-      "label": "t7",
-      "file": "t7_20261024_232122_26cb8fb7.png",
-      "source": "采集/assist_sessions/20261024_211352/live/tea_2p/20261024_225442_037340_67061a.png",
-      "source_sha256": "6b7b9b53e289467738bf0d626040a0afaf8046d640ee1b5aa1f175dc3260d28f",
-      "asset_sha256": "26cb8fb7048388884d892a853122b74c6601e3cdb5654cf9db912d0574039433",
-      "visual_check": "confirmed: manual_pick reviewed 2026-10-24 23:21:22; operator read the 财-marked sprite by eye on the live table as 7筒(t7); Round1 assist had fail-closed 小牌匹配不够确定 before this live template",
-      "session_id": "20261024_211352",
-      "source_kind": "manual_pick",
-      "review_method": "human_eye",
-      "reviewer": "operator",
-      "source_frame_hash": "6b7b9b53e289467738bf0d626040a0afaf8046d640ee1b5aa1f175dc3260d28f",
-      "heldout_passed": true,
-      "heldout_score": 1.0,
-      "heldout_witness_hash": "397715733283c28f3d658bcbcbe3936015a0ed936fef4d7817f920ba885fcd7c",
-      "heldout_reason": "independent same-round live frame 20261024_225500_432052_b46480.png score=1.0000",
-      "suggested_label": null
-    },
-    {
-      "label": "bai",
-      "file": "bai_live.png",
-      "source": "_takeover/play3_5556/frames/20261025_013635_417390_before_b65005.png",
-      "source_sha256": "fbfa30ddb0339d860293ef1e3381cb972983296241bb3b4d6c3a175f8d1bd716",
-      "asset_sha256": "fe15440d2874ca754d7eadb4c9ad842d010dbbc70fccd16b34c0fa3f2446bcbd",
-      "cluster_frames": 629,
-      "visual_check": "2026-10-25 目视复核：白板（空白牌面+红财角标）；play3 双端 631 帧中 629 帧裁片逐字节一致，跨对局 round1/now2 裁片亦一致"
-    },
-    {
-      "label": "t5",
-      "file": "t5_live.png",
-      "source": "_takeover/live_5556/frames/20261025_012647_598849_before_2b9c49.png",
-      "source_sha256": "0422686be78df3198d674788488576b8d2dc9c197aea3ac32ac3547b6977e530",
-      "asset_sha256": "95d20a23516c09f4d8761569867f221cab15c768322ce6d27ab51e8bcb55d513",
-      "cluster_frames": 22,
-      "visual_check": "2026-10-25 目视复核：五筒（四角绿点+中心红点）；live 双端 22 帧裁片逐字节一致"
-    }
-  ],
-  "note": "Provisional visual labels; source frames retained. Entries sourced under assist_sessions/*/live are lossless ADB screenshots so real-play frames clear _MIN_SCORE without relaxing it. A label may own several templates; detection keeps the best score per label. Every label was verified by eye on an 8x crop (live entries by the operator on the table, then re-checked here) — never by cluster majority vote."
+ "roi": [
+  622,
+  348,
+  677,
+  423
+ ],
+ "templates": [
+  {
+   "label": "s9",
+   "file": "s9.png",
+   "source": "2026-10-12/010478/r01/_ac.png",
+   "source_sha256": "5ca39c7d219ba1abda935b2df33563cad6b056afcf518fe0738d58f5a4529232",
+   "asset_sha256": "c7c90a1f62656bf08f1ba3df2ea2cf97eaa22b4fe6505be185b42256a7ae698b",
+   "cluster_frames": 171
+  },
+  {
+   "label": "s6",
+   "file": "s6.png",
+   "source": "2026-10-13/323028/r01/_ac.png",
+   "source_sha256": "fb70fa7539030bdea9f2609f463f7b300e9e035d698a4c56c93b0f346c018872",
+   "asset_sha256": "2b4008f7dea285e6e49947a0e9bc786ea1088ca9a39825de4e6069fa85e62484",
+   "cluster_frames": 119
+  },
+  {
+   "label": "s2",
+   "file": "s2.png",
+   "source": "2026-10-13/207547/r02/_ac.png",
+   "source_sha256": "bf195cebdb3520e7d2d82415c2020dfff303350e9ed8a202c3c73a58607e434b",
+   "asset_sha256": "d0664a3992c902c28a9b77c492c07b539dc94f9424b479c304a8ccbd558c2694",
+   "cluster_frames": 105
+  },
+  {
+   "label": "t5",
+   "file": "t5.png",
+   "source": "2026-10-13/207547/r01/_ac.png",
+   "source_sha256": "bc7f6b629dd3582768c9b9850d3057bc9915c78d77391d36a5515191ea257ecd",
+   "asset_sha256": "b0945d9592d248edeae6e8f9e0558ca5f1a3bd9eef5a4b8f7d7048ea7a59dc2e",
+   "cluster_frames": 75
+  },
+  {
+   "label": "t1",
+   "file": "t1.png",
+   "source": "2026-10-13/207547/r05/_ac.png",
+   "source_sha256": "21a6151d79f1f651f12234bfd57d25a9c2d2e0ab92be0e2a8f0dbf20e7372432",
+   "asset_sha256": "bb0e058dcd5382b0efc9fbc2fad5be230a98437c8b3798239308e9dbed868cce",
+   "cluster_frames": 72
+  },
+  {
+   "label": "w8",
+   "file": "w8.png",
+   "source": "2026-10-13/323028/r07/frame_01.png",
+   "source_sha256": "1ca44113d56d4163a17619c944bc60b13a2c47f12a03505d71b105e281620199",
+   "asset_sha256": "13d1e0fe98407b73e51e0fba08066efe84563028b4702ba1377bafaaca93d1f3",
+   "cluster_frames": 65
+  },
+  {
+   "label": "t6",
+   "file": "t6.png",
+   "source": "2026-10-15/291755/r05/_ac.png",
+   "source_sha256": "ba299bcb456ea8d4c5015776bdab1947f3522187dcc83090887cab83d3e67a02",
+   "asset_sha256": "0ab505d6e05cc66f4f8085f1f7d18f359405251f1d82550164fedc5ef7ef3725",
+   "cluster_frames": 4,
+   "relabel_20261025": {
+    "from": "t7",
+    "to": "t6",
+    "by": "Hark hark/caishen-count",
+    "evidence": "裁框上 2 绿横排+下 4 红=六筒，与本游戏手牌模板 tea_4p_r03_t6 同形；2026-10-15/291755/r05 同帧手牌财角标牌亦为 6筒。旧\"按 label 不按文件名\"的结论把 6/7 弄反了"
+   }
+  },
+  {
+   "label": "w7",
+   "file": "w7.png",
+   "source": "2026-10-13/207547/r06/frame_01.png",
+   "source_sha256": "ca0444ee8c90888c424a4185973454914d846239e531059b8d453e37643a66b2",
+   "asset_sha256": "90b90300fd5eb4ecc74aa5dfe0bfe581ff383b4dceed83afbec95e5d40244fcb",
+   "cluster_frames": 56
+  },
+  {
+   "label": "t8",
+   "file": "t8.png",
+   "source": "2026-10-12/756609/r01/frame_02.png",
+   "source_sha256": "b48e31688f2b61b8b0624ff1187ca7e312921ca63e25e19fdbcc43479584e6b2",
+   "asset_sha256": "2738ac35a93bdb1ba4b1dbe15ba22675832456d9c99066c07ce7258168a03bc1",
+   "cluster_frames": 39
+  },
+  {
+   "label": "w4",
+   "file": "w4.png",
+   "source": "2026-10-13/698763/r04/_ac.png",
+   "source_sha256": "10f69afd9f67b8e0f90a8cf232fc4273f826339bcc3655a6ec5ee56687632466",
+   "asset_sha256": "8566a465abc2a22758e7dafa21de6de29540cd81abd605bd4d442c03b69e35ee",
+   "cluster_frames": 36
+  },
+  {
+   "label": "bei",
+   "file": "bei.png",
+   "source": "2026-10-13/323028/r08/_ac.png",
+   "source_sha256": "cc52486f3da34b9ccec24a2861bf0d46e248097acf5997be1214e758e01a1f05",
+   "asset_sha256": "2bb7560a3a8b072e3f25a785225b4f262daf12188d6c0c91d008ba75641cf93e",
+   "cluster_frames": 35
+  },
+  {
+   "label": "xi",
+   "file": "xi.png",
+   "source": "2026-10-13/323028/r05/frame_01.png",
+   "source_sha256": "9b87770ca2a2809c2ebe248c829c98eafb57e4359dff3395154b045fea21dbc7",
+   "asset_sha256": "bb52741cae5e35b1577e13570a8e2bacb88dedf2e2f62c2b32f2a7dfa1fe321b",
+   "cluster_frames": 33
+  },
+  {
+   "label": "w2",
+   "file": "w2.png",
+   "source": "2026-10-13/748439/r05/_ac.png",
+   "source_sha256": "ee8361d2546265e47bad7d1d500741049ec25b94e3e4960391361f01e54f58dc",
+   "asset_sha256": "f21636184e3c2abe52d3ce81e8a8d1b30fd1d7d1ffdb6e49f27e8505b8f60ab5",
+   "cluster_frames": 33
+  },
+  {
+   "label": "w9",
+   "file": "w9.png",
+   "source": "2026-10-13/529766/r03/_ac.png",
+   "source_sha256": "5a9fb633b83514dfc0f7a717eb6c58291310589148d62f1c18fe398f2eca53ff",
+   "asset_sha256": "725f4d2fb4eb0ab032e37364eaf7b8edd49523133cc51ba308563247f106fc28",
+   "cluster_frames": 32
+  },
+  {
+   "label": "w3",
+   "file": "w3.png",
+   "source": "2026-10-14/034929/r04/_ac.png",
+   "source_sha256": "b96b30ed68441ff07a9e619f5036ef43064f978d5dccf81095247e91bfeff716",
+   "asset_sha256": "62d15947e4c618dbf2720e86e491412c0878f3ebf21bd93dcefd5f286284766d",
+   "cluster_frames": 32
+  },
+  {
+   "label": "s7",
+   "file": "s7.png",
+   "source": "2026-10-13/529766/r01/_ac.png",
+   "source_sha256": "02d7ccc6bf4774ba39ea01e666f3d3e56428f08e629e481bf7372b16d371fe4b",
+   "asset_sha256": "10cc1828e85a49fb2bafe7b02dc7fd33c983be387033f13d6178bfa535eccd97",
+   "cluster_frames": 31
+  },
+  {
+   "label": "t4",
+   "file": "t4.png",
+   "source": "2026-10-14/425556/r06/_ac.png",
+   "source_sha256": "0b5e929b13ed33558ad7d17d0ed251842d72fdb4e73d91e0f4067137fafb10f4",
+   "asset_sha256": "7635f35b613bc2263cb47dc8c4db785d3658104ef6a2e9a823d931fde8cc4927",
+   "cluster_frames": 31
+  },
+  {
+   "label": "s4",
+   "file": "s4.png",
+   "source": "2026-10-13/323028/r06/frame_01.png",
+   "source_sha256": "e4e6409555e133f554b473b9aa6d12b483d435706607e832a2d45160bd9fc940",
+   "asset_sha256": "8efe087dc7bf02c8a0c97eeca5b02f16dbf5920914ff603af9c409234ee29a5d",
+   "cluster_frames": 30
+  },
+  {
+   "label": "w5",
+   "file": "w5.png",
+   "source": "2026-10-13/529766/r05/_ac.png",
+   "source_sha256": "c28e0b6c5ecbbbc1ef55ff257ac378b982abe79647c590a9f9765bedd40d1faa",
+   "asset_sha256": "243e039c3f5f1f729ab22a145f05b1d6696ca53dfdff613920f815da434005bf",
+   "cluster_frames": 30
+  },
+  {
+   "label": "w1",
+   "file": "w1.png",
+   "source": "2026-10-13/748439/r04/_ac.png",
+   "source_sha256": "41e3a728c134454fc461f473945d3a8d23cf62f8d7f0b75b3aacc14e0ece9f21",
+   "asset_sha256": "7efabed421a251dc89507165d59603976861b31df93f7bbfc9dd797ce59733e0",
+   "cluster_frames": 27
+  },
+  {
+   "label": "bai",
+   "file": "bai.png",
+   "source": "2026-10-13/748439/r06/frame_02.png",
+   "source_sha256": "dd82667a8e9cab11adb85ed09030f5d071546990edc43c4c6c319ad93cac1499",
+   "asset_sha256": "54de3534dd212fe1f0f6fd72335b8506a0c1e37ca2b15d0577d07a6f6b7865fb",
+   "cluster_frames": 27
+  },
+  {
+   "label": "s1",
+   "file": "s1.png",
+   "source": "2026-10-13/323028/r03/frame_01.png",
+   "source_sha256": "85d19bc923b2702bac23ca57bf4e57ce26c5106c2b2ce01e31c1dfa478e49c22",
+   "asset_sha256": "38cd090c03776542bcedcb1091b256ba116463c1686f815b1237f5d157fa7f4e",
+   "cluster_frames": 26
+  },
+  {
+   "label": "t3",
+   "file": "t3.png",
+   "source": "2026-10-15/059418/r14/_ac.png",
+   "source_sha256": "5b4ac42735fce19bbd3925b48ffacc723fbc0af8effeabddb284b8b6ef0830de",
+   "asset_sha256": "380c8ba9ad60ccce1ac0f689171c161190dddca7bd574bf9ea76dfdcdbfd3fca",
+   "cluster_frames": 21
+  },
+  {
+   "label": "s8",
+   "file": "s8.png",
+   "source": "2026-10-13/698763/r03/_ac.png",
+   "source_sha256": "9ffcd7f4bd9b9edaad3ec4d06453db481b94a55c405f5fe39cc4a4ad9c339a05",
+   "asset_sha256": "6b7fc7036abee16d27c073555be722608c58fc76b9634b64270b2b87a56692fa",
+   "cluster_frames": 20
+  },
+  {
+   "label": "nan",
+   "file": "nan.png",
+   "source": "2026-10-13/529766/r06/_ac.png",
+   "source_sha256": "409922a0d4ef823810253a30ca559cacf8f3357e48923d508c9ec3d4299ce8a9",
+   "asset_sha256": "c4b98532742fed61ee9c75641f3b6237edca0469ff96a0ea182f8ee01b1ed38d",
+   "cluster_frames": 19
+  },
+  {
+   "label": "dong",
+   "file": "dong.png",
+   "source": "2026-10-13/323028/r04/frame_01.png",
+   "source_sha256": "8a06e8ed6dcc7786ac24af5f824d7c257a2940bb545d6d0bac60c410368a7e71",
+   "asset_sha256": "a1034b4eb0f54a4d49947f78763fd4e2ef7df87c23557f271622e66c7c2ee259",
+   "cluster_frames": 18
+  },
+  {
+   "label": "s3",
+   "file": "s3.png",
+   "source": "2026-10-13/748439/r02/_ac.png",
+   "source_sha256": "d688ff0db6726e12c6c066fbaff0c9a8f57944c391c78faa6e1842e722e4544e",
+   "asset_sha256": "686c2cc6509a42e64fce42ce76beb18cc7ee3682288cc4512daa29541d65ffed",
+   "cluster_frames": 10
+  },
+  {
+   "label": "s5",
+   "file": "s5.png",
+   "source": "2026-10-15/286734/r11/_ac.png",
+   "source_sha256": "5542e1e9c484baf8d2219ad705d18abe1c8779fbbebeb21fe0c067d4b20e0821",
+   "asset_sha256": "a282fc601ec31f2bc895bc2e1a73a2fca92bdbf209cfd5c6e95781a444777a6f",
+   "cluster_frames": 9
+  },
+  {
+   "label": "t9",
+   "file": "t9.png",
+   "source": "2026-10-14/614395/r05/_ac.png",
+   "source_sha256": "a722c8ce4c21acd90a462e0be429145c791e94f01c72d75c7bbff714e2bdf056",
+   "asset_sha256": "2fada11e9164567a2ce1ad68aa89dc33e90e4589906d5f1b045e8c18004cb93c",
+   "cluster_frames": 8
+  },
+  {
+   "label": "t7",
+   "file": "t7.png",
+   "source": "2026-10-13/207547/r03/_ac.png",
+   "source_sha256": "f11b4f39aacbacd74da43afffe36f2ab40f16310057a6c5e4e1f5776ade51a35",
+   "asset_sha256": "28021bb122f3726a7fbd7998efb89cad9489c4ca9d1c2548915e2235a4b35e95",
+   "cluster_frames": 58,
+   "relabel_20261025": {
+    "from": "t6",
+    "to": "t7",
+    "by": "Hark hark/caishen-count",
+    "evidence": "裁框上 3 绿斜排+下 4 红=七筒，与手牌模板 tea_p2a_r05_t7 同形；2026-10-13/207547/r03 同帧手牌财角标牌亦为 7筒"
+   }
+  },
+  {
+   "label": "w6",
+   "file": "w6.png",
+   "source": "2026-10-15/905891/r05/_ac.png",
+   "source_sha256": "723e93deb38e1e821e9415336378b1998c47318c3c062e216d7ae93567264035",
+   "asset_sha256": "f9e73023e396c7d6c320ca936fec35e33c9a77145f4f81125f80ba3644115204",
+   "cluster_frames": 4
+  },
+  {
+   "label": "t3",
+   "file": "t3_live.png",
+   "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205404_403250_abb9d7.png",
+   "source_sha256": "ed2ed17ae343221b06400e560dec4102d05bffcbde2c707a39ff29a0d1550ee1",
+   "asset_sha256": "4347cb18dc92352f9cf4bbf325d84ff82a62626b5444fb984030c83d5bbad520",
+   "cluster_frames": 63,
+   "visual_check": "三个圆环沿对角线排列"
+  },
+  {
+   "label": "dong",
+   "file": "dong_live.png",
+   "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205716_405083_d96078.png",
+   "source_sha256": "a5ac4d461255840af19bb7ea45614a1eab12fa82b9480100424729ba68694199",
+   "asset_sha256": "d9ab2e8ed8400fdabbd0ff445876b46bc912d4720ae21ef89d6e6f63540beb57",
+   "cluster_frames": 48,
+   "visual_check": "单个黑体「東」"
+  },
+  {
+   "label": "nan",
+   "file": "nan_live.png",
+   "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205858_483921_22f71d.png",
+   "source_sha256": "ed74aa1a7bc7b427f0bbf91f0378fbfd11a8f864dba7727b698b201e3d799ae6",
+   "asset_sha256": "1121044ff05b590772f0df9cbaa02847f975a7c0b51bd7a4c1699b5187210259",
+   "cluster_frames": 47,
+   "visual_check": "单个黑体「南」"
+  },
+  {
+   "label": "w1",
+   "file": "w1_live.png",
+   "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_210043_608900_da5d98.png",
+   "source_sha256": "96d159b178bd17cb93142dc232c1ebaf53b7b8085ef3d31691d0c5f54fe01725",
+   "asset_sha256": "300a3b8f3e1778c9fc5524968f961d7ed2b41064d063756d6994fc5fdf1b9f3a",
+   "cluster_frames": 27,
+   "visual_check": "红「一」+ 红「萬」"
+  },
+  {
+   "label": "s5",
+   "file": "s5_live.png",
+   "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205630_775235_879693.png",
+   "source_sha256": "f31b9292fe13261e6431037f38ef67992628539aa0f5d4455fd240c15d696818",
+   "asset_sha256": "1e735812e23f97397d0319707f1470e0c14e689aaf7173a30bd12ca929f3a2e3",
+   "cluster_frames": 19,
+   "visual_check": "四根绿条 + 中央红色小条"
+  },
+  {
+   "label": "w9",
+   "file": "w9_live.png",
+   "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_210151_647099_108bd2.png",
+   "source_sha256": "8647de1066f44b3c15261770dcfe0dc83b1e3e269929d623bb8865c93fe4ad4b",
+   "asset_sha256": "b2cb458d1908901c7d6b50abf85ff06a4764e8308abb416a1bb59da0fc90a407",
+   "cluster_frames": 8,
+   "visual_check": "黑「九」+ 红「萬」"
+  },
+  {
+   "label": "s4",
+   "file": "s4_live.png",
+   "source": "assist_sessions/20261023_201640/live/tea_2p/20261023_205345_749900_23750c.png",
+   "source_sha256": "a121edc036901a9e8a87b730868c1810131ba4b88b79ae9dee60c299687dc430",
+   "asset_sha256": "71a292a4221af17dd7ba70f2b2c83dd8b59a65d4c359dd1a1407af377c4c2113",
+   "cluster_frames": 4,
+   "visual_check": "四根绿条 2×2"
+  },
+  {
+   "label": "w8",
+   "file": "w8_live.png",
+   "source": "assist_sessions/20261023_223759/live/tea_2p/20261023_224556_780863_dd7e8d.png",
+   "source_sha256": "e809b512de706b110c4301084c0dd8e510b9b708509478c8db152020a207714f",
+   "asset_sha256": "143fe63b559dfcf1e2bb78c05172b154fd370d7e54f066081f49665042f97554",
+   "cluster_frames": 0,
+   "visual_check": "8x放大目视核对：财字角标+黑色'八'+红色'萬'，为八萬；主理人核对于2026-10-23 22:47"
+  },
+  {
+   "label": "s9",
+   "file": "s3_live2.png",
+   "source": "assist_sessions/20261023_220643/live/tea_2p\\20261023_220646_775714_eba342.png",
+   "source_sha256": "01899ce56b10498d2efdcb08352121fd1fe85c3c43f6796ad7a71e4c6adfa4fc",
+   "asset_sha256": "ae4c0b91fba09cba501e5baa2c6031ab61282db3075411b20a68d51ed66d10bd",
+   "cluster_frames": 0,
+   "visual_check": "8x目视核对为s3（三条）；主理人核对于2026-10-23 22:53",
+   "relabel_20261025": {
+    "from": "s3",
+    "to": "s9",
+    "by": "Hark hark/caishen-count",
+    "evidence": "同帧手牌带\"财\"角标的牌为 9条（20261023_220646/220648），裁框为 3x3 竖条中列红=九条；被误标 s3"
+   }
+  },
+  {
+   "label": "t4",
+   "file": "t2_live3.png",
+   "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223804_580031_20e553.png",
+   "source_sha256": "452449b78c4c58d0cd2e3f56e1d68d767d534b5f39981a68476b168f37ccd9ff",
+   "asset_sha256": "18f2672942fe712423a373f25200dc898ea4a06cdff3d19615445c1ba371deeb",
+   "cluster_frames": 0,
+   "visual_check": "8x目视核对为t2（二筒）；主理人核对于2026-10-23 22:53",
+   "relabel_20261025": {
+    "from": "t2",
+    "to": "t4",
+    "by": "Hark hark/caishen-count",
+    "evidence": "同帧手牌财角标牌为 4筒（20261023_223804），裁框 2x2 圆=四筒；被误标 t2"
+   }
+  },
+  {
+   "label": "t4",
+   "file": "t2_live4.png",
+   "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223830_885292_a0f9bc.png",
+   "source_sha256": "4922b39a7d6991e01f19caf9b583cb7faf2e68b0767426ecdec3b79646d08f8c",
+   "asset_sha256": "a4087abb2bdbbf4ded1df606ae881ce54e2e296f021300c1581bcfc2b596ddab",
+   "cluster_frames": 0,
+   "visual_check": "8x目视核对为t2（二筒斜排）；主理人核对于2026-10-23 22:53",
+   "relabel_20261025": {
+    "from": "t2",
+    "to": "t4",
+    "by": "Hark hark/caishen-count",
+    "evidence": "同帧手牌财角标牌为 4筒（20261023_223830），裁框 2x2 圆=四筒；被误标 t2"
+   }
+  },
+  {
+   "label": "t6",
+   "file": "t4_live5.png",
+   "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_223841_216899_40bdc9.png",
+   "source_sha256": "b0b2798d4f013ec88b2cf80f5701a127e7339cf53899b468099c2d9bc371bc05",
+   "asset_sha256": "c4e19a4483982272a763d4dfa18c695955fd016a3e5310ba05b44a24878418de",
+   "cluster_frames": 0,
+   "visual_check": "8x目视核对为t4（四筒）；主理人核对于2026-10-23 22:53",
+   "relabel_20261025": {
+    "from": "t4",
+    "to": "t6",
+    "by": "Hark hark/caishen-count",
+    "evidence": "同帧手牌财角标牌为 6筒（20261023_223841），裁框上 2 绿横排+下 4 红=六筒；被误标 t4"
+   }
+  },
+  {
+   "label": "w7",
+   "file": "w7_live6.png",
+   "source": "assist_sessions/20261023_223759/live/tea_2p\\20261023_224608_903047_e2baa6.png",
+   "source_sha256": "89409f5c717a6d1a1cb4232113682959d0a22aaafd2e7ac9e9b0e5a26a2d9060",
+   "asset_sha256": "83436baa92cbac7b9c6d6468e542b830b3b1f13045045b6ffbf7485a9f61bca4",
+   "cluster_frames": 0,
+   "visual_check": "8x目视核对为w7（七萬）；主理人核对于2026-10-23 22:53"
+  },
+  {
+   "label": "w2",
+   "file": "w2_live.png",
+   "source": "assist_sessions/20261023_225317/live/tea_2p\\20261023_225657_264864_6580c8.png",
+   "source_sha256": "644ef7d0d117510cf18e02cf482d37e62a1ff74d8289bb1c5ffa52826af9649a",
+   "asset_sha256": "f3a1cc4bdadf97f861bf78d37181d3cb7292e033b65d3173affb29a3741bcbcd",
+   "cluster_frames": 0,
+   "visual_check": "8x目视核对：黑色'二'+红色'萬'，为二萬；主理人核对于2026-10-23 22:57"
+  },
+  {
+   "label": "t2",
+   "file": "t2_20261023_234439_5ba96f6c.png",
+   "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261023_225827\\live\\tea_2p\\20261023_234222_268552_4a7b6e.png",
+   "source_sha256": "54986158f9b5a7a317e31590464dcc1ad6a274f36b70d7782aa7adf5639156e0",
+   "asset_sha256": "5ba96f6c5e789a802998797be53547ada7d9b9f7e153797293763ca59fc04111",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-23 23:45:06; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261023_225827"
+  },
+  {
+   "label": "t8",
+   "file": "t8_20261024_000701_5b1c4a6b.png",
+   "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261023_235121\\live\\tea_2p\\20261024_000655_685328_089121.png",
+   "source_sha256": "d5ed6693adcadbfa8e34c342b1255304a5f82dc85503e31b198d617e9c3389ef",
+   "asset_sha256": "5b1c4a6b4f6971d9b90eee464cd2bcf76b5d3a11726de7581a29371ce5500e15",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:16:50; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261023_235121"
+  },
+  {
+   "label": "s2",
+   "file": "s2_20261024_004359_58069cb8.png",
+   "source": "..\\采集\\assist_sessions\\20261024_002903\\live\\tea_2p\\20261024_003231_828201_4b43a1.png",
+   "source_sha256": "9321246de20d3f2cd4a18c0d243283c33c1a896be2576cf7ba5f6773edd1934b",
+   "asset_sha256": "58069cb82bf7f24ffd17c1b6b0801b8f0de8ae08ffa8bf804fb5acba00c5f7e0",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:44:51; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_002903"
+  },
+  {
+   "label": "s1",
+   "file": "s1_20261024_004628_2b6bf6d1.png",
+   "source": "..\\采集\\assist_sessions\\20261024_002903\\live\\tea_2p\\20261024_004545_426885_4a2921.png",
+   "source_sha256": "5371185f166966130b24fef819920fcae86259ccee96be731706e03e58e4eab1",
+   "asset_sha256": "2b6bf6d1bebe448c3ec46d5d86ea7dc2091ab05fd0ecd565805953fa615329b0",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:47:29; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_002903"
+  },
+  {
+   "label": "w3",
+   "file": "w3_20261024_005447_74feba42.png",
+   "source": "..\\采集\\assist_sessions\\20261023_235121\\live\\tea_2p\\20261024_000406_560725_3d03ba.png",
+   "source_sha256": "70ba6d8d6090739410c0401cc8dc22c0b7480294a1ae4c4ddb9dc1f22a0ab62a",
+   "asset_sha256": "74feba42e8d7943be43ff7220c34a9492ec63a1f6a5dd4d27eac3040ab78929f",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:55:11; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261023_235121"
+  },
+  {
+   "label": "w6",
+   "file": "w6_20261024_005447_1b91114d.png",
+   "source": "..\\采集\\assist_sessions\\diagnostics\\20261024_tea2_probe\\live\\tea_2p\\20261024_001541_470388_588753.png",
+   "source_sha256": "e993d760dd04f00c19b550be388073817d29874cba2bfc7790d22024c3bbebaf",
+   "asset_sha256": "1b91114db935f800ff167834aa7129a7d3272afd122888e08eb90d087a870f5f",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 00:55:11; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "diagnostics"
+  },
+  {
+   "label": "s8",
+   "file": "s8_20261024_020117_a1675ecc.png",
+   "source": "采集/assist_sessions/20261024_015005/live/tea_2p\\20261024_015501_454576_8ddce2.png",
+   "source_sha256": "4b80e29075c7eabaa13857ff1522a3f8bc39a6f27c328c7c73042e5af32e6534",
+   "asset_sha256": "a1675ecca1f23f9a7fed5921a8720adba25ce796fce7602c793211ec785f8e2a",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 02:01:44; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_015005"
+  },
+  {
+   "label": "s3",
+   "file": "s3_20261024_020117_cdf442bf.png",
+   "source": "采集/assist_sessions/20261024_015005/live/tea_2p\\20261024_015901_174293_5e694d.png",
+   "source_sha256": "1052c91a2f95ea7e46325e66759692cb7dd9276de0952d94292f87e4010a8071",
+   "asset_sha256": "cdf442bf39533af0c9c689590bee5152d12f7a910e445f9a1385cef5ad8a37a2",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 02:01:46; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_015005"
+  },
+  {
+   "label": "t1",
+   "file": "t1_20261024_020558_92926306.png",
+   "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261024_002903\\live\\tea_2p\\20261024_004902_334879_4f692d.png",
+   "source_sha256": "26928e21c34bee833af32b0e0818032c652b50f34898c109394226275d12fcd0",
+   "asset_sha256": "929263069877aab9547ace942040ba518ee8edf8732a77e3cfe0582c6c7515eb",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 02:06:12; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_002903"
+  },
+  {
+   "label": "bei",
+   "file": "bei_20261024_103417_fbfabd3c.png",
+   "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\diagnostics\\codex_caishen_current_20261024.png",
+   "source_sha256": "5216bd7aa0fb99abd8edf54e852d2a1bc2b41f32f3f8ecdc95f901ae2c204767",
+   "asset_sha256": "fbfabd3c96d65d38ad874530bb4828da37c0111e80dbc9f35a35fa50d66dcd26",
+   "cluster_frames": 0,
+   "visual_check": "confirmed: live native frame and user screenshot show red 财 badge plus black 北; reviewed 2026-10-24 10:35",
+   "session_id": "diagnostics"
+  },
+  {
+   "label": "t9",
+   "file": "t9_20261024_112650_a669f293.png",
+   "source": "采集/assist_sessions/20261024_035412/live/tea_2p/20261024_110911_867393_f1fe70.png",
+   "source_sha256": "b904fdea4ab6c27a3046bc914414e82d72d74b39762cb0ebe6b5c1a7b02be270",
+   "asset_sha256": "a669f29396d5fca85925c493b62a1d014aba66186a3350a69e3f171ac94187cc",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 11:28:20; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_035412"
+  },
+  {
+   "label": "s7",
+   "file": "s7_20261024_112650_6b1b65e2.png",
+   "source": "采集/assist_sessions/20261024_035412/live/tea_2p/20261024_104839_549465_396b27.png",
+   "source_sha256": "f73185663ae2d91a668fb600da69a09f72707578ad305af1af774d812df0d215",
+   "asset_sha256": "6b1b65e20fc18dd5cf86d51d5b7107934a654f1a4c91759b5a5484bee748b211",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 11:28:21; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_035412"
+  },
+  {
+   "label": "s6",
+   "file": "s6_20261024_120207_f2a64ed9.png",
+   "source": "D:/温州麻将/.tmp/wb_probe_now.png",
+   "source_sha256": "825506e315b940c07fceb83c0aeaff7e73d580acc6adab4fbe6b574941c9e0d0",
+   "asset_sha256": "f2a64ed901672337640b163912cbab103eb80c59d37d2ddf9fadebb627108d30",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 12:02:16; operator read the 财-marked sprite by eye on the live table",
+   "session_id": "20261024_035412"
+  },
+  {
+   "label": "t7",
+   "file": "t7_20261024_232122_26cb8fb7.png",
+   "source": "采集/assist_sessions/20261024_211352/live/tea_2p/20261024_225442_037340_67061a.png",
+   "source_sha256": "6b7b9b53e289467738bf0d626040a0afaf8046d640ee1b5aa1f175dc3260d28f",
+   "asset_sha256": "26cb8fb7048388884d892a853122b74c6601e3cdb5654cf9db912d0574039433",
+   "visual_check": "confirmed: manual_pick reviewed 2026-10-24 23:21:22; operator read the 财-marked sprite by eye on the live table as 7筒(t7); Round1 assist had fail-closed 小牌匹配不够确定 before this live template",
+   "session_id": "20261024_211352",
+   "source_kind": "manual_pick",
+   "review_method": "human_eye",
+   "reviewer": "operator",
+   "source_frame_hash": "6b7b9b53e289467738bf0d626040a0afaf8046d640ee1b5aa1f175dc3260d28f",
+   "heldout_passed": true,
+   "heldout_score": 1.0,
+   "heldout_witness_hash": "397715733283c28f3d658bcbcbe3936015a0ed936fef4d7817f920ba885fcd7c",
+   "heldout_reason": "independent same-round live frame 20261024_225500_432052_b46480.png score=1.0000",
+   "suggested_label": null
+  },
+  {
+   "label": "bai",
+   "file": "bai_live.png",
+   "source": "_takeover/play3_5556/frames/20261025_013635_417390_before_b65005.png",
+   "source_sha256": "fbfa30ddb0339d860293ef1e3381cb972983296241bb3b4d6c3a175f8d1bd716",
+   "asset_sha256": "fe15440d2874ca754d7eadb4c9ad842d010dbbc70fccd16b34c0fa3f2446bcbd",
+   "cluster_frames": 629,
+   "visual_check": "2026-10-25 目视复核：白板（空白牌面+红财角标）；play3 双端 631 帧中 629 帧裁片逐字节一致，跨对局 round1/now2 裁片亦一致"
+  },
+  {
+   "label": "t5",
+   "file": "t5_live.png",
+   "source": "_takeover/live_5556/frames/20261025_012647_598849_before_2b9c49.png",
+   "source_sha256": "0422686be78df3198d674788488576b8d2dc9c197aea3ac32ac3547b6977e530",
+   "asset_sha256": "95d20a23516c09f4d8761569867f221cab15c768322ce6d27ab51e8bcb55d513",
+   "cluster_frames": 22,
+   "visual_check": "2026-10-25 目视复核：五筒（四角绿点+中心红点）；live 双端 22 帧裁片逐字节一致"
+  },
+  {
+   "label": "xi",
+   "file": "xi_20261024_131631_2a1998d0.png",
+   "asset_sha256": "2a1998d000156ac4d4a3d210b2f90389661023da7570a6074fab283294f34a03",
+   "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261024_122607\\live\\tea_2p\\20261024_131631_981452_7c3437.png",
+   "source_frame_hash": "b2e4b56bd7aa7b904cfd90dde0a1da59618cb88cdaa0785be74e5841502ae95c",
+   "source_kind": "live_mined_candidate",
+   "visual_check": "agent eye-verified via contact sheet; pending Hana promote review"
+  },
+  {
+   "label": "w4",
+   "file": "w4_20261024_080749_e0c6f070.png",
+   "asset_sha256": "e0c6f07094281b44fd180a57f163ffcc969d8e80baa09134428dde211e30e898",
+   "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\assist_sessions\\20261024_035412\\live\\tea_2p\\20261024_080749_065864_d65b31.png",
+   "source_frame_hash": "035d1bc2ef080d6a33310c5c0e833425cdc854d3372a31d5fd8678593b4d280f",
+   "source_kind": "live_mined_candidate",
+   "visual_check": "agent eye-verified via contact sheet; pending Hana promote review"
+  }
+ ]
 }
