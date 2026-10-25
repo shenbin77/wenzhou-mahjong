@@ -62,7 +62,7 @@ def test_ui_methods_write_per_serial(tmp_path):
         win._refresh_binding_views=lambda: None
         win._set_operational_status=lambda *a,**k: None
         win._binding=None
-        win._bind()
+        win._save_verified_binding(win._current_binding_fields())
         assert assist_window.load_binding(profile.binding)["account"]==account
         win._unbind()
         assert not profile.binding.exists()

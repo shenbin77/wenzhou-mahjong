@@ -45,6 +45,7 @@ from mode_vision import detect_shu_rule_text, score_tea_player_count
 from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
 from instance_profile import profile_paths, read_binding_for_serial, safe_serial
+from device_connection import verify_device
 
 
 TEA_ROOT = Path(__file__).resolve().parent.parent
@@ -375,10 +376,12 @@ class TeaAssistWindow:
         self._check_events: Queue = Queue()
         self._check_poll_timer: str | None = None
         self._check_executor = ThreadPoolExecutor(max_workers=1)
+        self._binding_future: Future | None = None
+        self._binding_fields_pending: dict | None = None
         self.full_auto_status = tk.StringVar(value="全自动未开启。")
         self.auto_state = tk.StringVar(value="不可开启：未开始跟随")
         self.lamp_status = tk.StringVar(value="待处理")
-        self.bound_status = tk.StringVar(value="账号：未绑定 · 设备：未确认")
+        self.bound_status = tk.StringVar(value="账号：未绑定 · 雷电：尚未连接")
         self.phase_status = tk.StringVar(value="阶段：尚未开始")
         self.problem_status = tk.StringVar(value="状态：—")
 
@@ -441,33 +444,36 @@ class TeaAssistWindow:
         )
         self.mode_choice.grid(row=0, column=1, padx=(2, 12), sticky="w")
         self.mode_choice.bind("<<ComboboxSelected>>", self._on_mode_change)
-        ttk.Label(controls, text="绑定账号（本地标记）").grid(row=0, column=2, sticky="w")
+        ttk.Label(controls, text="账号标记").grid(row=0, column=2, sticky="w")
         self.account_entry = ttk.Entry(
-            controls, textvariable=self.account, width=14)
-        self.account_entry.grid(row=0, column=3, padx=(2, 6), sticky="w")
+            controls, textvariable=self.account, width=12)
+        self.account_entry.grid(row=0, column=3, padx=(2, 10), sticky="w")
+        ttk.Label(controls, text="雷电").grid(row=0, column=4, sticky="w")
+        self.serial_label = ttk.Label(
+            controls, textvariable=self.serial, width=16)
+        self.serial_label.grid(row=0, column=5, padx=(2, 6), sticky="w")
         self.bind_button = ttk.Button(
-            controls, text="绑定", width=6, command=self._bind)
-        self.bind_button.grid(row=0, column=4, padx=2)
+            controls, text="连接并绑定", width=10, command=self._bind)
+        self.bind_button.grid(row=0, column=6, padx=2)
         self.unbind_button = ttk.Button(
-            controls, text="解绑", width=6, command=self._unbind)
-        self.unbind_button.grid(row=0, column=5, padx=2)
+            controls, text="断开绑定", width=9, command=self._unbind)
+        self.unbind_button.grid(row=0, column=7, padx=2)
         self.start_button = tk.Button(
             controls, text="开始跟随", width=10, command=self._toggle)
-        self.start_button.grid(row=0, column=6, padx=4)
+        self.start_button.grid(row=0, column=8, padx=4)
         self.preflight_button = ttk.Button(
-            controls, text="连接自检", width=9,
+            controls, text="玩法自检", width=9,
             command=lambda: self._begin_mode_check(pending=None))
-        self.preflight_button.grid(row=0, column=7, padx=2)
+        self.preflight_button.grid(row=0, column=9, padx=2)
         ttk.Button(controls, text="更多", width=5, command=self._open_menu).grid(
-            row=0, column=8, sticky="e")
-        controls.grid_columnconfigure(8, weight=1)
+            row=0, column=10, sticky="e")
+        controls.grid_columnconfigure(10, weight=1)
         ttk.Label(
             controls,
-            text="绑定保存账号标记、设备与玩法，重启自动恢复；"
-                 "开始前自动核对牌桌玩法，一致才放行，"
-                 "不一致或读不出都阻止开始。",
+            text=("账号标记只用于本机日志；雷电编号由启动器自动读取，无需手填。"
+                  "再次打开桌面快捷方式会连接下一台在线模拟器。"),
             foreground="#a55700", wraplength=1040,
-        ).grid(row=1, column=0, columnspan=9, sticky="w", pady=(3, 0))
+        ).grid(row=1, column=0, columnspan=11, sticky="w", pady=(3, 0))
 
         # Always-visible operational summary: identity, stage and the latest
         # actionable problem.  Color is semantic, not decorative.
@@ -527,6 +533,27 @@ class TeaAssistWindow:
         ttk.Label(self.caishen_row, textvariable=self.caishen_title,
                   font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
         ttk.Label(self.caishen_row, textvariable=self.round_text).pack(side="right")
+        self.room_identity_label = ttk.Label(
+            sidebar, textvariable=self.hud_room_round,
+            font=("Microsoft YaHei UI", 10), foreground="#455a64")
+        self.room_identity_label.pack(fill="x", padx=6, pady=(3, 4))
+        self.tap_panel = ttk.Frame(sidebar)
+        self.tap_panel.pack(fill="x", padx=6, pady=(2, 6))
+        auto_row = ttk.Frame(self.tap_panel)
+        auto_row.pack(anchor="w")
+        self.auto_button = ttk.Button(
+            auto_row, text="开启全自动代打", width=18,
+            command=self._toggle_full_auto)
+        self.auto_button.pack(side="left")
+        self.auto_state_label = tk.Label(
+            auto_row, textvariable=self.auto_state, fg="#a55700",
+            font=("Microsoft YaHei UI", 9))
+        self.auto_state_label.pack(side="left", padx=(6, 0))
+        self.tap_status_label = ttk.Label(
+            self.tap_panel, textvariable=self.full_auto_status,
+            foreground="#555555", wraplength=360,
+            font=("Microsoft YaHei UI", 9))
+        self.tap_status_label.pack(fill="x", pady=(2, 0))
         self.offline_label = ttk.Label(
             sidebar, textvariable=self.offline_notice, foreground="#c62828",
             font=("Microsoft YaHei UI", 9, "bold"), wraplength=380,
@@ -540,17 +567,7 @@ class TeaAssistWindow:
             font=("Microsoft YaHei UI", 9))
         self.hud_idle_label.pack(fill="x", padx=6, pady=(2, 0))
         self._hud_expanded = False
-        for var in (
-            self.hud_mode, self.hud_room_round, self.hud_caishen,
-            self.hud_concealed, self.hud_melds, self.hud_meld_types, self.hud_wall,
-            self.hud_countdown, self.hud_turn, self.hud_river,
-            self.hud_claim_buttons,
-            self.hud_last_discard,
-        ):
-            ttk.Label(
-                self.hud_panel, textvariable=var,
-                font=("Microsoft YaHei UI", 9), wraplength=380,
-            ).pack(anchor="w")
+        # The full technical facts remain in model state and logs.
 
         self.advice_label = ttk.Label(
             sidebar, textvariable=self.suggestion, foreground="#146c2e",
@@ -575,7 +592,7 @@ class TeaAssistWindow:
         self.refresh_label.pack(fill="x", padx=6)
         self.hand_label = ttk.Label(sidebar, textvariable=self.hand,
                                     wraplength=380)
-        self.hand_label.pack(fill="x", padx=6, pady=(2, 0))
+        # Raw hand codes are hidden; hand-face tile image remains visible.
         self.hand_panel = ttk.Frame(sidebar)
         self.hand_panel.pack(fill="x", padx=6)
         self.hand_face = ttk.Label(self.hand_panel)
@@ -587,23 +604,6 @@ class TeaAssistWindow:
         # Full-auto is a separate, explicit hand-off after recommendation
         # follow.  The previous one-shot/spacebar semi-auto is intentionally
         # removed from the primary workflow.
-        self.tap_panel = ttk.Frame(sidebar)
-        self.tap_panel.pack(fill="x", padx=6, after=self.advice_panel)
-        auto_row = ttk.Frame(self.tap_panel)
-        auto_row.pack(anchor="w")
-        self.auto_button = ttk.Button(
-            auto_row, text="开启全自动代打", width=18,
-            command=self._toggle_full_auto)
-        self.auto_button.pack(side="left")
-        self.auto_state_label = tk.Label(
-            auto_row, textvariable=self.auto_state, fg="#a55700",
-            font=("Microsoft YaHei UI", 9))
-        self.auto_state_label.pack(side="left", padx=(6, 0))
-        self.tap_status_label = ttk.Label(
-            self.tap_panel, textvariable=self.full_auto_status,
-            foreground="#555555", wraplength=360,
-            font=("Microsoft YaHei UI", 9))
-        self.tap_status_label.pack(fill="x", pady=(2, 0))
         self.candidate_face = ttk.Label(sidebar)
         self.candidate_face.pack(anchor="w", padx=6)
         self.latency_label = ttk.Label(sidebar, textvariable=self.latency,
@@ -622,8 +622,9 @@ class TeaAssistWindow:
                    command=self.open_folder).grid(row=0, column=1, padx=1)
 
         self.menu = tk.Menu(self.root, tearoff=0)
-        # 设置组：绑定相关的唯一编辑入口（serial 在此，账号只走主区绑定）。
-        self.menu.add_command(label="设备序列号…", command=self._edit_serial)
+        # 设置组：设备由启动器固定；账号只在主区编辑。
+        self.menu.add_command(label="打开下一个雷电辅助器",
+                              command=self._open_next_device_window)
         self.menu.add_command(label="房间号", command=self._edit_room)
         self.menu.add_checkbutton(label="窗口置顶", variable=self.always_on_top,
                                   command=self._set_always_on_top)
@@ -838,6 +839,26 @@ class TeaAssistWindow:
             refresh = getattr(self, "_refresh_binding_views", None)
             if callable(refresh):
                 refresh()
+
+    def _open_next_device_window(self) -> None:
+        """Open the next free online emulator without asking for its serial."""
+        from app_entry import activate_window, choose_device, existing_window_pids
+        from launch_multi import connected_devices, start_window
+        try:
+            devices = connected_devices(DEFAULT_ADB_PATH)
+            occupied = existing_window_pids(DEFAULT_SERIAL)
+            serial, pid = choose_device(devices, occupied)
+            if serial is not None:
+                proc = start_window(serial)
+                self.status.set(f"已打开下一台雷电辅助器：{serial}（PID {proc.pid}）。")
+                return
+            if pid is not None:
+                activate_window(pid)
+                self.status.set("所有在线雷电都已有辅助器窗口，已切换到现有窗口。")
+                return
+            self.status.set("当前没有发现新的在线雷电；无需手填设备编号。")
+        except Exception as exc:
+            self.status.set(f"打开下一台雷电辅助器失败：{exc}")
 
     def _edit_room(self) -> None:
         value = simpledialog.askstring("房间号（可空）", "房间号",
@@ -1094,6 +1115,14 @@ class TeaAssistWindow:
             refresh()
 
     # -- binding + automatic mode check --------------------------------
+    @staticmethod
+    def _default_instance_label(serial: str) -> str:
+        """Optional human-readable nickname, never an account credential."""
+        serial = str(serial or "").strip()
+        if serial.startswith("emulator-"):
+            return "雷电" + serial.removeprefix("emulator-")
+        return "设备 " + serial if serial else "本地设备"
+
     def _binding_file(self) -> Path:
         profile = getattr(self, "_profile_paths", None)
         return profile.binding if profile is not None else BINDING_PATH
@@ -1171,24 +1200,96 @@ class TeaAssistWindow:
     def _bound_text(self) -> str:
         if self._is_bound():
             current = self._current_binding_fields()
-            return (f"账号：已绑定（{current['account']}） · "
-                    f"设备：已确认（{current['serial']}）")
-        return "账号：未绑定 · 设备：未确认"
+            return f"账号：{current['account']} · 雷电：{current['serial']} 已连接"
+        return "账号：未绑定 · 雷电：尚未连接"
 
     def _bind(self) -> None:
         fields = self._current_binding_fields()
         if not fields["account"]:
-            self.status.set(
-                "账号标记为空，无法绑定；请先在顶部输入框填写账号标记。")
-            self._set_operational_status(
-                "未绑定", "账号标记为空，绑定未写入", level="wait")
+            self.status.set("账号标记为空：请填写玩家名或便于追溯的本地标记。")
+            self._set_operational_status("未绑定", "缺少账号标记", level="error")
             return
-        if not fields["serial"]:
-            self.status.set(
-                "设备序列号为空，无法绑定；请在“更多 → 设备序列号…”中填写。")
-            self._set_operational_status(
-                "未绑定", "设备序列号为空，绑定未写入", level="wait")
+        try:
+            serial = safe_serial(fields["serial"])
+        except ValueError as exc:
+            self.status.set(f"雷电设备编号无效：{exc}")
+            self._set_operational_status("未连接", "设备编号无效", level="error")
             return
+        profile = getattr(self, "_profile_paths", None)
+        if profile is not None:
+            if serial != profile.serial:
+                self.serial.set(profile.serial)
+                self._open_other_device(serial)
+                return
+            if getattr(self, "_binding_fields_pending", None) is not None:
+                return
+            self._binding_fields_pending = fields.copy()
+            self.status.set(f"正在连接 {serial}，检查ADB及实时截图…")
+            self._set_operational_status("连接中", serial, level="wait")
+            self._binding_future = self._check_executor.submit(
+                verify_device, serial, DEFAULT_ADB_PATH)
+            self._refresh_bind_controls()
+            self.root.after(100, self._poll_binding_probe)
+            return
+        # Minimal offline test doubles have no live profile.
+        self._save_verified_binding(fields)
+
+    def _open_other_device(self, serial: str) -> None:
+        """Open or focus another UI for the chosen device; never switch this UI's lease."""
+        from app_entry import activate_window, existing_window_pids
+        from launch_multi import connected_devices, start_window
+        try:
+            if serial not in connected_devices(DEFAULT_ADB_PATH):
+                self.status.set(f"{serial} 未连接，未打开新窗口。")
+                return
+            pid = existing_window_pids(DEFAULT_SERIAL).get(serial)
+            if pid is not None:
+                activate_window(pid)
+                self.status.set(f"{serial} 的辅助器已经打开，已尝试切换到该窗口。")
+                return
+            proc = start_window(serial)
+            self.status.set(f"已为 {serial} 打开另一辅助器窗口，PID {proc.pid}。")
+        except Exception as exc:
+            self.status.set(f"打开设备窗口失败：{exc}")
+
+    def _poll_binding_probe(self) -> None:
+        pending = getattr(self, "_binding_fields_pending", None)
+        future = getattr(self, "_binding_future", None)
+        if pending is None or future is None:
+            return
+        if not future.done():
+            self.root.after(100, self._poll_binding_probe)
+            return
+        self._binding_future = None
+        self._binding_fields_pending = None
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.status.set(f"连接失败：{exc}；未保存绑定。")
+            self._set_operational_status("连接失败", str(exc), level="error")
+            self._refresh_binding_views()
+            return
+        if (not result.success or
+                pending["serial"] != self.serial.get().strip() or
+                pending["serial"] != self._profile_paths.serial or
+                pending["account"] != self.account.get().strip()):
+            detail = (result.detail if not result.success
+                      else "连接期间编号或备注改变，请重新连接")
+            self.status.set(f"连接失败：{detail}；未保存绑定。")
+            self._set_operational_status("连接失败", detail, level="error")
+            self._refresh_binding_views()
+            return
+        if self._save_verified_binding(pending):
+            self.status.set(f"{result.detail}；绑定已保存。")
+            self._set_operational_status(
+                "设备连接成功", f"{pending['serial']} · 截图验证通过", level="ok")
+        self._refresh_binding_views()
+
+    def _save_verified_binding(self, fields: dict) -> bool:
+        if not fields["account"]:
+            self.status.set("账号标记为空：未保存绑定。")
+            self._set_operational_status("未绑定", "缺少账号标记", level="error")
+            return False
         binding = {
             "account": fields["account"],
             "serial": fields["serial"],
@@ -1201,16 +1302,18 @@ class TeaAssistWindow:
             self.status.set("绑定保存失败：本地文件写入出错。")
             self._set_operational_status(
                 "未绑定", "绑定写入失败", level="error")
-            return
+            return False
         self._binding = binding
         self.status.set(
-            f"已绑定并保存：{binding['account']} · {binding['serial']} · "
-            f"{binding['mode_label']}；重启自动恢复。")
+            f"已绑定：{binding['serial']} · {binding['mode_label']}；"
+            "已保存，下次启动自动读取。")
         self._set_operational_status(
-            "已绑定", "账号/设备/玩法已绑定", level="ok")
+            "已绑定", f"账号 {binding['account']} · {binding['serial']}", level="ok")
         self._refresh_binding_views()
+        return True
 
     def _unbind(self) -> None:
+        self._binding_fields_pending = None
         # Revoking the local identity also revokes click authority.
         if getattr(self, "full_auto_running", False):
             self._stop_full_auto()
@@ -1345,10 +1448,14 @@ class TeaAssistWindow:
     def _refresh_bind_controls(self) -> None:
         """Bind/unbind are mutually exclusive; a bound account is locked."""
         bound = self._is_bound()
+        pending = getattr(self, "_binding_fields_pending", None) is not None
         bind_button = getattr(self, "bind_button", None)
         if bind_button is not None:
             try:
-                bind_button.configure(text="重新绑定" if bound else "绑定")
+                bind_button.configure(
+                    text=("连接中…" if pending else
+                          "已连接/重检" if bound else "连接并绑定"),
+                    state="disabled" if pending else "normal")
             except Exception:
                 pass
         unbind_button = getattr(self, "unbind_button", None)
@@ -1655,7 +1762,7 @@ class TeaAssistWindow:
         if not self._is_bound():
             if getattr(self, "_binding", None) is None:
                 self.status.set(
-                    "尚未绑定：填写账号标记后点顶部“绑定”，再开始跟随。")
+                    "尚未连接雷电：确认设备编号并点顶部“连接并绑定”。")
                 self._set_operational_status(
                     "未绑定", "开始跟随前先完成绑定", level="wait")
             else:
@@ -3223,18 +3330,43 @@ if not Path(DEFAULT_ADB_PATH).is_file():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="温州麻将辅助器：每个serial独立窗口")
-    parser.add_argument("--serial", default=DEFAULT_SERIAL)
+    parser.add_argument("--serial", default=None)
     args = parser.parse_args()
-    safe_serial(args.serial)
+    from app_entry import activate_window, choose_device, existing_window_pids
+    from launch_multi import connected_devices
+    try:
+        discovered = connected_devices(DEFAULT_ADB_PATH)
+        occupied = existing_window_pids(DEFAULT_SERIAL)
+        chosen, open_pid = choose_device(discovered, occupied, args.serial)
+    except (OSError, RuntimeError, ImportError, ValueError) as exc:
+        # An unavailable device listing or process scanner must not produce a
+        # second unguarded operator for the same emulator.
+        print(f"雷电设备检查失败：{exc}", flush=True)
+        raise SystemExit(2) from exc
+    if open_pid is not None:
+        activate_window(open_pid)
+        print(f"现有辅助器 PID {open_pid} 已打开；不重复运行。", flush=True)
+        raise SystemExit(0)
+    if chosen is None:
+        print("没有空闲在线雷电窗口。已有窗口请从任务栏切换。", flush=True)
+        raise SystemExit(0)
+    if args.serial is None:
+        # A desktop shortcut has no --serial. Spawn the selected serial as an
+        # explicit child process: otherwise every window looks like 5556 to
+        # the process scanner and reopening falsely reports "already open".
+        from launch_multi import start_window
+        proc = start_window(chosen)
+        print(f"已打开 {chosen} 辅助器，PID={proc.pid}", flush=True)
+        raise SystemExit(0)
     from serial_lease import SerialBusy, hold_serial
     try:
         # Separate namespace from the BOT live-click lease.
-        with hold_serial("ui:" + args.serial):
+        with hold_serial("ui:" + chosen):
             app_root = tk.Tk()
-            TeaAssistWindow(app_root, serial=args.serial)
+            TeaAssistWindow(app_root, serial=chosen)
             app_root.mainloop()
     except SerialBusy:
-        from tkinter import messagebox
-        messagebox.showwarning(
-            "设备窗口已打开",
-            f"{args.serial} 已有一个辅助器窗口，禁止重复绑定同一设备。")
+        pid = existing_window_pids(DEFAULT_SERIAL).get(chosen)
+        if pid is not None:
+            activate_window(pid)
+        print(f"{chosen} 已被其他辅助器窗口使用，不再重复启动。", flush=True)

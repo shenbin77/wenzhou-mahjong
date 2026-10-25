@@ -108,6 +108,13 @@ def test_embedded_panel_is_permanently_visible(tmp_path: Path):
         assert log._body_frame.winfo_manager() == "pack"
         # still scrollable in the permanent console
         assert int(log.text.cget("height")) == FollowSessionLog.EMBED_TEXT_HEIGHT
+        control_texts = [
+            child.cget("text") for child in log.host.winfo_children()[0].winfo_children()
+            if "text" in child.keys()
+        ]
+        assert "打开完整日志" in control_texts
+        assert "刷新" not in control_texts
+        assert "自动跟随" not in control_texts
         log.stop()
     finally:
         root.destroy()

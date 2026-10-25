@@ -144,8 +144,8 @@ def test_bind_empty_account_writes_nothing(tmp_path, monkeypatch):
     window = _bare_window()
     window._bind()
     assert not target.exists()
-    assert "账号标记为空" in window.status.get()
     assert window._binding is None
+    assert "账号标记为空" in window.status.get()
 
 
 def test_bind_persists_and_unbind_clears(tmp_path, monkeypatch):
@@ -160,8 +160,8 @@ def test_bind_persists_and_unbind_clears(tmp_path, monkeypatch):
     assert saved["serial"] == "emulator-5556"
     assert saved["mode"] == "tea_2p"
     assert window._is_bound()
-    assert "已绑定（玉姐）" in window.bound_status.get()
-    assert "已确认（emulator-5556）" in window.bound_status.get()
+    assert "账号：玉姐" in window.bound_status.get()
+    assert "emulator-5556" in window.bound_status.get()
     window.mode.set("温州茶 · 4人")
     assert not window._is_bound()
     assert "玩法已变更" in window._binding_mismatch_reason()
@@ -170,7 +170,7 @@ def test_bind_persists_and_unbind_clears(tmp_path, monkeypatch):
     assert not target.exists()
     assert window._binding is None
     assert not window._is_bound()
-    assert window.bound_status.get() == "账号：未绑定 · 设备：未确认"
+    assert window.bound_status.get() == "账号：未绑定 · 雷电：尚未连接"
 
 
 def test_restore_binding_refills_window(tmp_path, monkeypatch):
@@ -338,12 +338,12 @@ def test_auto_gate_state_transitions():
 def test_bound_text_hides_unbound_input_values():
     window = _bare_window()
     window.account.set("玩家1")  # typed / prefilled, but never bound
-    assert window._bound_text() == "账号：未绑定 · 设备：未确认"
+    assert window._bound_text() == "账号：未绑定 · 雷电：尚未连接"
     window._binding = {"account": "玩家1", "serial": "emulator-5556",
                        "mode": "tea_2p"}
     window.account.set("玉姐")
     window._binding["account"] = "玉姐"
-    assert window._bound_text() == "账号：已绑定（玉姐） · 设备：已确认（emulator-5556）"
+    assert window._bound_text() == "账号：玉姐 · 雷电：emulator-5556 已连接"
 
 
 def test_start_bind_flag_gates_follow_binding_state():
@@ -360,7 +360,7 @@ def test_start_bind_flag_gates_follow_binding_state():
     window._refresh_binding_views()
     assert window.start_button.config["state"] == "disabled"
     assert window.unbind_button.config["state"] == "disabled"
-    assert window.bind_button.config["text"] == "绑定"
+    assert window.bind_button.config["text"] == "连接并绑定"
     assert window.account_entry.config["state"] == "normal"
     assert window.flag_button.config["state"] == "disabled"
     window._binding = {"account": "玉姐", "serial": "emulator-5556",
@@ -368,7 +368,7 @@ def test_start_bind_flag_gates_follow_binding_state():
     window._refresh_binding_views()
     assert window.start_button.config["state"] == "normal"
     assert window.unbind_button.config["state"] == "normal"
-    assert window.bind_button.config["text"] == "重新绑定"
+    assert window.bind_button.config["text"] == "已连接/重检"
     assert window.account_entry.config["state"] == "readonly"
     window.continuous = True
     window._refresh_binding_views()
@@ -400,7 +400,7 @@ def test_mode_change_invalidates_binding_and_check():
     assert window._check_state == "unchecked"
     assert window.lamp_status.get().startswith("待处理")
     assert "玩法已变更" in window.lamp_status.get()
-    assert window.bound_status.get() == "账号：未绑定 · 设备：未确认"
+    assert window.bound_status.get() == "账号：未绑定 · 雷电：尚未连接"
     assert "绑定已失效" in window.auto_state.get()
 
 
@@ -438,11 +438,12 @@ def test_source_has_no_checkbox_or_deleted_menu_residue():
     source = (BOT / "assist_window.py").read_text(encoding="utf-8")
     for residue in ("已核对本局玩法", "confirm_mode", "_on_confirm",
                     "_edit_account", "仅本地记录",
-                    'label="账号"', 'label="填入模拟器序列号"',
+                    'label="填入模拟器序列号"',
                     'label="跟随会话日志"'):
         assert residue not in source, residue
     assert 'label="历史会话日志"' in source
-    assert 'label="设备序列号…"' in source
+    assert 'label="打开下一个雷电辅助器"' in source
+    assert 'text="刷新雷电"' not in source
 
 
 def test_legend_survives_in_exactly_one_place():
@@ -482,25 +483,39 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         assert window.serial.get() == "emulator-5558"
         assert window.mode.get() == "温州茶 · 4人"
         assert window._is_bound()
-        assert "已绑定（玉姐）" in window.bound_status.get()
+        assert "账号：玉姐" in window.bound_status.get()
+        assert "emulator-5558" in window.bound_status.get()
         assert window.lamp_status.get().startswith("待处理")
         assert not hasattr(window, "confirm_mode")
         assert "disabled" in window.auto_button.state()
         assert window.problem_status.get() == "状态：—"
         assert window.live_info.get() == "只读画面，不会代点。"
         assert window.live_label.master is window.preview_panel
-        assert window.bind_button.cget("text") == "重新绑定"
+        assert window.bind_button.cget("text") == "已连接/重检"
         assert "disabled" not in window.unbind_button.state()
         assert "readonly" in window.account_entry.state()
+        assert window.serial_label.cget("text") == "emulator-5558"
         assert window.start_button.cget("state") == "normal"
         assert "disabled" in window.flag_button.state()
         # The compact log no longer consumes half the idle window.
         assert window.follow_log_frame.pack_info()["expand"] == 0
         assert window.picture.pack_info()["expand"] == 1
-        assert window.preflight_button.cget("text") == "连接自检"
+        assert window.preflight_button.cget("text") == "玩法自检"
         assert window._hud_expanded is False
         assert window.hud_panel.winfo_manager() == ""
         assert window.hud_idle_label.winfo_manager() == "pack"
+        # Compact product HUD: room/round and autoplay are always above the
+        # hand images; technical counters and raw hand codes remain hidden.
+        sidebar = window.caishen_row.master
+        ordered = sidebar.pack_slaves()
+        assert window.room_identity_label.winfo_manager() == "pack"
+        assert window.tap_panel.winfo_manager() == "pack"
+        assert ordered.index(window.caishen_row) < ordered.index(window.room_identity_label)
+        assert ordered.index(window.room_identity_label) < ordered.index(window.tap_panel)
+        assert ordered.index(window.tap_panel) < ordered.index(window.hand_panel)
+        assert window.auto_button.winfo_manager() == "pack"
+        assert window.hand_label.winfo_manager() == ""
+        assert not window.hud_panel.winfo_children()
         labels = []
         raw_index = {}
         for index in range(int(window.menu.index("end")) + 1):
@@ -512,7 +527,7 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
                 labels.append(label)
                 raw_index[label] = index
         assert labels == [
-            "设备序列号…", "房间号", "窗口置顶",
+            "打开下一个雷电辅助器", "房间号", "窗口置顶",
             "手动指定财神", "财神牌（茶）",
             "离线预检（旧截图）", "抓图并分析", "导入截图", "修正手牌并重算",
             "历史逐帧复核", "导入录像复核（每秒1帧）", "停止录像复核",
@@ -525,7 +540,7 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         window._unbind()
         assert not target.exists()
         assert not window._is_bound()
-        assert window.bound_status.get() == "账号：未绑定 · 设备：未确认"
+        assert window.bound_status.get() == "账号：未绑定 · 雷电：尚未连接"
         assert window.start_button.cget("state") == "disabled"
         assert "disabled" in window.unbind_button.state()
         window.account.set("")

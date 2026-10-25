@@ -44,6 +44,8 @@ class FollowSessionLog:
         )
         self.compact = bool(compact or container is not None)
         self.line_limit = self.EMBED_LINE_LIMIT if self.compact else self.LINE_LIMIT
+        # The operational log always tails the current file.  There is no
+        # manual refresh mode in the product UI.
         self.follow = tk.BooleanVar(value=True)
         self.path_var = tk.StringVar(value=self._path_label())
         self.status_var = tk.StringVar(
@@ -82,10 +84,6 @@ class FollowSessionLog:
         pad = 4 if self.compact else 6
         controls = ttk.Frame(parent, padding=pad)
         controls.pack(fill="x")
-        ttk.Checkbutton(
-            controls, text="自动跟随", variable=self.follow, command=self.refresh
-        ).pack(side="left")
-        ttk.Button(controls, text="刷新", command=self.refresh).pack(side="left", padx=4)
         if detached or not self.compact:
             ttk.Button(controls, text="打开会话目录…", command=self.pick_session).pack(
                 side="left", padx=4
@@ -95,7 +93,7 @@ class FollowSessionLog:
             )
         else:
             ttk.Button(
-                controls, text="弹出完整窗口", command=self._request_detach
+                controls, text="打开完整日志", command=self._request_detach
             ).pack(side="left", padx=4)
         ttk.Label(
             controls,
@@ -247,8 +245,7 @@ class FollowSessionLog:
                     "wait",
                 )
             self.text.configure(state="disabled")
-            if self.follow.get():
-                self.text.see("end")
+            self.text.see("end")
             count = len(lines)
             self.status_var.set(
                 f"已显示最近 {count} 行 · 绿=已验证/正常 · 橙=等待/弃权 · 红=停手/错误"
