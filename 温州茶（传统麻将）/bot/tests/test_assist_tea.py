@@ -15,7 +15,7 @@ if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
 from assist_tea import analyze_manual_hand, analyze_snapshot, capture_and_analyze, import_and_analyze  # noqa: E402
-from assist_window import TeaAssistWindow, TILE_CHOICES, append_feedback, same_tea_round, tea_round_fingerprint  # noqa: E402
+from assist_window import TeaAssistWindow, TILE_CHOICES, same_tea_round, tea_round_fingerprint  # noqa: E402
 
 
 FRAME = BOT_DIR.parent / "采集" / "2026-10-16" / "740195" / "r08" / "frame_02.png"
@@ -177,18 +177,6 @@ def test_live_capture_rejects_other_foreground_before_screenshot(tmp_path, monke
         )
     assert len(commands) == 1
     assert not (tmp_path / "session").exists()
-
-
-def test_feedback_is_separate_append_only_event(tmp_path):
-    record = tmp_path / "one.json"
-    record.write_text('{"status":"advise"}', encoding="utf-8")
-    original = record.read_bytes()
-    path = append_feedback(record, "wrong_advice", "t5")
-    event = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
-    assert event["record"] == "one.json"
-    assert event["verdict"] == "wrong_advice"
-    assert event["actual_tile"] == "t5"
-    assert record.read_bytes() == original
 
 
 def test_imported_frame_and_manual_correction_keep_separate_records(tmp_path):

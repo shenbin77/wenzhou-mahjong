@@ -19,8 +19,8 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Event
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from threading import Event, Thread
+from tkinter import filedialog, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
@@ -96,23 +96,38 @@ def frame_result_source(result: dict) -> str:
     return str(event.get("source") or result.get("source") or "")
 
 
-def append_feedback(record_path: str | Path, verdict: str, actual_tile: str | None = None) -> Path:
-    """Keep user corrections separate from immutable capture results."""
-    if verdict not in {"useful", "wrong_advice", "wrong_vision"}:
-        raise ValueError("未知反馈类型")
-    record = Path(record_path)
-    if not record.is_file() or record.suffix not in {".json", ".jsonl"}:
-        raise FileNotFoundError("本次截图记录不存在")
-    event = {
-        "at": datetime.now().astimezone().isoformat(),
-        "record": record.name,
-        "verdict": verdict,
-        "actual_tile": actual_tile,
-    }
-    target = record.parent / "feedback.jsonl"
+def append_user_flag(session_dir: str | Path, event: dict) -> Path:
+    """Append one user round flag to ``<session_dir>/user_flags.jsonl``.
+
+    The flag is the user's only in-session correction signal: a single
+    click meaning "this round looked wrong".  Finding the actual problem
+    is the auto review's job (offline, after the session), never a
+    per-hand form the user has to fill in while playing.
+    """
+    target = Path(session_dir) / "user_flags.jsonl"
+    target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, ensure_ascii=False) + "\n")
     return target
+
+
+def format_review_summary(result: dict) -> tuple[str, str]:
+    """Render an auto-review outcome for the problem strip (text, level)."""
+    if result.get("placeholder"):
+        return "自动复盘：复盘核心尚未就绪（占位），本场未做自动筛查", "wait"
+    count = int(result.get("issue_count") or 0)
+    report = str(result.get("report_md") or "")
+    suffix = f" · 报告：{report}" if report else ""
+    if count <= 0:
+        return f"自动复盘：未发现疑似问题{suffix}", "ok"
+    by_category = result.get("by_category") or {}
+    parts = [
+        f"{name}×{int(n)}"
+        for name, n in sorted(
+            by_category.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))[:3]
+    ]
+    summary = "、".join(parts) if parts else "未分类"
+    return f"自动复盘：疑似问题 {count} 个（{summary}）{suffix}", "wait"
 
 
 def tea_round_fingerprint(image_path: str | Path | None) -> bytes | None:
@@ -257,6 +272,11 @@ class TeaAssistWindow:
         self._auto_future: Future | None = None
         self._auto_poll_timer: str | None = None
         self._auto_events: Queue = Queue()
+        self._suppress_review = False
+        self._review_thread: Thread | None = None
+        self._review_target: Path | None = None
+        self._review_events: Queue = Queue()
+        self._review_poll_timer: str | None = None
         self.full_auto_status = tk.StringVar(
             value="全自动未开启；先开始跟随核对推荐，再手动交给 BOT。")
         self.bound_status = tk.StringVar(value="账号：未绑定 · 设备：未确认")
@@ -275,7 +295,6 @@ class TeaAssistWindow:
         self.confirm_mode = tk.BooleanVar(value=False)
         self.always_on_top = tk.BooleanVar(value=bool(state.get("topmost", True)))
         self.manual_caishen = tk.BooleanVar(value=False)
-        self.actual_tile = tk.StringVar()
         self.status = tk.StringVar(value="先选玩法并核对眼前牌局；填写账号标记并勾选后，再点“开始跟随”。")
         self.hand = tk.StringVar(value="手牌：—")
         self.suggestion = tk.StringVar(value="尚未开始")
@@ -461,24 +480,17 @@ class TeaAssistWindow:
 
         bottom = ttk.Frame(sidebar, padding=(6, 2))
         bottom.pack(side="bottom", fill="x")
-        ttk.Label(bottom, text="复盘纠错（可选）").grid(
-            row=0, column=0, columnspan=6, sticky="w", padx=2)
-        ttk.Label(bottom, text="实际出牌").grid(row=1, column=0, padx=2)
-        self.actual_choice = ttk.Combobox(
-            bottom, textvariable=self.actual_tile, state="readonly", width=11,
-        )
-        self.actual_choice.grid(row=1, column=1, padx=2)
-        ttk.Button(bottom, text="建议可用", width=8,
-                   command=lambda: self.feedback("useful")).grid(row=1, column=2, padx=1)
-        ttk.Button(bottom, text="建议不对", width=8,
-                   command=lambda: self.feedback("wrong_advice")).grid(row=1, column=3, padx=1)
-        ttk.Button(bottom, text="识牌错误", width=8,
-                   command=lambda: self.feedback("wrong_vision")).grid(row=1, column=4, padx=1)
+        # One-click round flag only.  Per-hand correction entries were
+        # removed by product decision; the auto review finds problems.
+        self.flag_button = ttk.Button(
+            bottom, text="标记本局有问题", width=16,
+            command=self.mark_round_issue)
+        self.flag_button.grid(row=0, column=0, padx=2, sticky="w")
         ttk.Button(bottom, text="打开记录", width=8,
-                   command=self.open_folder).grid(row=1, column=5, padx=1)
+                   command=self.open_folder).grid(row=0, column=1, padx=1)
         ttk.Label(bottom, textvariable=self.live_info, wraplength=430,
                   font=("Microsoft YaHei UI", 8)).grid(
-            row=2, column=0, columnspan=6, sticky="w")
+            row=1, column=0, columnspan=6, sticky="w")
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="填入模拟器序列号", command=self._edit_serial)
@@ -1216,6 +1228,11 @@ class TeaAssistWindow:
     def stop(self) -> None:
         if getattr(self, "full_auto_running", False):
             self._stop_full_auto()
+        follow_session = None
+        if self.continuous:
+            resolve_dir = getattr(self, "_active_follow_session_dir", None)
+            if callable(resolve_dir):
+                follow_session = resolve_dir()
         stopped_live = (
             self.continuous and getattr(self, "display_source", None) == "live")
         self.continuous = False
@@ -1240,6 +1257,10 @@ class TeaAssistWindow:
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None
+        if follow_session is not None:
+            schedule = getattr(self, "_schedule_session_review", None)
+            if callable(schedule):
+                schedule(follow_session)
 
     def _schedule(self, delay_ms: int) -> None:
         if not self.continuous:
@@ -1484,11 +1505,6 @@ class TeaAssistWindow:
         if callable(update_hud):
             update_hud(result, state)
         self._update_latency_bar()
-        initial = self.actual_choice.get() == ""
-        actual_values = sorted({label for label in state.hand_labels if label})
-        self.actual_choice["values"] = actual_values
-        if not initial and self.actual_tile.get() not in actual_values:
-            self.actual_tile.set("")
         if getattr(self, "full_auto_running", False):
             phase = "全自动代打"
         else:
@@ -2079,6 +2095,7 @@ class TeaAssistWindow:
 
         # Stop the duplicate read-only ADB capture before the BOT takes over.
         # The BOT's own analyzed frames are streamed back through _auto_events.
+        self._suppress_review = True
         self.stop()
         from action_policy import recommended_runner_config
         from auto_play_loop import AutoPlayLoop
@@ -2147,6 +2164,10 @@ class TeaAssistWindow:
             self._auto_future = None
             self.full_auto_running = False
             self._auto_loop = None
+            ended_session = Path(self.session_dir)
+            schedule = getattr(self, "_schedule_session_review", None)
+            if callable(schedule):
+                schedule(ended_session)
             self.start_button.configure(text="开始跟随")
             self.auto_button.configure(text="开启全自动代打", state="normal")
             try:
@@ -2217,18 +2238,125 @@ class TeaAssistWindow:
         self._set_operational_status(
             phase, reason or f"事件：{kind}", level=level)
 
-    # -- feedback / misc -------------------------------------------------
-    def feedback(self, verdict: str) -> None:
-        record = (self.current or {}).get("record")
-        if not record:
-            messagebox.showinfo("温州茶辅助", "先抓图，生成本次记录。")
+    # -- session flag / auto review / misc -------------------------------
+    def _active_follow_session_dir(self) -> Path | None:
+        pipeline = getattr(self, "_follow_pipeline", None)
+        log_path = (
+            getattr(pipeline, "follow_log_path", None) if pipeline else None)
+        if log_path:
+            return Path(log_path).parent
+        session = getattr(self, "session_dir", None)
+        return Path(session) if session else None
+
+    def _active_session_dir(self) -> Path | None:
+        """Folder of the live follow/auto session, or None when idle."""
+        if getattr(self, "full_auto_running", False):
+            session = getattr(self, "session_dir", None)
+            return Path(session) if session else None
+        if getattr(self, "continuous", False):
+            return self._active_follow_session_dir()
+        return None
+
+    def mark_round_issue(self) -> None:
+        """One-click 'this round looked wrong' flag; no per-hand form."""
+        session_dir = self._active_session_dir()
+        if session_dir is None:
+            self.status.set("当前无进行中的会话")
             return
-        if verdict in {"useful", "wrong_advice"} and self.refresh.state.status != "advise":
-            messagebox.showinfo("温州茶辅助", "本次没有出牌建议。")
+        account = getattr(self, "account", None)
+        serial = getattr(self, "serial", None)
+        room = getattr(self, "room_id", None)
+        event = {
+            "ts": datetime.now().astimezone().isoformat(),
+            "serial": (serial.get().strip()
+                       if serial is not None else "") or None,
+            "account": (account.get().strip()
+                        if account is not None else "") or None,
+            "mode": self._mode_key() if hasattr(self, "_mode_key") else None,
+            "room_id": (room.get().strip()
+                        if room is not None else "") or None,
+            "round_no": getattr(self, "round_no", None),
+            "source": "assist_window",
+        }
+        try:
+            append_user_flag(session_dir, event)
+        except Exception as exc:  # noqa: BLE001 - surface, never swallow
+            self.status.set(f"标记本局失败：user_flags.jsonl 写入出错：{exc}")
             return
-        actual = self.actual_tile.get() or None
-        path = append_feedback(record, verdict, actual)
-        self.status.set(f"反馈已存本地：{path.name}")
+        self.status.set("已标记本局有问题；将随本场自动复盘一并筛查。")
+
+    def _schedule_session_review(self, session_dir) -> None:
+        """Kick off the Line-A auto review for a just-ended session."""
+        if getattr(self, "_suppress_review", False):
+            self._suppress_review = False
+            return
+        if not session_dir:
+            return
+        target = Path(session_dir)
+        thread = getattr(self, "_review_thread", None)
+        if (thread is not None and thread.is_alive()
+                and getattr(self, "_review_target", None) == target):
+            return
+        self._review_target = target
+        thread = Thread(
+            target=self._run_session_review, args=(target,), daemon=True)
+        self._review_thread = thread
+        thread.start()
+        if getattr(self, "_review_poll_timer", None) is None:
+            try:
+                self._review_poll_timer = self.root.after(
+                    150, self._poll_review)
+            except Exception:
+                self._review_poll_timer = None
+
+    def _run_session_review(self, session_dir: Path) -> None:
+        """Worker thread: call the review core; never touch Tk here."""
+        try:
+            from auto_review import review_session
+
+            result = review_session(session_dir)
+            if not isinstance(result, dict):
+                raise TypeError(
+                    f"review_session 应返回 dict，实际 {type(result).__name__}")
+            outcome = ("ok", result)
+        except Exception as exc:  # noqa: BLE001 - reported on the strip
+            outcome = ("error", exc)
+        events = getattr(self, "_review_events", None)
+        if events is not None:
+            events.put((session_dir, outcome))
+
+    def _poll_review(self) -> None:
+        self._review_poll_timer = None
+        events = getattr(self, "_review_events", None)
+        if events is not None:
+            while True:
+                try:
+                    _target, outcome = events.get_nowait()
+                except Empty:
+                    break
+                self._apply_review_result(outcome)
+        thread = getattr(self, "_review_thread", None)
+        if thread is not None and thread.is_alive():
+            try:
+                self._review_poll_timer = self.root.after(
+                    200, self._poll_review)
+            except Exception:
+                self._review_poll_timer = None
+
+    def _apply_review_result(self, outcome) -> None:
+        kind, payload = outcome
+        phase = getattr(self, "phase_status", None)
+        phase_text = ""
+        if phase is not None:
+            phase_text = str(phase.get()).removeprefix("阶段：")
+        if kind == "error":
+            self._set_operational_status(
+                phase_text or "会话结束", f"自动复盘失败：{payload}",
+                level="error")
+            return
+        text, level = format_review_summary(payload)
+        self._set_operational_status(
+            phase_text or "会话结束", text, level=level)
 
     def open_folder(self) -> None:
         self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -2247,6 +2375,7 @@ class TeaAssistWindow:
         save_window_state(state)
 
     def close(self) -> None:
+        self._suppress_review = True
         self.stop()
         self.stop_video_review()
         if getattr(self, "_auto_poll_timer", None) is not None:
@@ -2255,6 +2384,12 @@ class TeaAssistWindow:
             except tk.TclError:
                 pass
             self._auto_poll_timer = None
+        if getattr(self, "_review_poll_timer", None) is not None:
+            try:
+                self.root.after_cancel(self._review_poll_timer)
+            except tk.TclError:
+                pass
+            self._review_poll_timer = None
         emb = getattr(self, "embedded_follow_log", None)
         if emb is not None:
             emb.stop()
