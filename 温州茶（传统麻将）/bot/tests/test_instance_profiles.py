@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 from instance_profile import profile_paths, read_binding_for_serial, safe_serial
 import assist_window
+import launch_multi
 from assist_window import TeaAssistWindow
 
 
@@ -107,3 +108,32 @@ def test_migrating_legacy_binding_does_not_resurrect_after_unbind(tmp_path,monke
     assert not profile.binding.exists()
     window._restore_binding()
     assert window._binding is None
+
+
+def test_misplaced_profile_binding_fails_closed(tmp_path,monkeypatch):
+    profile=profile_paths(tmp_path,"emulator-5556")
+    monkeypatch.setattr(assist_window,"BINDING_PATH",tmp_path/"no-legacy.json")
+    assist_window.save_binding(
+        {"account":"wrong-device","serial":"emulator-5558","mode":"tea_2p"},
+        profile.binding)
+    window=TeaAssistWindow.__new__(TeaAssistWindow)
+    window._profile_paths=profile
+    window.account=Var()
+    window.serial=Var("emulator-5556")
+    window.mode=Var("温州茶 · 2人")
+    window._binding=None
+    window._restore_binding()
+    assert window._binding is None
+    assert window.serial.get()=="emulator-5556"
+    assert not profile.binding.exists()
+
+
+def test_launcher_fails_closed_if_process_inspection_is_unavailable(monkeypatch):
+    import builtins
+    real_import=builtins.__import__
+    def guarded_import(name,*args,**kwargs):
+        if name=="psutil":
+            raise ImportError("psutil intentionally unavailable in test")
+        return real_import(name,*args,**kwargs)
+    monkeypatch.setattr(builtins,"__import__",guarded_import)
+    assert launch_multi.existing_ui_processes() is None

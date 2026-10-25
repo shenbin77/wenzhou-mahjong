@@ -19,12 +19,13 @@ from harvest_tea import DEFAULT_ADB
 HERE = Path(__file__).resolve().parent
 
 
-def existing_ui_processes() -> tuple[list[int], set[str]]:
+def existing_ui_processes() -> tuple[list[int], set[str]] | None:
     """Avoid spawning another UI while an old global-binding window is open."""
     try:
         import psutil
     except ImportError:
-        return [], set()  # Running new UIs still have their OS-level mutex.
+        # A legacy UI has no UI mutex. Without process inspection, fail closed.
+        return None
     legacy: list[int] = []
     profiled: set[str] = set()
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
@@ -89,7 +90,12 @@ def main() -> int:
     invalid = sorted(set(selection) - set(devices))
     if invalid:
         parser.error(f"设备不在线：{', '.join(invalid)}")
-    legacy, open_serials = existing_ui_processes()
+    scan = existing_ui_processes()
+    if scan is None:
+        print("安全检查失败：缺少 psutil，无法排除旧版辅助器窗口；未启动任何窗口。")
+        print("恢复 psutil 依赖后重试，或先确认部署环境完整；不会结束任何现有进程。")
+        return 2
+    legacy, open_serials = scan
     if legacy:
         print(f"检测到旧版未隔离辅助器进程 {legacy}；请先关闭旧辅助器窗口，再使用多开启动器。")
         print("没有修改或结束现有进程；雷电模拟器不受影响。")

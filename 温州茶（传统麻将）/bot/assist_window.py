@@ -1108,9 +1108,16 @@ class TeaAssistWindow:
 
     def _restore_binding(self) -> None:
         """Only restore the binding belonging to this serial."""
+        profile = getattr(self, "_profile_paths", None)
         binding = load_binding(self._binding_file())
-        if binding is None and getattr(self, "_profile_paths", None) is not None:
-            legacy = read_binding_for_serial(BINDING_PATH, self._profile_paths.serial)
+        if (binding is not None and profile is not None
+                and binding.get("serial") != profile.serial):
+            # A copied/misplaced profile must never silently switch this window
+            # to another emulator. Discard it and keep the constructor serial.
+            clear_binding(self._binding_file())
+            binding = None
+        if binding is None and profile is not None:
+            legacy = read_binding_for_serial(BINDING_PATH, profile.serial)
             if legacy is not None and save_binding(legacy, self._binding_file()):
                 # One-time migration: otherwise unbind would resurrect legacy.
                 clear_binding(BINDING_PATH)
