@@ -443,16 +443,20 @@ class TeaAssistWindow:
         self.start_button = tk.Button(
             controls, text="开始跟随", width=10, command=self._toggle)
         self.start_button.grid(row=0, column=6, padx=4)
+        self.preflight_button = ttk.Button(
+            controls, text="连接自检", width=9,
+            command=lambda: self._begin_mode_check(pending=None))
+        self.preflight_button.grid(row=0, column=7, padx=2)
         ttk.Button(controls, text="更多", width=5, command=self._open_menu).grid(
-            row=0, column=7, sticky="e")
-        controls.grid_columnconfigure(7, weight=1)
+            row=0, column=8, sticky="e")
+        controls.grid_columnconfigure(8, weight=1)
         ttk.Label(
             controls,
             text="绑定保存账号标记、设备与玩法，重启自动恢复；"
                  "开始前自动核对牌桌玩法，一致才放行，"
                  "不一致或读不出都阻止开始。",
             foreground="#a55700", wraplength=1040,
-        ).grid(row=1, column=0, columnspan=8, sticky="w", pady=(3, 0))
+        ).grid(row=1, column=0, columnspan=9, sticky="w", pady=(3, 0))
 
         # Always-visible operational summary: identity, stage and the latest
         # actionable problem.  Color is semantic, not decorative.
@@ -1150,9 +1154,17 @@ class TeaAssistWindow:
         self._refresh_binding_views()
 
     def _unbind(self) -> None:
+        # Revoking the local identity also revokes click authority.
+        if getattr(self, "full_auto_running", False):
+            self._stop_full_auto()
+        elif getattr(self, "continuous", False):
+            self.stop()
         clear_binding()
         self._binding = None
-        self.status.set("已解绑并清除本地保存；开始跟随前请重新绑定。")
+        self._check_state = "unchecked"
+        self._check_mode_key = None
+        self._check_pending = None
+        self.status.set("已解绑并申请停手；已发出的动作完成点后验证才算停止。")
         self._set_operational_status("未绑定", "绑定已清除", level="wait")
         self._refresh_binding_views()
 
@@ -1216,7 +1228,9 @@ class TeaAssistWindow:
         label = getattr(self, "auto_state_label", None)
         colors = {"ok": "#146c2e", "wait": "#a55700", "error": "#c62828"}
         if getattr(self, "full_auto_running", False):
-            text, level = "● 代打中", "ok"
+            stopping = bool(getattr(getattr(self, "_auto_loop", None),
+                                    "_stop_requested_reason", None))
+            text, level = ("● 正在安全停手", "wait") if stopping else ("● 代打中", "ok")
             if force and button is not None:
                 try:
                     button.configure(state="normal")
@@ -1233,6 +1247,8 @@ class TeaAssistWindow:
                 missing.append("玩法未核对")
             if not getattr(self, "continuous", False):
                 missing.append("未开始跟随")
+            if not self._channel_ready():
+                missing.append("动作通道未就绪")
             if missing:
                 text, level = f"不可开启：{'、'.join(missing)}", "wait"
                 state = "disabled"
@@ -1301,15 +1317,14 @@ class TeaAssistWindow:
             pass
 
     def _apply_preview_layout(self, running: bool) -> None:
-        """Idle: the log strip takes the slack. Running: the frame does."""
+        """Keep the compact log compact; reserve workspace for the game frame."""
         picture = getattr(self, "picture", None)
         log_frame = getattr(self, "follow_log_frame", None)
         if picture is None or log_frame is None:
             return
         try:
-            picture.pack_configure(fill="both", expand=bool(running))
-            log_frame.pack_configure(fill="both" if not running else "x",
-                                     expand=not running)
+            picture.pack_configure(fill="both", expand=True)
+            log_frame.pack_configure(fill="x", expand=False)
         except Exception:
             pass
 
@@ -1358,10 +1373,12 @@ class TeaAssistWindow:
             self._check_events = events = Queue()
 
         def work() -> None:
+            began = time.perf_counter()
             try:
                 detected, detail = reader(serial)
             except Exception as exc:  # noqa: BLE001 - 读失败按未识别处理
                 detected, detail = None, f"核对读取失败：{exc}"
+            detail = f"{detail}（只读自检 {int((time.perf_counter()-began)*1000)}ms，未点击）"
             events.put((mode_key, detected, detail))
 
         executor = (getattr(self, "_check_executor", None)
@@ -2673,6 +2690,9 @@ class TeaAssistWindow:
 
     def _start_full_auto(self) -> None:
         """Hand the current tea-2p table to the guarded continuous BOT."""
+        if not self._channel_ready():
+            self.full_auto_status.set("真实动作通道未就绪；已拒绝接管。")
+            return
         if self._mode_key() != "tea_2p":
             self.full_auto_status.set("全自动目前只开放温州茶 2 人；该玩法保持推荐模式。")
             self._set_operational_status(

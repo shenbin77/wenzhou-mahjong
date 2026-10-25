@@ -446,6 +446,9 @@ class TapExecutor:
         if not isinstance(enabled, bool):
             raise TypeError("enabled 必须是显式 bool；True 才允许真实点击")
         self._enabled = enabled
+        # Optional run-loop revocation callback: checked at EVERY real tap,
+        # including secondary taps after a UI stop request.
+        self.authorization_check = None
         self.adb_path = str(adb_path)
         self.serial = str(serial)
         self.template_dir = Path(template_dir) if template_dir else Path(_TEMPLATE_DIR)
@@ -1977,6 +1980,14 @@ class TapExecutor:
         raise TapAborted("无法确认游戏在模拟器前台，拒绝点击")
 
     def _tap(self, x: int, y: int) -> None:
+        check = getattr(self, "authorization_check", None)
+        if check is not None:
+            try:
+                allowed = bool(check())
+            except Exception as exc:
+                raise TapAborted(f"动作授权检查失败，拒绝点击: {exc}") from exc
+            if not allowed:
+                raise TapAborted("动作权限已撤销，拒绝本次及后续点击")
         try:
             self._adb("shell", "input", "tap", str(int(x)), str(int(y)),
                       timeout=15)

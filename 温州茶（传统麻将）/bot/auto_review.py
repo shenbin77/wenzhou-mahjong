@@ -389,6 +389,20 @@ def review_session(session_dir) -> dict:
     issues += _screen_user_flags(flag_rows, FLAGS_FILE)
     issues.sort(key=lambda i: (i["source"], i["line"]))
 
+    # Rule 7: an action event without a confirmed post-click transition is
+    # never a success, even when the loop did not emit a terminal stop.
+    for line_no, item in primary_rows:
+        if item.get("event") == "action" and item.get("verified") is not True:
+            issues.append(_issue(
+                "action_unverified", DECISION, primary_name,
+                line_no, item, {
+                    "verified": item.get("verified"),
+                    "before_count": item.get("before_count"),
+                    "after_count": item.get("after_count"),
+                    "reason": item.get("reason"),
+                }))
+    issues.sort(key=lambda i: (i["source"], i["line"]))
+
     by_category = dict(Counter(i["category"] for i in issues))
     by_class = dict(Counter(i["class"] for i in issues))
 
@@ -399,6 +413,19 @@ def review_session(session_dir) -> dict:
         blockers.append(
             "开发局会话（dev=true）：按数据隔离口径，开发局数据单独"
             "标记、不进训练语料")
+    elif dev is not False:
+        blockers.append("dev 未明确标记为 false：来源未知，禁止自动入训练语料")
+    if actions_corrupt or follow_corrupt or flag_corrupt:
+        blockers.append(
+            f"台账损坏：actions={actions_corrupt} follow={follow_corrupt} "
+            f"flags={flag_corrupt}，须复核原始记录")
+    if not primary_rows:
+        blockers.append("无有效会话事件：无法审查完整性")
+    if not serial:
+        blockers.append("会话头缺少设备 serial，无法追溯来源")
+    if issues:
+        blockers.append(
+            f"自动复盘检出 {len(issues)} 条未人工结案问题：仅入待复核池")
     if not mode:
         blockers.append("会话头缺少 mode：无法确认玩法口径，不进训练语料")
     if stop_gates:
@@ -414,6 +441,9 @@ def review_session(session_dir) -> dict:
         "dev": dev,
         "serial": serial,
         "corpus_eligible": corpus_eligible,
+        "corpus_status": "candidate_review" if corpus_eligible else "blocked",
+        "train_approved": False,
+        "train_approval_note": "语料候选不等于训练授权；须独立金标和人工审核",
         "corpus_blockers": blockers,
         "issue_count": len(issues),
         "by_category": by_category,

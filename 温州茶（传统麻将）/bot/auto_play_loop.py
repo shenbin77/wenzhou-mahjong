@@ -90,6 +90,7 @@ from tap_executor import (
 from table_state import WALL_CARDS_STOP_AT, build_table_state
 from follow_pipeline import build_frame_facts, missing_decision_facts
 from session_logger import SessionLogger
+from serial_lease import guard_live_run
 from turn_gate import (
     MAX_HISTORY as TURN_HISTORY_LIMIT,
     HandObservation,
@@ -312,6 +313,17 @@ class AutoPlayLoop:
         # safely written.  Callback failures must never affect the play loop.
         self._event_callback = event_callback
         self._stop_requested_reason: str | None = None
+        # Immediate revocation: every physical tap (including second taps)
+        # checks this, not just the next run-loop iteration.
+        try:
+            self._tap.authorization_check = (
+                lambda: self.enabled and not self.stopped
+                and self._stop_requested_reason is None
+            )
+        except (AttributeError, TypeError):
+            # Injected dry-run test doubles need not expose this hook.
+            if self.enabled and isinstance(self._tap, TapExecutor):
+                raise
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
         self.session_dir = Path(session_dir) if session_dir else DEV_ROOT / stamp
@@ -2099,6 +2111,7 @@ class AutoPlayLoop:
         self.actions_done += 1
         return {"claim": payload}
 
+    @guard_live_run
     def run(self) -> dict:
         """直到停手条件满足；返回本次运行摘要。"""
         self.check_gates()

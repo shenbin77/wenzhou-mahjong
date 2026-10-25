@@ -491,8 +491,10 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         assert "readonly" in window.account_entry.state()
         assert window.start_button.cget("state") == "normal"
         assert "disabled" in window.flag_button.state()
-        assert window.follow_log_frame.pack_info()["expand"] == 1
-        assert window.picture.pack_info()["expand"] == 0
+        # The compact log no longer consumes half the idle window.
+        assert window.follow_log_frame.pack_info()["expand"] == 0
+        assert window.picture.pack_info()["expand"] == 1
+        assert window.preflight_button.cget("text") == "连接自检"
         assert window._hud_expanded is False
         assert window.hud_panel.winfo_manager() == ""
         assert window.hud_idle_label.winfo_manager() == "pack"
