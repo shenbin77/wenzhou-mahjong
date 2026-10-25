@@ -2156,7 +2156,89 @@ class TeaAssistWindow:
             if record is not None:
                 self.live_info.set(f"决策 {record['decision_id']} 已 timeout；只读不点击。")
         self._maybe_autostart()
+        try:
+            self._poll_full_auto_control()
+        except Exception as exc:  # noqa: BLE001 - 控制文件异常不影响跟随
+            self.live_info.set(f"全自动控制文件处理失败：{exc}")
         self.recorder_timer = self.root.after(500, self._poll_recorder)
+
+    # -- 局间「下一局」与全自动续接 -----------------------------------------
+    @staticmethod
+    def _is_round_end_stop(summary: dict) -> bool:
+        gate = str(summary.get("stop_gate") or "")
+        reason = str(summary.get("stop_reason") or "")
+        return gate == "gate_turn" and ("结算" in reason or "settled" in reason)
+
+    def _begin_round_transition(self, summary: dict) -> None:
+        """全自动因局终结算停手后：后台单次执行「下一局」，结果回 UI 线程。"""
+        if getattr(self, "_round_transition_future", None) is not None:
+            return
+        from round_transition import RoundTransitionExecutor
+        from lobby_follow import _capture_image, _tap_lobby
+        serial = self.serial.get().strip()
+        session_dir = Path(self.session_dir)
+        executor = getattr(self, "_round_transition", None)
+        if executor is None or getattr(executor, "_serial", None) != serial:
+            executor = RoundTransitionExecutor(
+                capture=lambda: _capture_image(serial, DEFAULT_ADB_PATH, session_dir),
+                tap=lambda x, y: _tap_lobby(serial, DEFAULT_ADB_PATH, x, y),
+                report_dir=session_dir)
+            executor._serial = serial
+            self._round_transition = executor
+        round_no = int(getattr(self, "round_no", 0) or 0) or None
+        self.full_auto_status.set("本局结束：正在核验局间页「下一局」按钮（单次点击）。")
+        self._round_transition_future = self.auto_executor.submit(
+            executor.attempt, round_no=round_no)
+        self.root.after(200, self._poll_round_transition)
+
+    def _poll_round_transition(self) -> None:
+        future = getattr(self, "_round_transition_future", None)
+        if future is None:
+            return
+        if not future.done():
+            self.root.after(200, self._poll_round_transition)
+            return
+        self._round_transition_future = None
+        try:
+            result = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self._full_auto_wanted = False
+            self.full_auto_status.set(f"下一局执行异常，已停手：{exc}")
+            return
+        self._on_round_transition_result(result)
+
+    def _on_round_transition_result(self, result) -> None:
+        status = getattr(result, "status", "")
+        reason = getattr(result, "reason", "")
+        if status in ("advanced", "advanced_without_click"):
+            self.next_round()
+            self._auto_resume_pending = True
+            self.full_auto_status.set(f"{reason}；新局重读财神与手牌后自动恢复全自动。")
+            if not self.continuous:
+                self.start()
+            return
+        self._full_auto_wanted = False
+        self._auto_resume_pending = False
+        self.full_auto_status.set(f"本房 BOT 已停止：{reason}（报告见 round_transition.jsonl）")
+        self._set_operational_status("已停手", reason, level="wait")
+
+    def _poll_full_auto_control(self) -> None:
+        from full_auto_control import consume_command
+        command = consume_command(self.serial.get().strip())
+        if command == "stop" and getattr(self, "full_auto_running", False):
+            self._stop_full_auto()
+        elif command == "resume" and not getattr(self, "full_auto_running", False):
+            self._full_auto_wanted = True
+            self._auto_resume_pending = True
+            self.full_auto_status.set("收到控制文件 resume：门禁通过后恢复全自动。")
+            if not self.continuous:
+                self.start()
+        if (getattr(self, "_auto_resume_pending", False)
+                and not getattr(self, "full_auto_running", False)
+                and self.continuous
+                and getattr(self, "continuous_caishen", None) is not None):
+            self._auto_resume_pending = False
+            self._start_full_auto()
 
     def _maybe_autostart(self) -> None:
         """Do not auto-start: recommendation and autoplay need explicit clicks."""
@@ -2186,13 +2268,15 @@ class TeaAssistWindow:
             self.start()
 
     def _begin_lobby_follow(self) -> None:
-        """Observe the lobby without spending cards or touching seats."""
+        """Guarded tea-2p seating; never clicks Start Game/recharge/invite."""
         self._lobby_active = True
         self._lobby_in_game_verified = False
         self._lobby_future = None
-        self.start_button.configure(text="停止大厅观察")
-        self.status.set("正在检查当前雷电画面和房卡；仅观察，不会自动入座或消耗房卡。")
-        self._set_operational_status("大厅检查", "未授权入座点击", level="wait")
+        self.start_button.configure(text="停止找位")
+        self.status.set(
+            "正在查找温州茶2人空座并自动入座；不会自动点开始游戏、充值或邀请。")
+        self._set_operational_status(
+            "自动找位", "仅允许真帧确认后的空座和规则说明关闭", level="wait")
         self._schedule_lobby_probe(0)
 
     def _schedule_lobby_probe(self, delay_ms: int) -> None:
@@ -2204,37 +2288,41 @@ class TeaAssistWindow:
         if not getattr(self, "_lobby_active", False):
             return
         if self._lobby_future is None:
-            from lobby_follow import probe
+            from lobby_follow import advance
             self._lobby_future = self.executor.submit(
-                probe, self.serial.get().strip(), DEFAULT_ADB_PATH, self.session_dir)
+                advance, self.serial.get().strip(), DEFAULT_ADB_PATH, self.session_dir)
         if not self._lobby_future.done():
             self._schedule_lobby_probe(120)
             return
         future, self._lobby_future = self._lobby_future, None
         try:
-            assessment = future.result()
+            progress = future.result()
         except Exception as exc:
             self._lobby_active = False
             self.start_button.configure(text="开始跟随")
-            self.status.set(f"大厅检查失败：{exc}；没有发送任何点击。")
-            self._set_operational_status("大厅检查失败", str(exc), level="error")
+            self.status.set(f"自动找位失败：{exc}；已停止后续点击。")
+            self._set_operational_status("自动找位失败", str(exc), level="error")
             return
-        if assessment.state == "in_game":
+        if progress.state == "in_game":
             self._lobby_active = False
             self._lobby_in_game_verified = True
             self.start_button.configure(text="开始跟随")
             self.status.set("检测到已经发牌的对局，转交现有实时跟随识牌流程。")
             self.start()
             return
-        self.status.set(assessment.warning)
-        self._set_operational_status(
-            "大厅/等候室", assessment.warning, level="wait")
-        # LOGIN, unknown, settlement or an empty account must never retry blindly.
-        if assessment.state not in ("lobby", "waiting_room"):
+        self.status.set(progress.message)
+        level = "error" if progress.terminal else "ok" if progress.seated else "wait"
+        self._set_operational_status("大厅/等候室", progress.message, level=level)
+        # Any post-click uncertainty is terminal: never blindly retry.
+        if progress.terminal:
             self._lobby_active = False
             self.start_button.configure(text="开始跟随")
             return
-        self._schedule_lobby_probe(1500)
+        if progress.state not in ("lobby", "waiting_room"):
+            self._lobby_active = False
+            self.start_button.configure(text="开始跟随")
+            return
+        self._schedule_lobby_probe(1200)
 
     def _stop_lobby_follow(self) -> None:
         self._lobby_active = False
@@ -3300,15 +3388,15 @@ class TeaAssistWindow:
         self.full_auto_running = True
         self._auto_future = self.auto_executor.submit(self._auto_loop.run)
         self.start_button.configure(text="停止全部")
-        self.auto_button.configure(text="关闭全自动（仅推荐）")
+        self.auto_button.configure(text="关闭全自动（恢复只读推荐）")
         self._style_start_button(True)
         self._set_hud_expanded(True)
         self._apply_preview_layout(True)
         gate_refresh = getattr(self, "_refresh_auto_gate", None)
         if callable(gate_refresh):
             gate_refresh(force=True)
-        self.full_auto_status.set(
-            "全自动已接管：出牌、过和安全鸣牌会自动执行；证据不足立即弃权或停手。")
+        self.full_auto_status.set("全自动跟随中 · BOT 已接管识牌/决策/点击")
+        self._full_auto_wanted = True
         self.live_info.set(
             "BOT 接管中；绝不点击开始游戏、结算、离桌、充值或分享。")
         self._set_operational_status(
@@ -3325,6 +3413,8 @@ class TeaAssistWindow:
         loop = getattr(self, "_auto_loop", None)
         if loop is not None:
             loop.request_stop("用户在辅助器中关闭全自动代打")
+        self._full_auto_wanted = False
+        self._auto_resume_pending = False
         self.full_auto_status.set("正在安全停手：若有点击正在验证，会先完成验证再退出。")
         self._set_operational_status(
             "正在停手", "等待当前动作验证完成", level="wait")
@@ -3375,6 +3465,9 @@ class TeaAssistWindow:
                 return
             reason = summary.get("stop_reason") or "运行已结束"
             user_stop = "用户" in reason
+            if (not user_stop and getattr(self, "_full_auto_wanted", False)
+                    and self._is_round_end_stop(summary)):
+                self._begin_round_transition(summary)
             self.full_auto_status.set(
                 f"全自动已停止；已验证动作 {summary.get('actions', 0)} 次。{reason}")
             self._set_operational_status(

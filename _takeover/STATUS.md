@@ -19,6 +19,7 @@
 - 通知方式：Codex 由 Hana 直派（PC 直连 runner）；GPT 读本板（急事 BOSS 催一句）；Grok 由 BOSS 转达派单文件（_takeover 里 Hana 备好）。
 
 ## 谁在干什么（2026-10-25 14:17）
+- **2026-10-25 16:xx：用户令 GPT 继续接管；Codex 14:57 后无新提交、工作区已跟踪文件稳定。GPT 恢复为当前唯一落盘方。** 本轮只推进未提交的 `lobby_seat.py` / 大厅模板 / 房卡门禁 / 对应测试，再由单线集成进辅助器；不重写 Codex 已提交的身份门、HUD 和主 BOT。
 - **Codex：当前唯一落盘方，正在收口网页版 GPT 留下的设备连接 UI 增量。** 网页 GPT 必须暂停对当前工作区写入；后续只接不重叠的只读审计/离线数据任务，或另开独立 worktree。
 - 启动器实测发现旧版辅助器 PID 34784 仍开着，执行 --all 按安全设计返回 2、拒绝混开；未终止进程、未启动新 UI、未重启雷电。在线设备仍为 5556/5558。用户/现场人员关闭旧辅助器窗口后再双击启动多开辅助器.bat。
 - Hana（Muse）：调度、实机盯场和验收；下一步安排实机分级验收，本轮不改代码树。w5 没有 live 模板，手动指定财神菜单保留。
@@ -38,3 +39,18 @@
 - 13:24 GPT：最终安全复核新增两道 fail-closed：跨设备目录里的错 serial 绑定会被清除，不允许窗口悄悄切到另一台模拟器；多开启动器无法加载 psutil/检查进程时拒绝启动，防止与旧版全局配置 UI 混开。代码提交 52656aa。全量日志 _takeover/gpt_multi_final_tests_20261025.log：**1105 passed / 1 skipped in 101.95s**；定向回归 48 passed；py_compile 与 git diff --check 通过。启动器现场检查发现旧 UI PID 34784，因此 --all 安全拒绝，没启动新 UI/没重启雷电；设备 5556/5558 在线。下一步先关闭旧辅助器，再启动每设备独立窗口；自动找位/入座/开局、房卡3/8实帧标定、16局零人工及其余实机验收仍未完成。
 - 13:20 GPT：收尾提交完成。分支 gpt/hardening-20261025；多开/只读大厅桥接提交 1a04d65，财神 manifest（63 条）+ w4/xi live 模板提交 2087281；状态板与开发档案随本收尾提交更新。全量 pytest 日志 _takeover/gpt_multi_final_tests_20261025.log：**1104 passed / 0 failed**；资产审计/大厅预检/多开隔离专项 **25 passed**；manifest 引用文件存在且 SHA 匹配。仍未完成：自动找位/入座/开始游戏的真实点击执行器、房卡 3/8 字形与余额实帧标定、自有账号避碰、吃链/局间/面板恢复/邀请拒绝/SPEC-005 p95 等实机复验、16 局零人工验收。未 push；没有清理临时目录或采集数据。下一步由 Hana 安排实机分级验收，旧 UI 需关闭后重新启动以加载新代码；不得把离线全绿等同实机通过。
 - 12:51 Hana：建本状态板。此前今日成果：自动复盘链 da064e5、UI 线 02c0d61、帧资产化交付、财神 w4/xi 挖矿+A/B 验证通过并 promote 到工作区、GPT 审查文件 gpt_review_out.md 已落盘（语料门收紧等意见质量高）。下一步：等 GPT 收工交接，再排实机验收。
+
+
+## 2026-10-25 17:40 收尾（接手 muse）
+- claim 来牌恢复：discard_vision.read_opponent_sparkle_tile + action_policy.resolve_incoming 兜底；真帧 20261025_165416_996466 → t6 score 0.8845 / margin 0.4166（门槛 0.86/0.10），回归测试 tests/test_sparkle_recovery.py（含无闪光/多闪光/错位/低置信负例）。
+- 新模块 round_transition.py：局间「下一局」三重门（模板≥0.90 + 右下几何/尺寸/橙色占比 + 结算场景信号且非等候室），100–250ms 复核帧，单击、永不重复，点后需“按钮消失+新局证据”，否则 post_verify_uncertain 永久停手；第16局/无按钮→terminal 不点；报告写 session/round_transition.jsonl。
+  - **未完成：templates/round_transition/next_round.png 缺失**——dev_auto_play 4.7k 帧扫描无真实局间页，未伪造模板；缺模板时模块拒绝点击（template_missing）。采到局间帧后：python round_transition.py crop <frame> x0 y0 x1 y1。
+- 房卡策略 round_transition.room_card_policy：>0 允许、0 禁止开新局、≤3 警告、读不出允许并记 room_cards_unknown；不阻拦入座。room_hud_digits 仍缺数字 3、8 模板。
+- assist_window：全自动状态「全自动跟随中 · BOT 已接管识牌/决策/点击」、按钮「停止全部」/「关闭全自动（恢复只读推荐）」；全自动因 gate_turn 结算停手→后台执行下一局→next_round() 簿记→重开跟随→新局财神读出后自动 _start_full_auto（门禁全保留）。
+- 控制文件续接：python full_auto_control.py resume|stop emulator-5556 → D:\温州麻将\_control\full_auto_<serial>.cmd，窗口 500ms 消费一次，resume 仍走全部门禁。
+- auto_play_loop 仅新增 summary.stop_gate 字段（无算法改动）。
+- 17:15 实机停手分析：
+  1. 5556 chi_panel_missing：单候选吃已直接完成（副露 1-2-3 万读出正确），但吃后游戏把 13 张暗手置灰、只亮 1 张，识牌对置灰牌 score 0.37–0.49 → 暗手读成 6 张，L3 判 16→6≠−2。轮询窗口不是问题（6 帧均已成吃），真正缺口是“吃后置灰手牌”的识别/校验；按 HARD DON'T 未改阈值/验证器，保持 fail-closed。
+  2. 5558 tap_aborted：第一次点 9万 box 与 fresh 帧一致（非旧几何）；点后帧 9万已离手、右侧出现新摸 6万 → 牌已直接打出/回合已推进，而验证器期望“抬起12px”，故拒绝第二击。正确 fail-closed；后续需让点后验证接受“目标牌已离手+暗手变化”为成功证据。
+- 测试：目标集 389 passed；全量 1157 passed（本次无既有失败）。
+- 仍需实机：下一局模板采集与多局续局（2–3 局、16 局 soak）、吃/碰/胡/杠实机闭环、上述两类停手修复。

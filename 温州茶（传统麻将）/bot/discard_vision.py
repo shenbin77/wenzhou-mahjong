@@ -491,6 +491,80 @@ def find_discard_sparkles(image: np.ndarray) -> tuple[int, ...]:
     return tuple(sorted(centers))
 
 
+def read_opponent_sparkle_tile(
+    image: np.ndarray,
+    *,
+    sparkle_x: int | None = None,
+    vision=None,
+    template_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """严格读取对手闪光标正下方的新弃牌。
+
+    claim 圆盘可能让整条牌河几何 fail-closed，但对手弃牌本身位于 y=231..306，
+    不与行动圆盘重叠。只有闪光标与固定牌河网格对齐、且该格牌面分类同时通过
+    incoming score/margin 门槛时才返回 accepted=True。
+    """
+    evidence: dict[str, Any] = {
+        "accepted": False, "tile_id": None, "label": None,
+        "score": 0.0, "margin": 0.0, "sparkle_x": None,
+        "slot": None, "box": None, "reason": "",
+    }
+    if image is None or not isinstance(image, np.ndarray):
+        evidence["reason"] = "invalid_image"
+        return evidence
+    if image.shape[:2] != (FRAME_HEIGHT, FRAME_WIDTH):
+        evidence["reason"] = "unexpected_frame_size"
+        return evidence
+    centers = find_discard_sparkles(image)
+    if sparkle_x is None:
+        if len(centers) != 1:
+            evidence["reason"] = f"opponent_sparkle_count={len(centers)}"
+            return evidence
+        sparkle_x = int(centers[0])
+    else:
+        sparkle_x = int(sparkle_x)
+        if not any(abs(int(center) - sparkle_x) <= _SPARKLE_MATCH_TOLERANCE
+                   for center in centers):
+            evidence["reason"] = "requested_sparkle_not_present"
+            return evidence
+    evidence["sparkle_x"] = sparkle_x
+
+    candidates: list[tuple[int, int, int, int, int]] = []
+    for slot in range(_MAX_SLOTS_PER_RIVER):
+        x0 = int(round(_OPPONENT_ANCHOR - _TILE_WIDTH - slot * _TILE_PITCH))
+        x1 = int(round(x0 + _TILE_WIDTH))
+        center = int(round((x0 + x1) / 2.0))
+        candidates.append((abs(center - sparkle_x), slot, x0, x1, center))
+    distance, slot, x0, x1, center = min(candidates)
+    if distance > _SPARKLE_MATCH_TOLERANCE:
+        evidence["reason"] = (
+            f"sparkle_grid_mismatch:x={sparkle_x},nearest={center},distance={distance}")
+        return evidence
+
+    y0, y1 = _FACE_Y[SOURCE_OPPONENT]
+    evidence["slot"] = int(slot)
+    evidence["box"] = [int(x0), int(y0), int(x1), int(y1)]
+    classifier = vision or load_vision(template_dir)
+    result = _classify(image[y0:y1, x0:x1], classifier)
+    evidence.update({
+        "tile_id": result.get("tile_id"),
+        "label": result.get("label"),
+        "score": float(result.get("score") or 0.0),
+        "margin": float(result.get("margin") or 0.0),
+    })
+    if not result.get("accepted") or result.get("tile_id") is None:
+        evidence["reason"] = "tile_classifier_rejected:" + str(result.get("reason") or "")
+        return evidence
+    if (evidence["score"] < INCOMING_MIN_SCORE
+            or evidence["margin"] < INCOMING_MIN_MARGIN):
+        evidence["reason"] = (
+            f"tile_confidence_low:{evidence['score']:.3f}/{evidence['margin']:.3f}")
+        return evidence
+    evidence["accepted"] = True
+    evidence["reason"] = "accepted"
+    return evidence
+
+
 def measure_river(band: np.ndarray, x_offset: int, y_offset: int, name: str,
                   anchor: int) -> RiverReading:
     """量一条牌河：从锚定边按固定节距往外走格子，逐格验牌面。

@@ -374,6 +374,7 @@ class AutoPlayLoop:
         self.actions_done = 0
         self.stopped = False
         self.stop_reason = ""
+        self.stop_gate = ""
         self.card_count: int | None = None
         self._ledger_started = False
         # 回合所有权门禁的帧历史（只在本局内有效，换局即清空）。
@@ -1772,6 +1773,7 @@ class AutoPlayLoop:
         """停手并记台账；``extra`` 用于带上本帧的 ``turn_gate`` 证据。"""
         self.stopped = True
         self.stop_reason = reason
+        self.stop_gate = kind
         event = {**(extra or {}), "ts": datetime.now().astimezone().isoformat(),
                  "event": "stop", "gate": kind, "reason": reason}
         self._write_event(event)
@@ -2150,6 +2152,7 @@ class AutoPlayLoop:
             "dry_run": self.dry_run,
             "stopped": self.stopped,
             "stop_reason": self.stop_reason,
+            "stop_gate": getattr(self, "stop_gate", ""),
             "consecutive_errors": self.consecutive_errors,
             "rounds": self.round.seq,
             "card_count": self.card_count,

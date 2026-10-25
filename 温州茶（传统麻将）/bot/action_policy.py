@@ -702,7 +702,8 @@ def resolve_incoming(
     cfg = config or ActionPolicyConfig()
     evidence: dict[str, Any] = {"sparkle": {"status": "skipped", "usable": False},
                                 "arbitrated_source": None,
-                                "recovered_tile": None}
+                                "recovered_tile": None,
+                                "sparkle_tile": None}
     if not isinstance(hand, HandState):
         return hand, evidence
     source, sides = arbitrate_incoming_source(image, hand, cfg)
@@ -714,6 +715,28 @@ def resolve_incoming(
     if (source == INCOMING_SOURCE_OPPONENT and cfg.sparkle_recover_tile
             and updated.incoming_tile is None):
         tile = _newest_opponent_tile(updated)
+        # Claim 圆盘会遮掉牌河的部分几何；这时整河读取会正确 fail-closed，
+        # 但游戏自己的“最新弃牌”闪光标仍精确落在新牌格子正上方。只有单一
+        # 对手闪光标、固定网格对齐且牌面模板通过 incoming 置信门槛时，才
+        # 允许从当前帧直接恢复这张来牌。
+        if tile is None:
+            opponent = tuple(sides.get("opponent") or ()) if isinstance(sides, Mapping) else ()
+            if len(opponent) == 1:
+                try:
+                    from discard_vision import read_opponent_sparkle_tile
+                    from tea_bot import vision_to_engine
+                    sparkle_tile = read_opponent_sparkle_tile(
+                        image, sparkle_x=int(opponent[0]))
+                except Exception as exc:  # noqa: BLE001 - 兜底失败继续安全弃权
+                    sparkle_tile = {"accepted": False,
+                                    "reason": f"recovery_error:{type(exc).__name__}"}
+                evidence["sparkle_tile"] = sparkle_tile
+                if (sparkle_tile.get("accepted")
+                        and sparkle_tile.get("tile_id") is not None):
+                    try:
+                        tile = vision_to_engine(int(sparkle_tile["tile_id"]))
+                    except Exception:  # noqa: BLE001
+                        tile = None
         if tile is not None:
             updated = replace(updated, incoming_tile=tile)
             evidence["recovered_tile"] = tile
