@@ -62,6 +62,30 @@ def forbid_real_subprocess(monkeypatch):
     monkeypatch.setattr(subprocess, "run", forbidden)
 
 
+def test_direct_discard_redraw_proof_requires_exact_multiset_transition():
+    before = {
+        "mode": "tea_2p", "caishen_id": 8,
+        "hand_ids": [3, 4, 9, 43, 44, 45, 46, 47, 49, 22, 23, 25, 25, 29],
+    }
+    after = {
+        "mode": "tea_2p", "caishen_id": 8,
+        "hand_ids": [3, 4, 43, 44, 45, 46, 47, 49, 22, 23, 25, 25, 29, 6],
+    }
+    proof = auto_play_loop.direct_discard_redraw_proof(before, after, 9)
+    assert proof["discarded"] is True
+    assert proof["removed"] == [9]
+    assert proof["added"] == [6]
+    assert proof["after_count"] == 14
+
+    unchanged = auto_play_loop.direct_discard_redraw_proof(before, before, 9)
+    assert unchanged["discarded"] is False
+    wrong_target = auto_play_loop.direct_discard_redraw_proof(before, after, 4)
+    assert wrong_target["discarded"] is False
+    wrong_caishen = dict(after, caishen_id=9)
+    assert auto_play_loop.direct_discard_redraw_proof(
+        before, wrong_caishen, 9)["discarded"] is False
+
+
 # ----------------------------------------------------------------------
 # 假件
 # ----------------------------------------------------------------------

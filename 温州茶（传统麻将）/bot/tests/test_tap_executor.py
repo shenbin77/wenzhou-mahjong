@@ -306,6 +306,40 @@ def test_first_click_that_already_discards_forbids_second_tap(
     assert len([c for c in fake.commands if "screencap" in c]) == 2
 
 
+def test_first_click_direct_discard_with_redraw_uses_semantic_proof(
+        analysis, monkeypatch):
+    """第一击后张数仍相同但上层证明“出一张+摸一张”→ 成功且禁止第二击。"""
+    png = frame_png()
+    box = [int(v) for v in analysis["suggested_boxes"][0]]
+    # 只制造目标列明显变化，不抬牌、不减 count；没有语义证明时本应 fail-closed。
+    selected = confirmed_frame(png, box)
+    fake = FakeAdb([png, selected])
+    monkeypatch.setattr(subprocess, "run", fake)
+    executor = TapExecutor(enabled=True, adb_path="fake-adb",
+                           serial="emulator-test", select_delay=0,
+                           verify_delay=0, fresh_retry_attempts=1)
+    calls = []
+
+    def prove(_image, _fresh_analysis, gate):
+        calls.append(gate)
+        return {
+            "discarded": True,
+            "after_count": gate["count"],
+            "removed": [analysis["suggestion_id"]],
+            "added": [99],
+            "reason": "测试：目标牌已离手并补摸一张",
+        }
+
+    outcome = executor.execute(analysis, post_select_validator=prove)
+
+    assert outcome["executed"] is True
+    assert outcome["verified"] is True
+    assert outcome["stage"] == "discarded_first_click_redraw"
+    assert outcome["after_count"] == outcome["before_count"]
+    assert len(calls) == 1
+    assert len(fake.tap_commands()) == 1, "语义证明第一击已出牌后绝不允许第二击"
+
+
 def test_hint_panel_false_minus_one_still_sends_confirming_second_tap(
         analysis, monkeypatch):
     """实机回归：胡提示面板把抬起牌漏出 ROI，不能误判成已出牌。"""

@@ -36,6 +36,7 @@ from action_policy import (  # noqa: E402
     ACTION_CHI,
     ACTION_PASS,
     ActionDecision,
+    BoardState,
     recommended_runner_config,
     validate_runner_config,
 )
@@ -92,6 +93,38 @@ PANEL_INCOMPLETE = ChiPanelState(
     reason="有牌框未认出")
 PANEL_ABSENT = ChiPanelState(present=False, complete=False, groups=(),
                              cancel=None, reason="无候选面板证据")
+
+
+def test_direct_chi_completion_accepts_only_known_dimmed_hand_state(tmp_path):
+    """实机回归：单候选吃直接完成后暗手整体压暗，不能被坏张数误杀。"""
+    loop = apl.AutoPlayLoop.__new__(apl.AutoPlayLoop)
+    before = BoardState(
+        concealed_count=14, melds=(), claim_buttons=2,
+        settled=False, selection_panel=False, note="before")
+    after = BoardState(
+        concealed_count=6, melds=((1, 2, 3),), claim_buttons=0,
+        settled=False, selection_panel=False, note="dimmed after")
+    loop._board_from_frame = lambda *_a, **_k: after
+
+    dimmed = np.full((900, 1600, 3), 100, dtype=np.uint8)
+    completed = loop._chi_completed_board(
+        before, b"", tmp_path / "dimmed.png", dimmed)
+    assert completed is not None
+    board, reason = completed
+    assert board == after
+    assert "压暗态" in reason
+    assert "新增合法顺子" in reason
+
+    bright = np.full((900, 1600, 3), 214, dtype=np.uint8)
+    assert loop._chi_completed_board(
+        before, b"", tmp_path / "bright.png", bright) is None
+
+    still_claiming = BoardState(
+        concealed_count=6, melds=((1, 2, 3),), claim_buttons=1,
+        settled=False, selection_panel=False, note="still claiming")
+    loop._board_from_frame = lambda *_a, **_k: still_claiming
+    assert loop._chi_completed_board(
+        before, b"", tmp_path / "claim.png", dimmed) is None
 
 
 class PanelQueue:

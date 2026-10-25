@@ -136,6 +136,12 @@ CAISHEN_UNKNOWN_BUDGET = 3
 # 吃链点吃后等候选面板的有界轮询：次数 × 间隔（另加每帧截图/识图耗时）。
 CHI_PANEL_POLL_ATTEMPTS = 6
 CHI_PANEL_POLL_INTERVAL_S = 0.4
+# 吃直接完成时客户端会把暗手整体压暗；实机真帧 p70(V)=100、亮像素≈6.7%，
+# 正常手牌 p70(V)=214、亮像素≈77%。这里只用于“吃后迁移验证”，不改全局识牌阈值。
+CHI_DIMMED_HAND_ROI = (250, 760, 1590, 895)  # x0,y0,x1,y1
+CHI_DIMMED_P70_MAX = 125.0
+CHI_DIMMED_BRIGHT_V = 150
+CHI_DIMMED_BRIGHT_RATIO_MAX = 0.15
 # claim 点后验证的落定轮询（2026-10-25 实机 Bug 2）：首帧决定性读数
 # 直接采用；含糊则每隔 INTERVAL 重拍，直到验证通过、连续两帧签名
 # 一致（落定）或 ATTEMPTS 耗尽（fail-closed）。
@@ -206,6 +212,66 @@ def locate_drawn_tile(result: dict, good_hand_ids) -> dict | None:
     if diffs[-1] <= median(diffs[:-1]):
         return None
     return {"tile_id": rightmost_tile, "box": items[-1][2]}
+
+
+def direct_discard_redraw_proof(
+    before_result: dict,
+    after_result: dict,
+    expected_tile: int,
+) -> dict:
+    """证明第一击已直接出牌，随后又摸入一张牌。
+
+    必须同时满足：前后完整手牌、玩法/财神一致、暗手张数不变、
+    目标牌恰好少 1 张、同时恰好多 1 张新牌。任一条件不满足都拒绝。
+    """
+    out = {
+        "discarded": False, "after_count": None, "reason": "",
+        "removed": [], "added": [],
+    }
+    if not isinstance(before_result, dict) or not isinstance(after_result, dict):
+        out["reason"] = "缺少前后整手分析"
+        return out
+    before = before_result.get("hand_ids")
+    after = after_result.get("hand_ids")
+    if not isinstance(before, (list, tuple)) or not isinstance(after, (list, tuple)):
+        out["reason"] = "缺少完整 hand_ids"
+        return out
+    try:
+        before = [int(v) for v in before]
+        after = [int(v) for v in after]
+    except (TypeError, ValueError):
+        out["reason"] = "hand_ids 含非法值"
+        return out
+    out["after_count"] = len(after)
+    if not before or len(before) != len(after):
+        out["reason"] = f"前后暗手张数不等（{len(before)}→{len(after)}）"
+        return out
+    if before_result.get("mode") and after_result.get("mode"):
+        if before_result.get("mode") != after_result.get("mode"):
+            out["reason"] = "前后玩法不一致"
+            return out
+    before_cs = known_caishen_id(before_result)
+    after_cs = known_caishen_id(after_result)
+    if before_cs is None or after_cs is None or before_cs != after_cs:
+        out["reason"] = "前后财神未知或不一致"
+        return out
+    removed = list((Counter(before) - Counter(after)).elements())
+    added = list((Counter(after) - Counter(before)).elements())
+    out["removed"] = removed
+    out["added"] = added
+    if removed != [int(expected_tile)]:
+        out["reason"] = (
+            f"目标牌变化不唯一：期望移除 {expected_tile}，实际移除 {removed}")
+        return out
+    if len(added) != 1:
+        out["reason"] = f"补摸变化不唯一：新增 {added}"
+        return out
+    out["discarded"] = True
+    out["reason"] = (
+        f"第一击后目标牌 {expected_tile} 已从完整手牌移除，同时新摸入 "
+        f"{added[0]}，暗手仍为 {len(after)} 张；判定第一击已完成出牌，禁止第二击")
+    return out
+
 
 class GateBlocked(RuntimeError):
     """门禁不放行：立即停止，不计入"连续异常"预算。"""
@@ -899,8 +965,19 @@ class AutoPlayLoop:
         # 待二击落盘上下文：局身份 + 本帧完整手牌（进程重启恢复用）。
         self._tap.pending_context = self._pending_context(
             result.get("hand_ids"), result)
+        expected_tile = int(result.get("suggestion_id"))
+
+        def validate_post_select(selected_image: np.ndarray,
+                                 fresh_analysis: dict,
+                                 _selected_gate: dict) -> dict:
+            selected_result = self._analyze_fresh_image(
+                selected_image, "post_select_direct_discard")
+            return direct_discard_redraw_proof(
+                fresh_analysis, selected_result, expected_tile)
+
         try:
-            outcome = self._tap.execute(result)
+            outcome = self._tap.execute(
+                result, post_select_validator=validate_post_select)
         except TapAborted as exc:
             return self._stop("tap_aborted", f"点击或点后验证未通过：{exc}", base)
         except Exception as exc:  # noqa: BLE001 - 未预期异常同样停手
@@ -917,8 +994,10 @@ class AutoPlayLoop:
             "tap": outcome.get("tap"), "box": outcome.get("box"),
             "before_count": outcome.get("before_count"),
             "after_count": outcome.get("after_count"),
-            "verified": bool(outcome.get("executed") and outcome.get("after_count")
-                             == (outcome.get("before_count") or 0) - 1),
+            "verified": bool(outcome.get(
+                "verified",
+                outcome.get("executed") and outcome.get("after_count")
+                == (outcome.get("before_count") or 0) - 1)),
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
         })
         panel_recovery.clear_state(self._panel_recovery_path)
@@ -1828,24 +1907,77 @@ class AutoPlayLoop:
             hand, claim_buttons=len(claims.buttons), settled=settled,
             selection_panel=panel.present, note=note)
 
+    @staticmethod
+    def _chi_dimmed_hand_evidence(image: np.ndarray) -> dict:
+        """吃后专用压暗证据；不参与普通手牌识别。"""
+        out = {"dimmed": False, "p70": None, "bright_ratio": None}
+        if image is None or not isinstance(image, np.ndarray) or image.ndim != 3:
+            return out
+        x0, y0, x1, y1 = CHI_DIMMED_HAND_ROI
+        crop = image[y0:y1, x0:x1]
+        if crop.size == 0:
+            return out
+        value = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)[:, :, 2]
+        p70 = float(np.percentile(value, 70))
+        bright_ratio = float((value >= CHI_DIMMED_BRIGHT_V).mean())
+        out.update({
+            "p70": round(p70, 2),
+            "bright_ratio": round(bright_ratio, 4),
+            "dimmed": (
+                p70 <= CHI_DIMMED_P70_MAX
+                and bright_ratio <= CHI_DIMMED_BRIGHT_RATIO_MAX),
+        })
+        return out
+
     def _chi_completed_board(self, before: BoardState, raw: bytes,
-                             path: Path, image) -> BoardState | None:
+                             path: Path, image) -> tuple[BoardState, str] | None:
         """面板未出现时，检查吃是否已被游戏直接完成（单候选免面板）。
 
-        通过 L3 且新增副露恰为一组顺子才算数；读不全/没完成返回 None。
+        正常帧沿用 L3；若客户端把暗手整体压暗导致分类器少读，只允许用
+        “副露 +1 组/+3 张 + 合法顺子 + 圆盘消失 + 面板消失 + 压暗证据”
+        这一组更强的结构证据确认。绝不降低全局 tile threshold。
         """
         try:
             board = self._board_from_frame(raw, path, image,
                                            note="点吃后轮询帧")
         except Exception:  # noqa: BLE001 - 轮询帧读不全只是"还没等到"
             return None
-        ok, _why = verify_after_click(before, board, ACTION_CHI)
-        if not ok:
-            return None
         new_groups = self._new_meld_groups(before, board)
         if len(new_groups) != 1 or not self._is_engine_sequence(new_groups[0]):
             return None
-        return board
+        ok, why = verify_after_click(before, board, ACTION_CHI)
+        if ok:
+            return board, why
+
+        dim = self._chi_dimmed_hand_evidence(image)
+        if not dim["dimmed"]:
+            return None
+        if board.claim_buttons != 0:
+            return None
+        if board.selection_panel is not False:
+            return None
+        if before.meld_group_count is None or board.meld_group_count is None:
+            return None
+        if board.meld_group_count - before.meld_group_count != 1:
+            return None
+        if before.meld_tile_total is None or board.meld_tile_total is None:
+            return None
+        if board.meld_tile_total - before.meld_tile_total != 3:
+            return None
+        expected = (before.concealed_count - 2
+                    if before.concealed_count is not None else None)
+        # 这条分支只处理“明显少读”的压暗态；若暗手读数恰好正常，
+        # 应由上面的标准 L3 通过，不在这里兜底。
+        if (expected is None or board.concealed_count is None
+                or board.concealed_count >= expected):
+            return None
+        reason = (
+            "吃已由结构证据确认：新增合法顺子副露 +1组/+3张、行动圆盘消失、"
+            "候选面板消失；暗手处于客户端压暗态 "
+            f"(p70={dim['p70']}, bright_ratio={dim['bright_ratio']})，"
+            f"当前暗手读数 {board.concealed_count} 低于应有 {expected}，"
+            "按已知压暗坏读处理，不用该张数否决真实成吃")
+        return board, reason
 
     def _chi_group_verdict(self, before: BoardState, after: BoardState,
                            group, verified: bool, reason: str):
@@ -1962,9 +2094,11 @@ class AutoPlayLoop:
         chain["panel"] = (panel_state.ledger() if panel_state is not None
                           else None)
         if completed is not None:
+            completed_board, completed_reason = completed
             chain["stage"] = "panel_skipped_completed"
-            return self._chi_finish_verified(payload, chain, before,
-                                             completed, group=None)
+            chain["direct_completion_reason"] = completed_reason
+            return self._chi_finish_tail(
+                payload, chain, True, completed_reason)
         if panel_image is None or panel_state is None:
             return {"claim": payload, "_terminal": {
                 "gate": "chi_panel_missing",

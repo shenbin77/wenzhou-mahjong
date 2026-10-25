@@ -280,6 +280,8 @@ class _TapEvidence:
     raised_candidates: dict | None = None
     # 第一次点击后的手牌复核（审计 B 的闸门结果）：只写盘，不参与判定。
     selected_gate: dict | None = None
+    # 上层整手分析对“第一击已直接出牌并立即补摸”的语义证明；只写盘。
+    post_select_semantic: dict | None = None
     # 点击前完整复核/专用锁定器的每次尝试。只记录，不参与判定。
     preclick_attempts: list[dict] = field(default_factory=list)
     # 行动行点击（execute_claim）专用：动作名、期望/实测圆盘种类、点击前后
@@ -373,6 +375,7 @@ class _TapEvidence:
                 "hand_boxes_after": self.hand_boxes_after,
                 "raised_candidates": self.raised_candidates,
                 "selected_gate": self.selected_gate,
+                "post_select_semantic": self.post_select_semantic,
                 "preclick_attempts": self.preclick_attempts,
                 "claim": self.claim,
                 "frames": written,
@@ -1262,6 +1265,7 @@ class TapExecutor:
         analysis: dict,
         *,
         fresh_validator: Callable[[np.ndarray, dict], dict] | None = None,
+        post_select_validator: Callable[[np.ndarray, dict, dict], dict] | None = None,
     ) -> dict:
         """Run one safety-gated tap cycle and return a machine-readable outcome.
 
@@ -1359,6 +1363,31 @@ class TapExecutor:
                 if self.pending_context is not None:
                     self._clear_pending_second_tap()
                 return outcome
+            if (not gate["ready"]) and post_select_validator is not None:
+                semantic = post_select_validator(
+                    settled_image, fresh_analysis, gate)
+                evidence.post_select_semantic = dict(semantic or {})
+                if bool((semantic or {}).get("discarded")):
+                    after_count = int(
+                        (semantic or {}).get("after_count", gate.get("count") or before))
+                    reason = str(
+                        (semantic or {}).get("reason")
+                        or "上层整手语义验证证明第一击已直接出牌")
+                    outcome = {
+                        "executed": True, "dry_run": False,
+                        "stage": "discarded_first_click_redraw",
+                        "verified": True,
+                        "tile": tap_plan.label, "tile_id": tap_plan.tile_id,
+                        "tap": [x, y], "box": list(located["box"]),
+                        "before_count": before, "after_count": after_count,
+                        "reason": reason,
+                        "post_select_semantic": dict(semantic or {}),
+                    }
+                    evidence.after_count = after_count
+                    evidence.dump("discarded_first_click_redraw", reason)
+                    if self.pending_context is not None:
+                        self._clear_pending_second_tap()
+                    return outcome
             if not gate["ready"]:
                 raise TapUnverified(gate["reason"])
 
@@ -1395,6 +1424,7 @@ class TapExecutor:
             raise
         outcome = {
             "executed": True, "dry_run": False, "stage": "verified",
+            "verified": True,
             "tile": tap_plan.label, "tile_id": tap_plan.tile_id,
             "tap": [x, y], "box": list(located["box"]),
             "before_count": before, "after_count": after_count,
