@@ -69,6 +69,8 @@ def _window(tmp_path: Path):
     window._auto_future = None
     window._auto_poll_timer = None
     window._ready = lambda: True
+    window._check_state = "match"
+    window._check_mode_key = "tea_2p"
     window._set_operational_status = lambda *args, **kwargs: None
     window.stop = lambda: setattr(window, "continuous", False)
     return window

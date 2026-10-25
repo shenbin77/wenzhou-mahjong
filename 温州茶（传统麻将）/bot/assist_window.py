@@ -40,6 +40,7 @@ from recognition_audit import (append_frame_event, build_frame_event,
 from recognition_review import FLAG_NAMES, draw_recognition_boxes
 from recorder import AssistRecorder
 from tea_bot import tile_name, vision_to_engine
+from mode_vision import detect_shu_rule_text, score_tea_player_count
 from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
 
@@ -48,6 +49,7 @@ TEA_ROOT = Path(__file__).resolve().parent.parent
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "温州麻将辅助器.ico"
 LAST_ACCOUNT_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".last_account"
 WINDOW_STATE_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".window_state.json"
+BINDING_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".binding.json"
 DEFAULT_SIZE = (1180, 860)
 SIZE_RANGE = {"w": (900, 1600), "h": (760, 1200)}
 STALE_SECONDS = 3.0
@@ -199,6 +201,83 @@ def save_window_state(state: dict, path: Path | None = None) -> None:
         pass
 
 
+
+def load_binding(path: Path | None = None) -> dict | None:
+    """Read the persisted local binding (account/device/mode), if any.
+
+    The binding is the single persisted identity snapshot for the main
+    window: account tag, emulator serial and selected mode, written only
+    by :func:`save_binding` from the top "绑定" button.
+    """
+    target = Path(path) if path is not None else BINDING_PATH
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not str(data.get("account") or "").strip():
+        return None
+    return data
+
+
+def save_binding(binding: dict, path: Path | None = None) -> bool:
+    """Persist the binding snapshot; returns False when the write fails."""
+    target = Path(path) if path is not None else BINDING_PATH
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(binding, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def clear_binding(path: Path | None = None) -> None:
+    target = Path(path) if path is not None else BINDING_PATH
+    try:
+        target.unlink()
+    except OSError:
+        pass
+
+
+def detect_table_mode(image) -> tuple[str | None, str]:
+    """Read the current table's mode off one frame (existing recognizers).
+
+    Returns ``(mode_key, detail)``; ``mode_key`` is None when the rule text
+    cannot be established.  This is one fresh read for the pre-start gate;
+    in-game continuity keeps using the sticky rule latches as before.
+    """
+    if image is None or not isinstance(image, np.ndarray) or image.ndim != 3 \
+            or image.shape[:2] != (900, 1600):
+        return None, "画面不是已验证的 1600×900 牌桌截图"
+    try:
+        if detect_shu_rule_text(image):
+            return "shu_4p", "识别到温州熟 · 4人规则文字"
+    except Exception:
+        pass
+    players, score, margin = score_tea_player_count(image)
+    if players == 2:
+        return "tea_2p", f"识别到温州茶 · 2人（分数 {score:.2f}／差 {margin:.2f}）"
+    if players == 4:
+        return "tea_4p", f"识别到温州茶 · 4人（分数 {score:.2f}／差 {margin:.2f}）"
+    return None, f"规则文字未确认（最佳分数 {score:.2f}／差 {margin:.2f}）"
+
+
+def read_table_mode(serial: str) -> tuple[str | None, str]:
+    """Grab one fresh frame from ``serial`` and read its table mode."""
+    try:
+        from live_capture import capture_frame
+
+        raw, _timing = capture_frame(
+            mode="tea_2p", adb_path=DEFAULT_ADB_PATH, serial=serial,
+            session_dir=TEA_ROOT / "采集" / "assist_sessions")
+    except Exception as exc:  # noqa: BLE001 - 抓不到图就是读不出，按未识别处理
+        return None, f"抓图失败：{exc}"
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return None, "抓图无法解码"
+    return detect_table_mode(image)
+
+
 def clamp_geometry(x: int, y: int, width: int, height: int,
                    screen: tuple[int, int]) -> tuple[int, int, int, int]:
     """Keep a remembered window at least partly on the current screen."""
@@ -277,36 +356,45 @@ class TeaAssistWindow:
         self._review_target: Path | None = None
         self._review_events: Queue = Queue()
         self._review_poll_timer: str | None = None
-        self.full_auto_status = tk.StringVar(
-            value="全自动未开启；先开始跟随核对推荐，再手动交给 BOT。")
+        self._binding: dict | None = None
+        self._check_state = "unchecked"
+        self._check_mode_key: str | None = None
+        self._check_detail = ""
+        self._check_detected: str | None = None
+        self._check_pending: str | None = None
+        self._check_events: Queue = Queue()
+        self._check_poll_timer: str | None = None
+        self._check_executor = ThreadPoolExecutor(max_workers=1)
+        self.full_auto_status = tk.StringVar(value="全自动未开启。")
+        self.auto_state = tk.StringVar(value="不可开启：未开始跟随")
+        self.lamp_status = tk.StringVar(value="待处理")
         self.bound_status = tk.StringVar(value="账号：未绑定 · 设备：未确认")
         self.phase_status = tk.StringVar(value="阶段：尚未开始")
-        self.problem_status = tk.StringVar(value="状态：等待开始跟随")
+        self.problem_status = tk.StringVar(value="状态：—")
 
         last_account = (LAST_ACCOUNT_PATH.read_text(encoding="utf-8").strip()
                         if LAST_ACCOUNT_PATH.is_file() else "")
         self.account = tk.StringVar(value=last_account)
         self.room_id = tk.StringVar()
-        self.round_text = tk.StringVar(value="第 1 局")
+        self.round_text = tk.StringVar(value="—")
         self.serial = tk.StringVar(value=DEFAULT_SERIAL)
         self.mode = tk.StringVar(value="温州茶 · 2人")
         self.caishen = tk.StringVar()
-        self.caishen_title = tk.StringVar(value="财神：识别中")
-        self.confirm_mode = tk.BooleanVar(value=False)
+        self.caishen_title = tk.StringVar(value="财神：—")
         self.always_on_top = tk.BooleanVar(value=bool(state.get("topmost", True)))
         self.manual_caishen = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="先选玩法并核对眼前牌局；填写账号标记并勾选后，再点“开始跟随”。")
+        self.status = tk.StringVar(value="先选玩法、填写账号标记并点“绑定”；开始跟随时将自动核对牌桌玩法。")
         self.hand = tk.StringVar(value="手牌：—")
         self.suggestion = tk.StringVar(value="尚未开始")
         self.reason = tk.StringVar(value="离线预检结果不能用于当前对局。")
         self.latency = tk.StringVar(value="最近一帧：—")
         self.fresh = tk.StringVar(value="尚未更新")
         self.period = tk.StringVar(value=f"周期 {BASE_INTERVAL_MS} ms")
-        self.live_info = tk.StringVar(value="只读画面，不会代点；停止后最后一帧可能已过期。")
-        self.preview_title = tk.StringVar(value="实时跟随 · 尚未开始")
+        self.live_info = tk.StringVar(value="只读画面，不会代点。")
+        self.preview_title = tk.StringVar(value="实时跟随")
         self.preview_flags = tk.StringVar(value="进入牌桌后点“开始跟随”；离线预检在“更多”中，仅检查旧截图。")
         self.preview_meta = tk.StringVar(
-            value="状态色：绿=正常/已验证，橙=等待/需复核，红=停手/错误；牌框颜色仅表示识牌证据。")
+            value="")
         self.offline_notice = tk.StringVar(value="")
         self.hud_wall = tk.StringVar(value="余牌：未识别")
         self.hud_countdown = tk.StringVar(value="倒计时：未识别")
@@ -323,7 +411,10 @@ class TeaAssistWindow:
         self.hud_claim_buttons = tk.StringVar(value="鸣牌按钮：未识别")
         self._follow_pipeline = None
         self.display_source: str | None = None
+        self._restore_binding()
         self._build()
+        self._refresh_binding_views()
+        self._apply_preview_layout(False)
         self.recorder_timer = root.after(500, self._poll_recorder)
         self.ticker = root.after(200, self._tick)
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -340,23 +431,28 @@ class TeaAssistWindow:
         self.mode_choice.grid(row=0, column=1, padx=(2, 12), sticky="w")
         self.mode_choice.bind("<<ComboboxSelected>>", self._on_mode_change)
         ttk.Label(controls, text="绑定账号（本地标记）").grid(row=0, column=2, sticky="w")
-        ttk.Entry(controls, textvariable=self.account, width=14).grid(
-            row=0, column=3, padx=(2, 10), sticky="w")
-        ttk.Checkbutton(
-            controls, text="已核对本局玩法", variable=self.confirm_mode,
-            command=self._on_confirm,
-        ).grid(row=0, column=4, padx=2)
-        self.start_button = ttk.Button(controls, text="开始跟随", command=self._toggle)
-        self.start_button.grid(row=0, column=5, padx=4)
+        self.account_entry = ttk.Entry(
+            controls, textvariable=self.account, width=14)
+        self.account_entry.grid(row=0, column=3, padx=(2, 6), sticky="w")
+        self.bind_button = ttk.Button(
+            controls, text="绑定", width=6, command=self._bind)
+        self.bind_button.grid(row=0, column=4, padx=2)
+        self.unbind_button = ttk.Button(
+            controls, text="解绑", width=6, command=self._unbind)
+        self.unbind_button.grid(row=0, column=5, padx=2)
+        self.start_button = tk.Button(
+            controls, text="开始跟随", width=10, command=self._toggle)
+        self.start_button.grid(row=0, column=6, padx=4)
         ttk.Button(controls, text="更多", width=5, command=self._open_menu).grid(
-            row=0, column=6, sticky="e")
-        controls.grid_columnconfigure(6, weight=1)
+            row=0, column=7, sticky="e")
+        controls.grid_columnconfigure(7, weight=1)
         ttk.Label(
             controls,
-            text="“已核对本局玩法”只表示眼前牌局与所选玩法一致，不代表识牌或建议已核准；"
-                 "填写账号标记（仅本地记录）后才可开始跟随。",
+            text="绑定保存账号标记、设备与玩法，重启自动恢复；"
+                 "开始前自动核对牌桌玩法，一致才放行，"
+                 "不一致或读不出都阻止开始。",
             foreground="#a55700", wraplength=1040,
-        ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(3, 0))
+        ).grid(row=1, column=0, columnspan=8, sticky="w", pady=(3, 0))
 
         # Always-visible operational summary: identity, stage and the latest
         # actionable problem.  Color is semantic, not decorative.
@@ -374,6 +470,13 @@ class TeaAssistWindow:
             self.operational_strip, textvariable=self.problem_status,
             bg="#f3f5f7", fg="#a55700", anchor="w")
         self.problem_label.pack(side="left", fill="x", expand=True)
+        self.lamp_label = tk.Label(
+            self.operational_strip, textvariable=self.lamp_status,
+            bg="#f3f5f7", fg="#a55700", anchor="e")
+        self.lamp_label.pack(side="right")
+        self.lamp_dot = tk.Label(
+            self.operational_strip, text="●", bg="#f3f5f7", fg="#a55700")
+        self.lamp_dot.pack(side="right")
 
         # Bottom strip: read-only follow_session.jsonl (gate/abstain/decision).
         # Pack before main so the strip stays at the window bottom.
@@ -392,12 +495,15 @@ class TeaAssistWindow:
                   foreground="#a55700", wraplength=550).pack(fill="x", pady=(2, 4))
         self.picture = ttk.Label(
             self.preview_panel,
-            text="尚未开始。进入真实牌桌后点“开始跟随”；离线预检在“更多”中。",
+            text="进入真实牌桌后点“开始跟随”。",
             anchor="center", justify="center", wraplength=500,
         )
         self.picture.pack(fill="both", expand=True)
-        ttk.Label(self.preview_panel, textvariable=self.preview_meta,
-                  foreground="#666666", wraplength=550).pack(fill="x", pady=(4, 2))
+        self.live_label = ttk.Label(
+            self.preview_panel, textvariable=self.live_info,
+            foreground="#666666", font=("Microsoft YaHei UI", 8),
+            wraplength=640, justify="left")
+        self.live_label.pack(fill="x", pady=(2, 0))
         sidebar = ttk.Frame(main, width=440)
         sidebar.pack(side="right", fill="y")
         sidebar.pack_propagate(False)
@@ -406,14 +512,19 @@ class TeaAssistWindow:
         ttk.Label(self.caishen_row, textvariable=self.caishen_title,
                   font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
         ttk.Label(self.caishen_row, textvariable=self.round_text).pack(side="right")
-        ttk.Label(
+        self.offline_label = ttk.Label(
             sidebar, textvariable=self.offline_notice, foreground="#c62828",
             font=("Microsoft YaHei UI", 9, "bold"), wraplength=380,
-        ).pack(fill="x", padx=6)
+        )
+        self.offline_label.pack(fill="x", padx=6)
 
         # Read-only unified table HUD — never invents values; CLAIM stays off.
         self.hud_panel = ttk.Frame(sidebar, padding=(6, 2))
-        self.hud_panel.pack(fill="x")
+        self.hud_idle_label = ttk.Label(
+            sidebar, text="开始跟随后显示牌局识别", foreground="#666666",
+            font=("Microsoft YaHei UI", 9))
+        self.hud_idle_label.pack(fill="x", padx=6, pady=(2, 0))
+        self._hud_expanded = False
         for var in (
             self.hud_mode, self.hud_room_round, self.hud_caishen,
             self.hud_concealed, self.hud_melds, self.hud_meld_types, self.hud_wall,
@@ -463,10 +574,16 @@ class TeaAssistWindow:
         # removed from the primary workflow.
         self.tap_panel = ttk.Frame(sidebar)
         self.tap_panel.pack(fill="x", padx=6, after=self.advice_panel)
+        auto_row = ttk.Frame(self.tap_panel)
+        auto_row.pack(anchor="w")
         self.auto_button = ttk.Button(
-            self.tap_panel, text="开启全自动代打", width=18,
+            auto_row, text="开启全自动代打", width=18,
             command=self._toggle_full_auto)
-        self.auto_button.pack(anchor="w")
+        self.auto_button.pack(side="left")
+        self.auto_state_label = tk.Label(
+            auto_row, textvariable=self.auto_state, fg="#a55700",
+            font=("Microsoft YaHei UI", 9))
+        self.auto_state_label.pack(side="left", padx=(6, 0))
         self.tap_status_label = ttk.Label(
             self.tap_panel, textvariable=self.full_auto_status,
             foreground="#555555", wraplength=360,
@@ -488,34 +605,35 @@ class TeaAssistWindow:
         self.flag_button.grid(row=0, column=0, padx=2, sticky="w")
         ttk.Button(bottom, text="打开记录", width=8,
                    command=self.open_folder).grid(row=0, column=1, padx=1)
-        ttk.Label(bottom, textvariable=self.live_info, wraplength=430,
-                  font=("Microsoft YaHei UI", 8)).grid(
-            row=1, column=0, columnspan=6, sticky="w")
 
         self.menu = tk.Menu(self.root, tearoff=0)
-        self.menu.add_command(label="填入模拟器序列号", command=self._edit_serial)
-        self.menu.add_command(label="账号", command=self._edit_account)
+        # 设置组：绑定相关的唯一编辑入口（serial 在此，账号只走主区绑定）。
+        self.menu.add_command(label="设备序列号…", command=self._edit_serial)
         self.menu.add_command(label="房间号", command=self._edit_room)
-        self.menu.add_command(label="离线预检（旧截图）", command=self.preflight_selected_mode)
         self.menu.add_checkbutton(label="窗口置顶", variable=self.always_on_top,
                                   command=self._set_always_on_top)
+        self.menu.add_separator()
+        # 财神组：自动识别模板缺口的逃生门，保持原 radio 结构与门控语义。
+        self.menu.add_checkbutton(label="手动指定财神", variable=self.manual_caishen,
+                                  command=self._on_manual_caishen)
         self.caishen_menu = tk.Menu(self.menu, tearoff=0)
         for text, label in TILE_CHOICES.items():
             self.caishen_menu.add_radiobutton(
                 label=f"{text}", value=label, variable=self.caishen,
                 command=self._on_caishen_pick,
             )
-        self.menu.add_checkbutton(label="手动指定财神", variable=self.manual_caishen,
-                                  command=self._on_manual_caishen)
         self.menu.add_cascade(label="财神牌（茶）", menu=self.caishen_menu)
         self.menu.add_separator()
+        # 诊断与记录组。
+        self.menu.add_command(label="离线预检（旧截图）", command=self.preflight_selected_mode)
         self.menu.add_command(label="抓图并分析", command=self.capture)
         self.menu.add_command(label="导入截图", command=self.import_image)
+        self.menu.add_command(label="修正手牌并重算", command=self.manual_correction)
         self.menu.add_command(label="历史逐帧复核", command=self.open_recognition_review)
-        self.menu.add_command(label="跟随会话日志", command=self.open_follow_session_log)
         self.menu.add_command(label="导入录像复核（每秒1帧）", command=self.import_video_review)
         self.menu.add_command(label="停止录像复核", command=self.stop_video_review)
-        self.menu.add_command(label="修正手牌并重算", command=self.manual_correction)
+        self.menu.add_command(label="历史会话日志", command=self.open_follow_session_log)
+        self.menu.add_separator()
         self.menu.add_command(label="下一局", command=self.next_round)
 
         self._mount_embedded_follow_log()
@@ -542,6 +660,9 @@ class TeaAssistWindow:
         self.embedded_follow_log.set_detach_callback(self.open_follow_session_log)
 
     def _open_menu(self) -> None:
+        refresh = getattr(self, "_refresh_menu_state", None)
+        if callable(refresh):
+            refresh()
         try:
             self.menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
         finally:
@@ -678,21 +799,9 @@ class TeaAssistWindow:
         value = simpledialog.askstring("模拟器", "ADB 序列号", initialvalue=self.serial.get())
         if value:
             self.serial.set(value.strip())
-
-    def _edit_account(self) -> None:
-        value = simpledialog.askstring(
-            "账号标记（必填）", "仅本地记录用，不是游戏登录账号",
-            initialvalue=self.account.get())
-        if value is None:
-            return
-        self.account.set(value.strip())
-        if not self.account.get():
-            if self.confirm_mode.get():
-                self.status.set(
-                    "账号标记为空；填写后才会自动跟随（仅本地记录）。")
-            return
-        self._autostart_done = False
-        self._maybe_autostart()
+            refresh = getattr(self, "_refresh_binding_views", None)
+            if callable(refresh):
+                refresh()
 
     def _edit_room(self) -> None:
         value = simpledialog.askstring("房间号（可空）", "房间号",
@@ -919,7 +1028,7 @@ class TeaAssistWindow:
         if picture is not None and hasattr(picture, "configure"):
             picture.configure(image="")
             if isinstance(picture, ttk.Label):
-                picture.configure(text="等待新画面；离线预检在“更多”中。")
+                picture.configure(text="等待新画面。")
         images = getattr(self, "images", None)
         if images is not None:
             images.pop("preview", None)
@@ -934,33 +1043,470 @@ class TeaAssistWindow:
         self.continuous_round = None
         self.continuous_caishen = None
         self._autostart_done = False
-        self.confirm_mode.set(False)
-        self._reset_round_display("已切换玩法，请重新核对本局")
+        self._check_state = "unchecked"
+        self._check_mode_key = None
+        self._check_detail = ""
+        self._check_detected = None
+        self._check_pending = None
+        self._reset_round_display("已切换玩法，开始跟随时将自动核对")
         self.status.set(
-            "已切换玩法；“已核对本局玩法”已取消。请核对眼前牌局后重新勾选。")
-        if getattr(self, "auto_button", None) is not None:
-            state = "normal" if self._mode_key() == "tea_2p" else "disabled"
-            self.auto_button.configure(state=state)
+            "已切换玩法；开始跟随时会自动核对牌桌玩法，不一致将阻止开始。")
         self._set_operational_status(
-            "待核对", "玩法已切换，等待重新核对", level="wait")
+            "待核对", "玩法已切换，开始时自动核对", level="wait")
+        refresh = getattr(self, "_refresh_binding_views", None)
+        if callable(refresh):
+            refresh()
 
-    def _on_confirm(self) -> None:
-        if not self.confirm_mode.get():
-            self.stop()
-            self._reset_round_display("等待核对本局玩法")
-            status = getattr(self, "status", None)
-            if status is not None:
-                status.set("已取消核对；连续观察已停止。")
+    # -- binding + automatic mode check --------------------------------
+    def _restore_binding(self) -> None:
+        """Re-apply the persisted binding (single identity source)."""
+        binding = load_binding()
+        if not binding:
             return
-        self._autostart_done = False
-        account = getattr(self, "account", None)
-        if account is None or not account.get().strip():
+        self._binding = binding
+        account = str(binding.get("account") or "").strip()
+        if account and getattr(self, "account", None) is not None:
+            self.account.set(account)
+        serial = str(binding.get("serial") or "").strip()
+        if serial and getattr(self, "serial", None) is not None:
+            self.serial.set(serial)
+        label = next((name for name, key in MODES.items()
+                      if key == binding.get("mode")), None)
+        if label and getattr(self, "mode", None) is not None:
+            self.mode.set(label)
+
+    def _current_binding_fields(self) -> dict:
+        try:
+            mode_key = self._mode_key()
+        except Exception:
+            mode_key = ""
+        return {
+            "account": (self.account.get().strip()
+                        if getattr(self, "account", None) is not None else ""),
+            "serial": (self.serial.get().strip()
+                       if getattr(self, "serial", None) is not None else ""),
+            "mode": mode_key,
+        }
+
+    def _is_bound(self) -> bool:
+        binding = getattr(self, "_binding", None)
+        if not binding:
+            return False
+        current = self._current_binding_fields()
+        return all(binding.get(key) == current[key]
+                   for key in ("account", "serial", "mode"))
+
+    def _binding_mismatch_reason(self) -> str:
+        binding = getattr(self, "_binding", None)
+        if not binding:
+            return "未绑定"
+        current = self._current_binding_fields()
+        names = {"account": "账号已变更", "serial": "设备已变更",
+                 "mode": "玩法已变更"}
+        diff = [names[key] for key in ("account", "serial", "mode")
+                if binding.get(key) != current[key]]
+        return "、".join(diff) if diff else ""
+
+    def _bound_text(self) -> str:
+        if self._is_bound():
+            current = self._current_binding_fields()
+            return (f"账号：已绑定（{current['account']}） · "
+                    f"设备：已确认（{current['serial']}）")
+        return "账号：未绑定 · 设备：未确认"
+
+    def _bind(self) -> None:
+        fields = self._current_binding_fields()
+        if not fields["account"]:
             self.status.set(
-                "已核对玩法，但账号标记为空；填写后才会自动跟随（仅本地记录）。")
+                "账号标记为空，无法绑定；请先在顶部输入框填写账号标记。")
+            self._set_operational_status(
+                "未绑定", "账号标记为空，绑定未写入", level="wait")
             return
-        self.status.set("玩法已核对；点击“开始跟随”进入实时推荐。")
+        if not fields["serial"]:
+            self.status.set(
+                "设备序列号为空，无法绑定；请在“更多 → 设备序列号…”中填写。")
+            self._set_operational_status(
+                "未绑定", "设备序列号为空，绑定未写入", level="wait")
+            return
+        binding = {
+            "account": fields["account"],
+            "serial": fields["serial"],
+            "mode": fields["mode"],
+            "mode_label": (self.mode.get()
+                           if getattr(self, "mode", None) is not None else ""),
+            "bound_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if not save_binding(binding):
+            self.status.set("绑定保存失败：本地文件写入出错。")
+            self._set_operational_status(
+                "未绑定", "绑定写入失败", level="error")
+            return
+        self._binding = binding
+        self.status.set(
+            f"已绑定并保存：{binding['account']} · {binding['serial']} · "
+            f"{binding['mode_label']}；重启自动恢复。")
         self._set_operational_status(
-            "已核对", "可以开始推荐跟随", level="ok")
+            "已绑定", "账号/设备/玩法已绑定", level="ok")
+        self._refresh_binding_views()
+
+    def _unbind(self) -> None:
+        clear_binding()
+        self._binding = None
+        self.status.set("已解绑并清除本地保存；开始跟随前请重新绑定。")
+        self._set_operational_status("未绑定", "绑定已清除", level="wait")
+        self._refresh_binding_views()
+
+    def _refresh_identity(self) -> None:
+        bound_status = getattr(self, "bound_status", None)
+        if bound_status is not None:
+            bound_status.set(self._bound_text())
+
+    @staticmethod
+    def _channel_ready() -> bool:
+        try:
+            from action_policy import CLAIM_TAP_CHANNEL_READY
+        except Exception:
+            return False
+        return bool(CLAIM_TAP_CHANNEL_READY)
+
+    def _refresh_lamp(self) -> None:
+        """Readiness lamp: green ready / orange pending / red abnormal."""
+        var = getattr(self, "lamp_status", None)
+        if var is None:
+            return
+        colors = {"ok": "#146c2e", "wait": "#a55700", "error": "#c62828"}
+        if getattr(self, "_check_state", "unchecked") == "mismatch":
+            detected = getattr(self, "_check_detected", None)
+            label = next((name for name, key in MODES.items()
+                          if key == detected), detected or "其它玩法")
+            text, level = f"异常：玩法不一致（牌桌是{label}）", "error"
+        else:
+            missing = []
+            if getattr(self, "_binding", None) is None:
+                missing.append("未绑定")
+            elif not self._is_bound():
+                missing.append(
+                    f"绑定已失效（{self._binding_mismatch_reason()}）")
+            if not self._mode_gate_ok():
+                state = getattr(self, "_check_state", "unchecked")
+                missing.append({"checking": "玩法核对中",
+                                "unknown": "玩法未识别"}.get(state, "玩法未核对"))
+            channel_ok = self._channel_ready()
+            if not channel_ok:
+                missing.append("动作通道未就绪")
+            if not missing:
+                text, level = "就绪", "ok"
+            elif not channel_ok and len(missing) == 1:
+                text, level = "异常：自动动作通道未就绪", "error"
+            else:
+                text, level = f"待处理：{'、'.join(missing)}", "wait"
+        var.set(text)
+        for widget in (getattr(self, "lamp_dot", None),
+                       getattr(self, "lamp_label", None)):
+            if widget is not None:
+                try:
+                    widget.configure(fg=colors[level])
+                except Exception:
+                    pass
+
+    def _refresh_auto_gate(self, *, force: bool = False) -> None:
+        """Full-auto button state: never looks clickable when it would refuse."""
+        button = getattr(self, "auto_button", None)
+        var = getattr(self, "auto_state", None)
+        label = getattr(self, "auto_state_label", None)
+        colors = {"ok": "#146c2e", "wait": "#a55700", "error": "#c62828"}
+        if getattr(self, "full_auto_running", False):
+            text, level = "● 代打中", "ok"
+            if force and button is not None:
+                try:
+                    button.configure(state="normal")
+                except Exception:
+                    pass
+        else:
+            missing = []
+            if self._mode_key() != "tea_2p":
+                missing.append("全自动仅开放温州茶 2 人")
+            if not self._is_bound():
+                missing.append("未绑定" if getattr(self, "_binding", None) is None
+                               else "绑定已失效")
+            if not self._mode_gate_ok():
+                missing.append("玩法未核对")
+            if not getattr(self, "continuous", False):
+                missing.append("未开始跟随")
+            if missing:
+                text, level = f"不可开启：{'、'.join(missing)}", "wait"
+                state = "disabled"
+            else:
+                text, level, state = "● 可开启", "ok", "normal"
+            if button is not None:
+                try:
+                    button.configure(state=state)
+                except Exception:
+                    pass
+        if var is not None:
+            var.set(text)
+        if label is not None:
+            try:
+                label.configure(fg=colors[level])
+            except Exception:
+                pass
+
+    def _refresh_start_gate(self) -> None:
+        """开始跟随 follows the same grey-out standard as the auto button."""
+        button = getattr(self, "start_button", None)
+        if button is None:
+            return
+        running = (bool(getattr(self, "continuous", False))
+                   or bool(getattr(self, "full_auto_running", False)))
+        try:
+            button.configure(
+                state="normal" if (running or self._is_bound()) else "disabled")
+        except Exception:
+            pass
+
+    def _refresh_bind_controls(self) -> None:
+        """Bind/unbind are mutually exclusive; a bound account is locked."""
+        bound = self._is_bound()
+        bind_button = getattr(self, "bind_button", None)
+        if bind_button is not None:
+            try:
+                bind_button.configure(text="重新绑定" if bound else "绑定")
+            except Exception:
+                pass
+        unbind_button = getattr(self, "unbind_button", None)
+        if unbind_button is not None:
+            try:
+                unbind_button.configure(
+                    state=("normal"
+                           if getattr(self, "_binding", None) is not None
+                           else "disabled"))
+            except Exception:
+                pass
+        entry = getattr(self, "account_entry", None)
+        if entry is not None:
+            try:
+                entry.configure(state="readonly" if bound else "normal")
+            except Exception:
+                pass
+
+    def _refresh_flag_button(self) -> None:
+        button = getattr(self, "flag_button", None)
+        if button is None:
+            return
+        active = (bool(getattr(self, "continuous", False))
+                  or bool(getattr(self, "full_auto_running", False)))
+        try:
+            button.configure(state="normal" if active else "disabled")
+        except Exception:
+            pass
+
+    def _apply_preview_layout(self, running: bool) -> None:
+        """Idle: the log strip takes the slack. Running: the frame does."""
+        picture = getattr(self, "picture", None)
+        log_frame = getattr(self, "follow_log_frame", None)
+        if picture is None or log_frame is None:
+            return
+        try:
+            picture.pack_configure(fill="both", expand=bool(running))
+            log_frame.pack_configure(fill="both" if not running else "x",
+                                     expand=not running)
+        except Exception:
+            pass
+
+    def _refresh_binding_views(self) -> None:
+        self._refresh_identity()
+        self._refresh_lamp()
+        self._refresh_auto_gate()
+        self._refresh_start_gate()
+        self._refresh_bind_controls()
+        self._refresh_flag_button()
+
+    def _mode_gate_ok(self) -> bool:
+        if getattr(self, "_check_state", "unchecked") != "match":
+            return False
+        try:
+            return getattr(self, "_check_mode_key", None) == self._mode_key()
+        except Exception:
+            return False
+
+    def _begin_mode_check(self, pending: str | None = None) -> None:
+        """Kick off the pre-start table-mode check in the background."""
+        if getattr(self, "_check_state", "unchecked") == "checking":
+            if pending:
+                self._check_pending = pending
+            return
+        self._check_state = "checking"
+        try:
+            self._check_mode_key = self._mode_key()
+        except Exception:
+            self._check_mode_key = None
+        self._check_detail = ""
+        self._check_detected = None
+        self._check_pending = pending
+        status = getattr(self, "status", None)
+        if status is not None:
+            status.set("正在自动核对牌桌玩法（读取规则文字）…")
+        self._refresh_lamp()
+        serial = (self.serial.get().strip()
+                  if getattr(self, "serial", None) is not None else "")
+        mode_key = self._check_mode_key
+        reader = getattr(self, "_mode_reader", None)
+        if not callable(reader):
+            reader = read_table_mode
+        events = getattr(self, "_check_events", None)
+        if events is None:
+            self._check_events = events = Queue()
+
+        def work() -> None:
+            try:
+                detected, detail = reader(serial)
+            except Exception as exc:  # noqa: BLE001 - 读失败按未识别处理
+                detected, detail = None, f"核对读取失败：{exc}"
+            events.put((mode_key, detected, detail))
+
+        executor = (getattr(self, "_check_executor", None)
+                    or getattr(self, "executor", None))
+        if executor is None:
+            events.put((mode_key, None, "核对执行器不可用"))
+        else:
+            executor.submit(work)
+        root = getattr(self, "root", None)
+        if root is not None:
+            self._check_poll_timer = root.after(120, self._poll_mode_check)
+
+    def _poll_mode_check(self) -> None:
+        self._check_poll_timer = None
+        events = getattr(self, "_check_events", None)
+        if events is None:
+            return
+        latest = None
+        while True:
+            try:
+                latest = events.get_nowait()
+            except Empty:
+                break
+        if latest is None:
+            if getattr(self, "_check_state", None) == "checking":
+                root = getattr(self, "root", None)
+                if root is not None:
+                    self._check_poll_timer = root.after(
+                        120, self._poll_mode_check)
+            return
+        mode_key, detected, detail = latest
+        try:
+            current_key = self._mode_key()
+        except Exception:
+            current_key = None
+        if mode_key != current_key:
+            self._check_state = "unchecked"
+            self._check_pending = None
+            return
+        self._check_mode_key = mode_key
+        self._check_detail = detail
+        self._check_detected = detected
+        pending = getattr(self, "_check_pending", None)
+        self._check_pending = None
+        status = getattr(self, "status", None)
+        if detected is not None and detected == mode_key:
+            self._check_state = "match"
+            if status is not None:
+                status.set(f"已自动核对：牌桌玩法与所选一致（{detail}）。")
+            self._set_operational_status(
+                "已核对", "玩法自动核对一致", level="ok")
+            self._refresh_binding_views()
+            if pending == "follow":
+                self.start()
+            elif pending == "full_auto":
+                self._start_full_auto()
+            return
+        if detected is None:
+            self._check_state = "unknown"
+            if status is not None:
+                status.set(
+                    f"玩法未识别：{detail}；已阻止开始。"
+                    "确认已进入牌桌后，再点“开始跟随”重试。")
+            self._set_operational_status(
+                "待核对", "玩法未识别，已阻止开始", level="wait")
+        else:
+            self._check_state = "mismatch"
+            label = next((name for name, key in MODES.items()
+                          if key == detected), detected)
+            if status is not None:
+                status.set(
+                    f"所选玩法与牌桌不一致：牌桌是“{label}”，已阻止开始；"
+                    "请改选玩法或换房。")
+            self._set_operational_status(
+                "核对不一致", f"牌桌是{label}，与所选不一致", level="error")
+        self._refresh_binding_views()
+
+    def _menu_entry_enabled(self, label: str) -> bool:
+        if label == "停止录像复核":
+            return getattr(self, "video_future", None) is not None
+        if label == "下一局":
+            return (bool(getattr(self, "continuous", False))
+                    and not getattr(self, "full_auto_running", False))
+        return True
+
+    def _refresh_menu_state(self) -> None:
+        menu = getattr(self, "menu", None)
+        if menu is None:
+            return
+        try:
+            end = menu.index("end")
+        except Exception:
+            return
+        if end is None:
+            return
+        for index in range(int(end) + 1):
+            try:
+                label = menu.entrycget(index, "label")
+            except Exception:
+                continue
+            if label in ("停止录像复核", "下一局"):
+                try:
+                    menu.entryconfigure(
+                        index, state=("normal"
+                                      if self._menu_entry_enabled(label)
+                                      else "disabled"))
+                except Exception:
+                    pass
+
+    def _style_start_button(self, running: bool) -> None:
+        """The stop action is always in the main area and red while running."""
+        button = getattr(self, "start_button", None)
+        if button is None:
+            return
+        try:
+            if running:
+                button.configure(fg="#c62828",
+                                 font=("Microsoft YaHei UI", 9, "bold"))
+            else:
+                button.configure(fg="#000000",
+                                 font=("Microsoft YaHei UI", 9))
+        except Exception:
+            pass
+
+    def _set_hud_expanded(self, expanded: bool) -> None:
+        panel = getattr(self, "hud_panel", None)
+        idle = getattr(self, "hud_idle_label", None)
+        if panel is None or idle is None:
+            return
+        if getattr(self, "_hud_expanded", None) == bool(expanded):
+            return
+        self._hud_expanded = bool(expanded)
+        anchor = getattr(self, "offline_label", None)
+        if expanded:
+            idle.pack_forget()
+            if anchor is not None:
+                panel.pack(fill="x", after=anchor)
+            else:
+                panel.pack(fill="x")
+        else:
+            panel.pack_forget()
+            if anchor is not None:
+                idle.pack(fill="x", padx=6, pady=(2, 0), after=anchor)
+            else:
+                idle.pack(fill="x", padx=6, pady=(2, 0))
 
     def _on_manual_caishen(self) -> None:
         if not self.manual_caishen.get():
@@ -1018,29 +1564,54 @@ class TeaAssistWindow:
     def _set_always_on_top(self) -> None:
         self.root.attributes("-topmost", self.always_on_top.get())
 
-    def _ready(self) -> bool:
-        if not self.confirm_mode.get():
-            self.status.set(
-                "先勾选“已核对本局玩法”（确认眼前牌局与所选玩法一致），再开始跟随。")
+    def _ready(self, pending: str | None = None) -> bool:
+        """Start gate: bound identity + automatic table-mode check.
+
+        ``pending`` names the action to resume once a fresh check passes
+        (``"follow"`` / ``"full_auto"``); when a check first has to run,
+        this call returns False and the action completes asynchronously.
+        """
+        if pending is None:
+            pending = getattr(self, "_pending_action", None)
+        if not self._is_bound():
+            if getattr(self, "_binding", None) is None:
+                self.status.set(
+                    "尚未绑定：填写账号标记后点顶部“绑定”，再开始跟随。")
+                self._set_operational_status(
+                    "未绑定", "开始跟随前先完成绑定", level="wait")
+            else:
+                reason = self._binding_mismatch_reason()
+                self.status.set(
+                    f"绑定已失效（{reason}）；点“绑定”更新后再开始跟随。")
+                self._set_operational_status(
+                    "未绑定", f"绑定已失效：{reason}", level="wait")
+            self._refresh_lamp()
             return False
-        account = getattr(self, "account", None)
-        if account is not None and not account.get().strip():
-            self.status.set(
-                "先填写账号标记（仅本地记录，不是登录账号），再开始跟随。")
-            return False
-        try:
-            if getattr(self, "account", None) is not None:
+        if self._mode_gate_ok():
+            try:
                 self._ensure_recorder()
-        except ValueError as exc:
-            self.status.set(str(exc))
+            except ValueError as exc:
+                self.status.set(str(exc))
+                self._set_operational_status("已停手", str(exc), level="error")
+                return False
+            self._refresh_identity()
+            return True
+        state = getattr(self, "_check_state", "unchecked")
+        try:
+            fresh = getattr(self, "_check_mode_key", None) == self._mode_key()
+        except Exception:
+            fresh = False
+        if state == "mismatch" and fresh:
+            self.status.set(
+                "所选玩法与牌桌不一致，已阻止开始；请改选玩法或换房后重试。")
             return False
-        bound_status = getattr(self, "bound_status", None)
-        serial = getattr(self, "serial", None)
-        if bound_status is not None:
-            bound_status.set(
-                f"账号：{account.get().strip() if account is not None else '未绑定'} · "
-                f"设备：{serial.get().strip() if serial is not None else '未填写'}")
-        return True
+        if state == "checking" and fresh:
+            if pending:
+                self._check_pending = pending
+            self.status.set("正在自动核对牌桌玩法…")
+            return False
+        self._begin_mode_check(pending=pending)
+        return False
 
     def _set_operational_status(self, phase: str, problem: str,
                                 *, level: str = "wait") -> None:
@@ -1048,10 +1619,7 @@ class TeaAssistWindow:
         if not all(hasattr(self, name) for name in (
                 "bound_status", "phase_status", "problem_status")):
             return
-        account = self.account.get().strip() if hasattr(self, "account") else ""
-        serial = self.serial.get().strip() if hasattr(self, "serial") else ""
-        self.bound_status.set(
-            f"账号：{account or '未绑定'} · 设备：{serial or '未确认'}")
+        self.bound_status.set(self._bound_text())
         self.phase_status.set(f"阶段：{phase}")
         self.problem_status.set(f"状态：{problem}")
         colors = {"ok": "#146c2e", "wait": "#a55700", "error": "#c62828"}
@@ -1074,10 +1642,16 @@ class TeaAssistWindow:
         room_id = getattr(self, "room_id", None)
         serial = getattr(self, "serial", None)
         mode = getattr(self, "mode", None)
-        confirm = getattr(self, "confirm_mode", None)
+        gate_ok = False
+        gate = getattr(self, "_mode_gate_ok", None)
+        if callable(gate):
+            try:
+                gate_ok = bool(gate())
+            except Exception:
+                gate_ok = False
         return (mode.get() if mode else "温州茶 · 2人", caishen_value,
                 serial.get().strip() if serial else "",
-                bool(confirm.get()) if confirm else False,
+                gate_ok,
                 account.get().strip() if account else "",
                 room_id.get().strip() if room_id else "")
 
@@ -1127,8 +1701,6 @@ class TeaAssistWindow:
         else:
             self.status.set(
                 f"第 {self.round_no} 局：当前未在跟随；点开始跟随即自动读取本局财神。")
-            self.live_info.set(
-                "“已核对本局玩法”勾选保留；它只代表玩法核对，不代表识牌准确。")
 
     def _poll_recorder(self) -> None:
         self.recorder_timer = None
@@ -1167,7 +1739,14 @@ class TeaAssistWindow:
             self.start()
 
     def start(self) -> None:
-        if self.continuous or getattr(self, "video_future", None) is not None or not self._ready():
+        if self.continuous or getattr(self, "video_future", None) is not None:
+            return
+        self._pending_action = "follow"
+        try:
+            ready = self._ready()
+        finally:
+            self._pending_action = None
+        if not ready:
             return
         # 清空轮次锁，重新开始本轮观察
         self.continuous_round = None
@@ -1201,6 +1780,18 @@ class TeaAssistWindow:
         self.continuous = True
         if getattr(self, "start_button", None) is not None:
             self.start_button.configure(text="停止跟随")
+        style = getattr(self, "_style_start_button", None)
+        if callable(style):
+            style(True)
+        hud = getattr(self, "_set_hud_expanded", None)
+        if callable(hud):
+            hud(True)
+        layout = getattr(self, "_apply_preview_layout", None)
+        if callable(layout):
+            layout(True)
+        refresh = getattr(self, "_refresh_binding_views", None)
+        if callable(refresh):
+            refresh()
         self.next_run = time.perf_counter()
         log_path = self._follow_pipeline.follow_log_path
         self.status.set(
@@ -1254,6 +1845,19 @@ class TeaAssistWindow:
                 and callable(set_operational)):
             set_operational(
                 "已停止", "没有自动点击；最后一帧已作废", level="wait")
+        if not getattr(self, "full_auto_running", False):
+            style = getattr(self, "_style_start_button", None)
+            if callable(style):
+                style(False)
+            hud = getattr(self, "_set_hud_expanded", None)
+            if callable(hud):
+                hud(False)
+            layout = getattr(self, "_apply_preview_layout", None)
+            if callable(layout):
+                layout(False)
+            refresh = getattr(self, "_refresh_binding_views", None)
+            if callable(refresh):
+                refresh()
         if self.timer is not None:
             self.root.after_cancel(self.timer)
             self.timer = None
@@ -1943,7 +2547,7 @@ class TeaAssistWindow:
             return
         if self.continuous:
             self.stop()
-        record_decision = bool(self.confirm_mode.get() and self.account.get().strip())
+        record_decision = bool(self._mode_gate_ok() and self._is_bound())
         if record_decision and not self._ready():
             return
         selected = filedialog.askopenfilename(
@@ -2080,8 +2684,20 @@ class TeaAssistWindow:
                 "等待推荐", "尚未启动实时跟随，拒绝交出点击权", level="error")
             return
         if not self._ready():
+            if getattr(self, "_check_state", None) == "checking":
+                self._check_pending = "full_auto"
+                self.full_auto_status.set(
+                    "正在自动核对牌桌玩法；核对一致后自动开启全自动。")
+                return
             self._set_operational_status(
                 "门禁拦截", self.status.get(), level="error")
+            return
+        if not self._mode_gate_ok():
+            self._begin_mode_check(pending="full_auto")
+            self.full_auto_status.set(
+                "正在自动核对牌桌玩法；核对一致后才会开启全自动。")
+            self._set_operational_status(
+                "核对中", "全自动开启前自动核对玩法", level="wait")
             return
 
         account = self.account.get().strip()
@@ -2121,6 +2737,12 @@ class TeaAssistWindow:
         self._auto_future = self.auto_executor.submit(self._auto_loop.run)
         self.start_button.configure(text="停止全部")
         self.auto_button.configure(text="关闭全自动（仅推荐）")
+        self._style_start_button(True)
+        self._set_hud_expanded(True)
+        self._apply_preview_layout(True)
+        gate_refresh = getattr(self, "_refresh_auto_gate", None)
+        if callable(gate_refresh):
+            gate_refresh(force=True)
         self.full_auto_status.set(
             "全自动已接管：出牌、过和安全鸣牌会自动执行；证据不足立即弃权或停手。")
         self.live_info.set(
@@ -2169,7 +2791,16 @@ class TeaAssistWindow:
             if callable(schedule):
                 schedule(ended_session)
             self.start_button.configure(text="开始跟随")
-            self.auto_button.configure(text="开启全自动代打", state="normal")
+            self._style_start_button(False)
+            self._set_hud_expanded(False)
+            self._apply_preview_layout(False)
+            self.auto_button.configure(text="开启全自动代打")
+            gate_refresh = getattr(self, "_refresh_auto_gate", None)
+            if callable(gate_refresh):
+                gate_refresh(force=True)
+            refresh = getattr(self, "_refresh_binding_views", None)
+            if callable(refresh):
+                refresh()
             try:
                 summary = future.result()
             except Exception as exc:  # noqa: BLE001 - surface and keep stopped
@@ -2384,6 +3015,12 @@ class TeaAssistWindow:
             except tk.TclError:
                 pass
             self._auto_poll_timer = None
+        if getattr(self, "_check_poll_timer", None) is not None:
+            try:
+                self.root.after_cancel(self._check_poll_timer)
+            except tk.TclError:
+                pass
+            self._check_poll_timer = None
         if getattr(self, "_review_poll_timer", None) is not None:
             try:
                 self.root.after_cancel(self._review_poll_timer)
@@ -2412,6 +3049,9 @@ class TeaAssistWindow:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.auto_executor.shutdown(wait=False, cancel_futures=True)
+        check_executor = getattr(self, "_check_executor", None)
+        if check_executor is not None:
+            check_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
 

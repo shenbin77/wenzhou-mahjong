@@ -453,7 +453,6 @@ class _FakeWindow:
         self.round_text = types.SimpleNamespace(set=lambda *_: None)
         self.refresh = LiveRefreshState()
         self.tracker = LatencyTracker()
-        self.confirm_mode = types.SimpleNamespace(get=lambda: True)
         # start() arms continuous only after the follow pipeline is attached
         # and follow_session.jsonl exists on disk (the jsonl red line; the
         # failure paths are covered by test_follow_jsonl_miss). The fake
@@ -565,19 +564,6 @@ def test_stop_invalidates_the_last_live_advice():
     assert window.refresh.state.actionable is False
     assert suggestion[-1] == "已停止跟随"
     assert "过期" in notice[-1]
-
-
-def test_confirm_without_account_does_not_autostart():
-    calls = []
-    window = types.SimpleNamespace(
-        confirm_mode=types.SimpleNamespace(get=lambda: True),
-        account=types.SimpleNamespace(get=lambda: ""),
-        status=types.SimpleNamespace(set=lambda _value: None),
-        _maybe_autostart=lambda: calls.append("auto"),
-    )
-    confirm = assist_window.TeaAssistWindow._on_confirm.__get__(window)
-    confirm()
-    assert calls == []
 
 
 def test_offline_on_frame_never_seeds_continuous_round():

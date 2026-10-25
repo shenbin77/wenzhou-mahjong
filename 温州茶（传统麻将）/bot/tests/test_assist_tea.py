@@ -328,25 +328,37 @@ def test_live_abstain_keeps_current_frame_for_evidence():
     assert "保留当前识牌证据" in window.live_info.get()
 
 
-def test_tea_preflight_allows_automatic_caishen():
+def test_ready_requires_binding_and_passed_mode_check():
     window = TeaAssistWindow.__new__(TeaAssistWindow)
     window.mode = _Value("温州茶 · 2人")
-    window.confirm_mode = _Value(True)
+    window.account = _Value("玩家1")
+    window.serial = _Value("emulator-5556")
     window.caishen = _Value("")
     window.status = _Value("")
+    window._binding = None
+    window._check_state = "unchecked"
+    window._check_mode_key = None
+    assert not window._ready()
+    assert "绑定" in window.status.get()
+    window._binding = {
+        "account": "玩家1", "serial": "emulator-5556", "mode": "tea_2p"}
+    window._check_state = "match"
+    window._check_mode_key = "tea_2p"
+    window._ensure_recorder = lambda: None
     assert window._ready()
     window.caishen.set(next(iter(TILE_CHOICES)))
     assert window._ready()
 
 
-def test_unchecking_mode_drops_inflight_advice():
+def test_mode_check_revoked_drops_inflight_advice():
     window = TeaAssistWindow.__new__(TeaAssistWindow)
     window.mode = _Value("温州茶 · 4人")
     window.caishen = _Value("")
     window.serial = _Value("emulator-5556")
-    window.confirm_mode = _Value(True)
+    window._check_state = "match"
+    window._check_mode_key = "tea_4p"
     window.future_context = window._context()
-    window.confirm_mode.set(False)
+    window._check_state = "unknown"
     window.future = SimpleNamespace(done=lambda: True, result=lambda: {"status": "advise"})
     window.capture_started = None
     window.continuous = True
