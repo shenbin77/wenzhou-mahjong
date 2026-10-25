@@ -47,6 +47,12 @@ POST_POLLS = 10
 POST_INTERVAL_S = 0.5
 MATCH_ROUND_TOTAL = 16
 
+# 2026-10-25 真实“下一局”总结页并不满足旧 turn_gate 的双 settlement 信号；
+# 其独立场景特征是整屏被暗化而底部按钮带仍保持中亮。1069 张 16–17 点真帧
+# 扫描中，和 next_round 模板≥0.90 联合后仅命中 9 张真实局间页。
+SUMMARY_FRAME_V_RANGE = (50.0, 90.0)
+SUMMARY_BOTTOM_V_RANGE = (100.0, 175.0)
+
 # 房卡策略（只管“开新局/开新房”，从不阻拦入座）。
 ROOM_CARDS_LOW = 3
 
@@ -113,10 +119,14 @@ def find_next_round_button(image, template: Optional[np.ndarray]) -> dict:
 
 
 def round_end_scene(image) -> dict:
-    """场景门：结算类画面（至少一条结算信号）且不是等候室。"""
+    """场景门：旧式结算信号或真实“下一局”暗化总结页，且不是等候室。
+
+    注意 summary-overlay 只在本 round_transition 模块使用，不修改全局
+    turn_gate 的 settlement 定义。按钮模板/几何/颜色仍是另外两道独立门。
+    """
     from turn_gate import detect_settled_screen
     ev: dict[str, Any] = {"ok": False, "settled_signals": [], "waiting_room": False,
-                          "reason": ""}
+                          "summary_overlay": False, "reason": ""}
     if not _valid(image):
         ev["reason"] = "invalid_frame"
         return ev
@@ -125,6 +135,7 @@ def round_end_scene(image) -> dict:
     ev["settled_signals"] = signals
     ev["panel_area_pct"] = settled.get("panel_area_pct")
     ev["bottom_mean_v"] = settled.get("bottom_mean_v")
+    ev["frame_mean_v"] = settled.get("frame_mean_v")
     try:
         from session_watch import detect_waiting_room
         ev["waiting_room"] = bool(detect_waiting_room(image).get("matched"))
@@ -133,11 +144,21 @@ def round_end_scene(image) -> dict:
     if ev["waiting_room"]:
         ev["reason"] = "waiting_room"
         return ev
-    if not signals:
-        ev["reason"] = "no_settled_signal"
+    frame_v = ev.get("frame_mean_v")
+    bottom_v = ev.get("bottom_mean_v")
+    summary_overlay = (
+        isinstance(frame_v, (int, float))
+        and SUMMARY_FRAME_V_RANGE[0] <= float(frame_v) <= SUMMARY_FRAME_V_RANGE[1]
+        and isinstance(bottom_v, (int, float))
+        and SUMMARY_BOTTOM_V_RANGE[0] <= float(bottom_v) <= SUMMARY_BOTTOM_V_RANGE[1]
+    )
+    ev["summary_overlay"] = bool(summary_overlay)
+    if not signals and not summary_overlay:
+        ev["reason"] = "no_round_end_scene"
         return ev
     ev["ok"] = True
-    ev["reason"] = "round_end_scene"
+    ev["reason"] = ("round_summary_scene" if summary_overlay and not signals
+                    else "round_end_scene")
     return ev
 
 

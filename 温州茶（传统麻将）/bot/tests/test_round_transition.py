@@ -1,7 +1,8 @@
 """round_transition 单测。
 
-真实「下一局」局间帧尚未采到（2026-10-25 全量扫描 dev_auto_play 4.7k 帧无命中），
-正例使用合成帧 + 合成模板，仅验证门控/单击/点后复核逻辑；真实帧负例验证不误触。
+2026-10-25 已从 17:00 / 17:11 实机局间页反查到原生 1600×900 真帧，
+正式模板由 4 张同页按钮区域逐像素中位生成，以消除按钮上的移动手指动画。
+合成帧继续覆盖执行器状态机；真帧覆盖模板/场景正例和正常对局负例。
 """
 import sys
 from pathlib import Path
@@ -17,6 +18,9 @@ import full_auto_control as fac  # noqa: E402
 
 REAL_INGAME = (BOT.parent / "采集" / "dev_auto_play" / "ui_20261025_165115_emulator5556_玉姐"
                / "frames" / "20261025_165416_996466_before_29c49d.png")
+REAL_NEXT_ROUND = (BOT.parent / "采集" / "dev_auto_play"
+                   / "ui_20261025_165932_emulator5558_拾则" / "frames"
+                   / "20261025_170009_431341_before_5b9e69.png")
 BOX = (1250, 760, 1490, 850)
 
 
@@ -122,9 +126,29 @@ def test_low_score_and_size_gates():
 @pytest.mark.skipif(not REAL_INGAME.is_file(), reason="real frame missing")
 def test_real_ingame_frame_rejected():
     img = cv2.imdecode(np.fromfile(str(REAL_INGAME), np.uint8), cv2.IMREAD_COLOR)
-    ev = rt.find_next_round_button(img, _button())
+    template = rt.load_template()
+    assert template is not None
+    ev = rt.find_next_round_button(img, template)
     scene = rt.round_end_scene(img)
     assert not (ev["ok"] and scene["ok"])
+
+
+@pytest.mark.skipif(not REAL_NEXT_ROUND.is_file(), reason="real next-round frame missing")
+def test_real_next_round_frame_hits_tracked_template_and_summary_scene():
+    template = rt.load_template()
+    assert template is not None
+    assert template.shape[:2] == (115, 295)
+    img = cv2.imdecode(
+        np.fromfile(str(REAL_NEXT_ROUND), np.uint8), cv2.IMREAD_COLOR)
+    button = rt.find_next_round_button(img, template)
+    scene = rt.round_end_scene(img)
+    assert button["ok"] is True
+    assert button["score"] >= rt.TEMPLATE_MIN_SCORE
+    assert button["box"] == [1170, 780, 1465, 895]
+    assert button["orange_ratio"] >= rt.ORANGE_MIN_RATIO
+    assert scene["ok"] is True
+    assert scene["summary_overlay"] is True
+    assert scene["reason"] == "round_summary_scene"
 
 
 def test_room_card_policy():
