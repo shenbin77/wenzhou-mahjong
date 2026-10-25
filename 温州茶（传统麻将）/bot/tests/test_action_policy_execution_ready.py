@@ -54,6 +54,27 @@ def test_l3_pass_unmeasured_discs_fails_closed() -> None:
     assert not ok and "不可测" in why
 
 
+def test_l3_pass_accepts_immediate_own_draw_after_discs_disappear() -> None:
+    """实机回归：过后按钮消失且暗手 +1，是轮到我方摸牌而非动作失败。"""
+    before = BoardState(concealed_count=13, melds=(), claim_buttons=2,
+                        settled=False, turn_owner="opponent")
+    after = BoardState(concealed_count=14, melds=(), claim_buttons=0,
+                       settled=False, turn_owner="me")
+    ok, why = verify_after_click(before, after, ACTION_PASS)
+    assert ok, why
+
+
+def test_l3_pass_with_existing_melds_uses_delta_not_absolute_count() -> None:
+    """已有碰/杠时暗手绝对数会变；过只校验副露不变与暗手相对 +0/+1。"""
+    melds = ((5, 5, 5), (21, 22, 23))
+    before = BoardState(concealed_count=10, melds=melds, claim_buttons=2,
+                        settled=False, turn_owner="opponent")
+    after = BoardState(concealed_count=11, melds=melds, claim_buttons=0,
+                       settled=False, turn_owner="me")
+    ok, why = verify_after_click(before, after, ACTION_PASS)
+    assert ok, why
+
+
 @pytest.mark.parametrize("action,concealed,melds", [
     (ACTION_PENG, 14, ((1, 1, 1),)),
     (ACTION_CHI, 14, ((1, 2, 3),)),
@@ -189,13 +210,26 @@ def test_chi_panel_abstains_when_chi_disabled() -> None:
     assert not ap.choose_chi_panel_option(H1, [(1, 2, 3)]).chosen
 
 
-def test_chi_panel_abstains_for_two_players_and_unknown_count() -> None:
+def test_chi_panel_two_players_selectable_by_default() -> None:
+    """2 人局默认可吃（2026-10-25 裁决）：CHI_CFG 用默认
+    chi_player_counts={2,4}，2 人局同构手牌应能选组；人数未知仍弃权。"""
     two = HandState(concealed=H1.concealed, incoming_tile=2,
                     incoming_source="opponent", player_count=2)
-    assert not ap.choose_chi_panel_option(two, [(1, 2, 3)], CHI_CFG).chosen
+    choice = ap.choose_chi_panel_option(two, [(1, 2, 3)], CHI_CFG)
+    assert choice.chosen and tuple(choice.group or ()) == (1, 2, 3)
     unknown = HandState(concealed=H1.concealed, incoming_tile=2,
                         incoming_source="opponent", player_count=None)
     assert not ap.choose_chi_panel_option(unknown, [(1, 2, 3)], CHI_CFG).chosen
+
+
+def test_chi_panel_abstains_for_two_players_when_counts_narrowed() -> None:
+    """显式收窄 chi_player_counts={4} 时，2 人局面选组仍弃权（门禁在）。"""
+    narrowed = ActionPolicyConfig(
+        require_template_match=False, chi_enabled=True,
+        chi_player_counts=frozenset({4}))
+    two = HandState(concealed=H1.concealed, incoming_tile=2,
+                    incoming_source="opponent", player_count=2)
+    assert not ap.choose_chi_panel_option(two, [(1, 2, 3)], narrowed).chosen
 
 
 def test_chi_panel_abstains_on_self_discard_and_unknown_tile() -> None:

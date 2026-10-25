@@ -39,6 +39,7 @@ if str(BOT_DIR) not in sys.path:
 
 from auto_play_loop import DEFAULT_ADB, AutoPlayLoop, GateBlocked  # noqa: E402
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE  # noqa: E402
+from action_policy import recommended_runner_config  # noqa: E402
 
 EXIT_OK = 0
 EXIT_STARTUP_ERROR = 1
@@ -76,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--claim-auto-click", action="store_true",
         help="启用吃碰杠胡过执行通道（仍须 --enable + --no-dry-run，吃默认关闭）",
     )
+    parser.add_argument(
+        "--claim-chi", action="store_true",
+        help="在 --claim-auto-click 基础上启用吃完整链（点吃→面板选组→"
+             "点组→点后复核；证据不足自动弃权改过）",
+    )
     parser.add_argument("--max-actions", type=int, default=20,
                         help="本次最多出牌次数（dry_run 下为最多记录的计划数）")
     parser.add_argument("--duration", type=float, default=600.0,
@@ -104,6 +110,28 @@ def resolve_enabled(args: argparse.Namespace) -> bool:
         print(f"[WARN] 真点需要同时给 --enable 与 --no-dry-run；"
               f"本次缺少 {missing}，保持 dry_run（不点击）。")
     return False
+
+
+def resolve_claim_policy(args: argparse.Namespace):
+    """把 --claim-chi 翻译成显式 ActionPolicyConfig（或 None）。
+
+    吃默认关闭：只有 ``--claim-chi`` 与 ``--claim-auto-click`` 同时给出
+    时，才返回 ``recommended_runner_config(auto_click_enabled=True,
+    include_chi=True)``（吃链：点吃→候选面板→选组→点组→L3 复核，
+    见 auto_play_loop 的吃链编排）。只给 --claim-chi 而缺行动通道
+    开关时打印警告并返回 None，保持 advisory 默认（fail-safe，
+    不悄悄放宽任何门禁）。
+    """
+    if not getattr(args, "claim_chi", False):
+        return None
+    if not getattr(args, "claim_auto_click", False):
+        print("[WARN] --claim-chi 需要同时给 --claim-auto-click；"
+              "本次不启用吃（保持 advisory 默认）。")
+        return None
+    print("[CHI] 吃链已启用：吃走 点吃→面板选组→点组→点后复核 完整链；"
+          "证据不足自动弃权并改过。")
+    return recommended_runner_config(auto_click_enabled=True,
+                                     include_chi=True)
 
 
 def print_gate_report(report: dict) -> None:
@@ -145,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             duration_s=args.duration,
             interval_s=args.interval,
             claim_auto_click=args.claim_auto_click,
+            claim_policy=resolve_claim_policy(args),
         )
     except (TypeError, ValueError) as exc:
         print(f"[FAIL] 参数不合法：{exc}")

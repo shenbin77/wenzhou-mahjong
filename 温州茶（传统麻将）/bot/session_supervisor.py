@@ -47,6 +47,7 @@ import cv2
 import numpy as np
 
 from claim_vision import read_claims
+from session_watch import detect_waiting_room
 from turn_gate import detect_settled_screen
 
 __all__ = [
@@ -77,6 +78,7 @@ class SessionState(str, Enum):
     SETTLEMENT = "settlement"
     HINT_PANEL = "hint_panel"
     LOBBY = "lobby"
+    WAITING_ROOM = "waiting_room"
     CLAIM_WINDOW = "claim_window"
     UNKNOWN = "unknown"
 
@@ -265,14 +267,23 @@ def classify(
         evidence["screen"] = "venue_lobby"
         return Classification(SessionState.LOBBY, evidence, loop_stopped, caishen)
 
-    # 3) 行动窗口：圆盘被 claim_vision 实测到才算（known 语义即「测到了」）。
+    # 3) 茶 2 人等候室：正面规则文字 + 中央“开始游戏”按钮。必须先于
+    # 通用绿毡分支，否则会误判为对局并错误重拉循环；这里只分类，不点击。
+    waiting = detect_waiting_room(image)
+    evidence["waiting_room"] = waiting
+    if waiting["matched"]:
+        evidence["screen"] = "tea_2p_waiting_room"
+        return Classification(SessionState.WAITING_ROOM, evidence,
+                              loop_stopped, caishen)
+
+    # 4) 行动窗口：圆盘被 claim_vision 实测到才算（known 语义即「测到了」）。
     claims = read_claims(image)
     evidence["claim_kinds"] = [button.kind for button in claims.buttons]
     if claims.known:
         evidence["screen"] = "claim_discs_visible"
         return Classification(SessionState.CLAIM_WINDOW, evidence, loop_stopped, caishen)
 
-    # 4) 胡提示面板：central_panel 单信号 + 手牌带可读 + 仍在牌桌。
+    # 5) 胡提示面板：central_panel 单信号 + 手牌带可读 + 仍在牌桌。
     #    与结算的硬区别：没有 bottom_blackout（detect_settled_screen 未命中即保证）。
     signals = settled_ev.get("settled_signals") or []
     bottom_v = settled_ev.get("bottom_mean_v")
@@ -285,7 +296,7 @@ def classify(
         evidence["screen"] = "hint_panel_single_signal"
         return Classification(SessionState.HINT_PANEL, evidence, loop_stopped, caishen)
 
-    # 5) 对局画面：由台账健康度分流。
+    # 6) 对局画面：由台账健康度分流。
     if stats["green_ratio"] >= TABLE_GREEN_MIN:
         evidence["screen"] = "table_in_game"
         if health is None or health["last_event_age_s"] is None:
@@ -368,6 +379,12 @@ def build_plan(
             "action": "alert_only",
             "reason": ("画面已在大厅：保存截图并告警；桌子、规则窗、开始游戏、"
                        "充值及任何重进桌流程永久禁止自动点击"),
+        })
+    elif state is SessionState.WAITING_ROOM:
+        base.update({
+            "action": "wait_for_manual_start",
+            "reason": ("茶 2 人等候室：只确认当前实例已坐下；开始游戏仍由用户手动点击，"
+                       "监督不启动/重拉局内循环，也不发布点击计划"),
         })
     elif state is SessionState.CLAIM_WINDOW:
         if classification.loop_stopped:

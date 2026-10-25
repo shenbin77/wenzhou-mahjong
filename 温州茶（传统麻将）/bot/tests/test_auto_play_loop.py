@@ -1,4 +1,4 @@
-"""auto_play_loop 的离线单元测试：假 adb / 假截图 / 假分析器。
+﻿"""auto_play_loop 的离线单元测试：假 adb / 假截图 / 假分析器。
 
 **全程不接触真实模拟器**：所有外部依赖（截图、分析、前台包、房卡、HUD、
 时钟）都通过 ``AutoPlayLoop`` 的注入点替换成假实现，并在每个测试里把
@@ -31,6 +31,7 @@ BOT_DIR = Path(__file__).resolve().parents[1]
 if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
+import auto_play_loop  # noqa: E402
 from auto_play_loop import (  # noqa: E402
     MAX_CONSECUTIVE_ERRORS,
     AutoPlayLoop,
@@ -42,6 +43,7 @@ from auto_play_loop import (  # noqa: E402
 from action_guard import ActionGuardResult  # noqa: E402
 from action_policy import ACTION_PASS, ActionDecision  # noqa: E402
 from harvest_tea import EXPECTED_PACKAGE  # noqa: E402
+from invite_dialog import InvitationState  # noqa: E402
 from tap_executor import TapPlan, TapRejected  # noqa: E402
 
 HUD_A = b"hud-" + bytes(range(32))
@@ -187,6 +189,7 @@ class FakeTap:
         self.plan_calls: list[dict] = []
         self.execute_calls: list[dict] = []
         self.execute_claim_calls: list[dict] = []
+        self.execute_invitation_calls: list[dict] = []
 
     def plan(self, analysis):
         self.plan_calls.append(analysis)
@@ -204,6 +207,11 @@ class FakeTap:
         self.execute_claim_calls.append({"point": point, **kwargs})
         return {"executed": True, "dry_run": False, "stage": "clicked",
                 "tap": list(point), "ui_responded": True}
+
+    def execute_invitation_cancel(self, point, **kwargs):
+        self.execute_invitation_calls.append({"point": point, **kwargs})
+        return {"executed": True, "dry_run": False, "stage": "verified",
+                "tap": list(point), "verified": True}
 
 
 def increasing_clock(step: float = 0.01):
@@ -295,6 +303,46 @@ def test_uncertain_action_guard_fails_closed(tmp_path):
     # Uncertain guard still fail-closes; may analyze for claim ledger, never tap.
     assert analyzer.calls <= 1
     assert tap.execute_calls == []
+
+
+def test_invitation_is_declined_before_any_game_analysis(monkeypatch, tmp_path):
+    state = InvitationState(
+        present=True, complete=True, phrase_score=.99, cancel_score=.99,
+        phrase_box=(765, 360, 935, 399),
+        cancel_box=(508, 540, 753, 640), cancel_center=(630, 590),
+        reason="邀请证据完整",
+    )
+    monkeypatch.setattr(auto_play_loop, "read_invitation", lambda _image: state)
+    loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    event = loop.tick()
+
+    assert event["event"] == "invitation_declined"
+    assert event["invitation_cancel"]["verified"] is True
+    assert analyzer.calls == 0
+    assert tap.execute_calls == [] and tap.execute_claim_calls == []
+    assert len(tap.execute_invitation_calls) == 1
+    assert tap.execute_invitation_calls[0]["point"] == (630, 590)
+    assert loop.actions_done == 0 and loop.stopped is False
+
+
+def test_incomplete_invitation_stops_without_clicking_anywhere(monkeypatch,
+                                                                tmp_path):
+    state = InvitationState(
+        present=True, complete=False, phrase_score=.99, cancel_score=.4,
+        phrase_box=(765, 360, 935, 399),
+        reason="命中邀请文案，但矩形取消按钮证据不足",
+    )
+    monkeypatch.setattr(auto_play_loop, "read_invitation", lambda _image: state)
+    loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    event = loop.tick()
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "gate_invitation_unresolved"
+    assert analyzer.calls == 0
+    assert tap.execute_invitation_calls == []
+    assert tap.execute_calls == [] and tap.execute_claim_calls == []
 
 
 def read_ledger(loop: AutoPlayLoop) -> list[dict]:
@@ -1415,3 +1463,193 @@ def test_follow_session_jsonl_dual_writes_with_claim_channel_ready(tmp_path):
         assert row["claim_tap_channel_ready"] is True
         assert "vision" in row and "gates" in row and "caishen" in row and "decision" in row
 
+
+
+# ----------------------------------------------------------------------
+# 2026-10-25 实机 Bug 1：P0-5 财神门在等候室/局间过渡误杀
+# ----------------------------------------------------------------------
+def no_hand_analysis(**overrides) -> dict:
+    """未发牌的一帧（等候室/局间过渡）：无手牌、财神不可读。"""
+    result = advise()
+    result.update({
+        "status": "abstain",
+        "suggestion": None,
+        "suggestion_id": None,
+        "suggested_boxes": [],
+        "caishen": None,
+        "hand_ids": [],
+        "vision_diagnostics": [],
+    })
+    result.update(overrides)
+    return result
+
+
+def test_unknown_caishen_frozen_in_waiting_room_without_dealt_hand(tmp_path):
+    """等候室启动：连读多帧财神未知也不计数、永不停手（实机 3 次误杀）。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True,
+        analyses=[no_hand_analysis()],
+        hud=[(HUD_A, None)],
+    )
+    for _ in range(6):
+        event = loop.tick()
+        assert event["event"] == "idle"
+        assert event["status"] == "abstain"
+        assert "计数冻结" in event["reason"]
+        assert event["unknown_caishen_ticks"] == 0
+    assert loop.stopped is False
+    assert loop._unknown_caishen_ticks == 0
+    assert tap.execute_calls == [] and tap.execute_claim_calls == []
+
+
+def test_unknown_caishen_counts_only_after_hand_is_dealt(tmp_path):
+    """等候室冻结 → 发牌后局中财神未知，照旧 3 帧 fail-closed 停手。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True,
+        analyses=[no_hand_analysis(), no_hand_analysis(),
+                  no_hand_analysis(), advise(caishen=None)],
+        hud=[(HUD_A, None)],
+    )
+    for _ in range(3):
+        event = loop.tick()
+        assert event["event"] == "idle"
+        assert loop._unknown_caishen_ticks == 0
+    assert loop.tick()["unknown_caishen_ticks"] == 1
+    assert loop.tick()["unknown_caishen_ticks"] == 2
+    event = loop.tick()
+    assert event["event"] == "stop"
+    assert event["gate"] == "gate_unknown_caishen"
+    assert event["unknown_caishen_ticks"] == 3
+    assert tap.execute_calls == []
+
+
+def test_unknown_caishen_frozen_frame_does_not_reset_budget(tmp_path):
+    """局中偶发一帧读不到手牌只冻结不清零：预算跨冻结帧保留。"""
+    loop, _shot, _analyzer, _tap, _ = make_loop(
+        tmp_path, enabled=True,
+        analyses=[advise(caishen=None), no_hand_analysis(),
+                  advise(caishen=None)],
+        hud=[(HUD_A, None)],
+    )
+    assert loop.tick()["unknown_caishen_ticks"] == 1
+    frozen = loop.tick()
+    assert frozen["event"] == "idle"
+    assert frozen["unknown_caishen_ticks"] == 1
+    assert loop.tick()["unknown_caishen_ticks"] == 2
+    event = loop.tick()
+    assert event["event"] == "stop"
+    assert event["gate"] == "gate_unknown_caishen"
+
+
+# ----------------------------------------------------------------------
+# 2026-10-25 实机 Bug 2：claim「过」点后单帧验证误杀 → 落定轮询
+# ----------------------------------------------------------------------
+def _hand_analysis(hand_ids, melds=None) -> dict:
+    return {"hand_ids": list(hand_ids), "melds": melds or [],
+            "caishen": None, "mode": "tea_2p"}
+
+
+HAND16_IDS = [1, 1, 2, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 42, 43]
+HAND10_IDS = [1, 1, 2, 4, 5, 6, 7, 21, 22, 23]
+HAND12_IDS = [1, 1, 2, 4, 5, 6, 7, 8, 21, 22, 23, 24]
+
+
+def _pass_loop(tmp_path, monkeypatch, analyses):
+    """构造一个会点「过」的循环（决策层替身，执行/验证走真路）。"""
+    import auto_play_loop as apl
+
+    def decide_pass(state, _hand, _config, image=None):
+        button = next(b for b in state.buttons if b.kind == "pass")
+        return ActionDecision(
+            action=ACTION_PASS, confidence=1.0,
+            l1_evidence={"template_status": "matched"},
+            l2_reason="测试：安全过", needs_human_confirm=False,
+            button=button, tap_point=button.center,
+        )
+
+    monkeypatch.setattr(apl, "decide_action", decide_pass)
+    tap = FakeTap()
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True,
+        frames=[action_row_frame(), make_frame()],
+        analyses=analyses,
+        action_guard=CLAIM_GUARD, claim_auto_click=True, tap=tap)
+    return loop, tap
+
+
+def test_pass_verify_recovers_from_dimmed_first_frame(tmp_path, monkeypatch):
+    """实机 5558 两例：过后首帧压暗读 16→10，下一帧落定 16 → 通过。
+
+    旧实现单帧即判 claim_unverified 停机；落定轮询必须救回来，且
+    只点一次「过」、不重复点击。
+    """
+    loop, tap = _pass_loop(tmp_path, monkeypatch, [
+        _hand_analysis(HAND16_IDS),
+        _hand_analysis(HAND10_IDS),          # 点后首帧：压暗塌读
+        _hand_analysis(HAND16_IDS),          # 落定帧：真实手牌
+    ])
+    event = loop.tick()
+    assert event["event"] == "idle"
+    auto = event["claim"]["auto_click"]
+    assert auto["executed"] is True
+    assert auto["semantic_verified"] is True
+    samples = auto["settle_samples"]
+    assert [s["concealed"] for s in samples] == [10, 16]
+    assert samples[-1]["verified"] is True
+    assert len(tap.execute_claim_calls) == 1
+    assert loop.actions_done == 1
+    assert loop.stopped is False
+
+
+def test_pass_verify_recovers_from_meld_mixed_first_frame(
+        tmp_path, monkeypatch):
+    """实机 5556 一例：基线暗手 14+副露 1 组，点后首帧副露混入暗手
+    读成 17（14→17），落定帧恢复 14+1 组 → 通过。"""
+    before = _hand_analysis(
+        [1, 1, 2, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41],
+        melds=[[42, 42, 42]])
+    mixed = _hand_analysis(HAND16_IDS + [42])     # 17 张全读成暗手
+    loop, tap = _pass_loop(tmp_path, monkeypatch, [before, mixed, before])
+    event = loop.tick()
+    auto = event["claim"]["auto_click"]
+    assert auto["semantic_verified"] is True
+    samples = auto["settle_samples"]
+    assert [s["concealed"] for s in samples] == [17, 14]
+    assert samples[-1]["meld_groups"] == 1
+    assert len(tap.execute_claim_calls) == 1
+    assert loop.actions_done == 1
+    assert loop.stopped is False
+
+
+def test_pass_verify_settled_mismatch_still_stops(tmp_path, monkeypatch):
+    """落定后仍是 16→10（连续两帧同签名）= 真未证实，照旧停机。"""
+    loop, tap = _pass_loop(tmp_path, monkeypatch, [
+        _hand_analysis(HAND16_IDS),
+        _hand_analysis(HAND10_IDS),
+        _hand_analysis(HAND10_IDS),
+    ])
+    event = loop.tick()
+    assert event["event"] == "stop"
+    assert event["gate"] == "claim_unverified"
+    assert "16→10" in event["reason"]
+    samples = event["claim"]["auto_click"]["settle_samples"]
+    assert len(samples) == 2          # 落定即判，不耗满轮询预算
+    assert len(tap.execute_claim_calls) == 1
+    assert loop.actions_done == 0
+
+
+def test_pass_verify_unsettled_frames_fail_closed(tmp_path, monkeypatch):
+    """计数在 10/12 之间反复跳变、永不落定 → 耗尽轮询后 fail-closed。"""
+    analyses = [_hand_analysis(HAND16_IDS)]
+    for _ in range(4):
+        analyses.append(_hand_analysis(HAND10_IDS))
+        analyses.append(_hand_analysis(HAND12_IDS))
+    loop, tap = _pass_loop(tmp_path, monkeypatch, analyses)
+    event = loop.tick()
+    assert event["event"] == "stop"
+    assert event["gate"] == "claim_unverified"
+    assert "未落定" in event["reason"]
+    samples = event["claim"]["auto_click"]["settle_samples"]
+    assert len(samples) == 8
+    assert len(tap.execute_claim_calls) == 1
+    assert loop.actions_done == 0

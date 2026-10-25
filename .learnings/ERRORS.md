@@ -27,6 +27,33 @@ OSError: [Errno 28] No space left on device
 
 ---
 
+## [ERR-20261025-001] AgentDock context internal error
+
+**Priority**: medium
+**Status**: pending
+**Area**: integration
+
+### 摘要
+尝试通过 AgentDock 给 MUSE 发送双端接棒任务时，bootstrap context 与动态 MCP 搜索均返回服务端内部错误。
+
+### 错误信息
+```
+Mcp error: -32603: Internal error
+```
+
+### 上下文
+- 操作：`agentdock_context`、`mcp_tool_search`
+- 目标：读取 AgentDock 能力并找到 MUSE/ACP 任务发送入口
+- 影响：不能通过该接口确认任务已送达；不影响本地代码、测试与日志
+
+### 建议修复
+AgentDock 服务恢复后重试 context；恢复前用明确的本地交接文档/用户转发，且先停止现有双端进程，避免双操盘。
+
+### 元数据
+- Reproducible: yes
+
+---
+
 ## [ERR-20261020-002] JSON sidecar tuple/list mismatch
 
 **Priority**: medium

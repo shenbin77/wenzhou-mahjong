@@ -21,6 +21,7 @@ from tap_executor import (  # noqa: E402
     TapRejected,
     TapUnverified,
 )
+import tap_executor as tap_executor_module  # noqa: E402
 
 FRAME = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261023_201640"
          / "live" / "tea_2p" / "20261023_205409_557426_31fea1.png")
@@ -260,7 +261,6 @@ def test_target_outside_hand_roi_is_rejected():
 def test_post_tap_verification_fails_closed_without_retry(analysis, monkeypatch):
     """第一次点击没有抬牌：报错且不允许发送第二次确认点击。"""
     png = frame_png()
-    box = [int(v) for v in analysis["suggested_boxes"][0]]
     # 第一次点击后画面完全不变，不能发送第二次点击。
     fake = FakeAdb([png, png])
     monkeypatch.setattr(subprocess, "run", fake)
@@ -325,6 +325,36 @@ def test_hint_panel_false_minus_one_still_sends_confirming_second_tap(
     assert outcome["stage"] == "verified"
     assert len(fake.tap_commands()) == 2
     assert fake.tap_commands()[0][-2:] == fake.tap_commands()[1][-2:]
+
+
+def test_hint_panel_count_excludes_existing_meld_boxes(monkeypatch) -> None:
+    """实机回归：提示面板不能把左侧既有副露混进暗手计数。"""
+    baseline = [[283 + 92 * i, 768, 372 + 92 * i, 892]
+                for i in range(14)]
+    # 目标牌抬出常规 ROI 后只剩 13 个暗手框；通用计数器误收两个副露框，
+    # 因而给出 raw 15。暗手列白名单必须还原为 13（14 - 1）。
+    raw_boxes = [[6, 761, 89, 875], [179, 761, 262, 875], *baseline[:-1]]
+
+    class _Vision:
+        def count_tiles(self, _image):
+            return len(raw_boxes), raw_boxes
+
+    executor = TapExecutor()
+    monkeypatch.setattr(executor, "_make_vision", lambda: _Vision())
+    monkeypatch.setattr(
+        tap_executor_module, "detect_settled_screen",
+        lambda _image: (False, {"settled_signals": ["central_panel"]}),
+    )
+    gate = executor._selected_hand_gate(
+        np.zeros((900, 1600, 3), dtype=np.uint8), baseline[-1], 14,
+        concealed_boxes=baseline,
+    )
+
+    assert gate["raw_count"] == 15
+    assert gate["count"] == 13
+    assert gate["ready"] is True
+    assert gate["hint_panel_selection"] is True
+    assert all(box[0] >= 283 for box in gate["boxes"])
 
 
 def test_second_click_forbidden_when_target_not_raised(analysis, monkeypatch):
@@ -508,6 +538,23 @@ def claim_frame(*, gold: bool = True, blue: bool = False,
         cv2.circle(image, second_gold_at, 60, (0, 200, 255), -1)
     if blue:
         cv2.circle(image, blue_center, 55, (255, 170, 0), -1)
+    return _png(image)
+
+
+def invitation_frame(*, include_cancel: bool = True) -> bytes:
+    """合成实测布局的入桌邀请：文案居中，矩形取消在左下。"""
+    image = np.full((900, 1600, 3), (80, 110, 135), np.uint8)
+    for name, (x, y), include in (
+        ("invite_phrase.png", (765, 360), True),
+        ("invite_cancel.png", (508, 540), include_cancel),
+    ):
+        if not include:
+            continue
+        path = Path(__file__).resolve().parents[1] / "templates" / name
+        template = cv2.imdecode(np.fromfile(str(path), np.uint8),
+                                cv2.IMREAD_COLOR)
+        assert template is not None
+        image[y:y + template.shape[0], x:x + template.shape[1]] = template
     return _png(image)
 
 
@@ -769,6 +816,54 @@ def test_claim_switch_off_means_execute_claim_sends_no_commands(
     outcome = executor.execute_claim(GOLD_CENTER, action="peng", image=image)
     assert outcome["executed"] is False and outcome["dry_run"] is True
     assert not (tmp_path / "tap_probe").exists()
+
+
+def test_invitation_cancel_uses_rectangular_button_and_verifies_disappearance(
+        monkeypatch, tmp_path):
+    before = invitation_frame()
+    after = _png(_blank_frame())
+    fake = FakeAdb([before, after])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    outcome = executor.execute_invitation_cancel((630, 590))
+
+    assert outcome["executed"] is True and outcome["verified"] is True
+    assert outcome["action"] == "decline_invitation"
+    assert fake.tap_commands() == [[
+        "fake-adb", "-s", "emulator-test", "shell", "input", "tap",
+        "630", "590",
+    ]]
+    evidence = _read_evidence(tmp_path)
+    assert evidence["claim"]["control"] == "rectangular_cancel"
+    assert evidence["claim"]["selection_cancel_channel_reused"] is False
+    assert evidence["claim"]["invitation_after"]["present"] is False
+
+
+def test_invitation_cancel_dry_run_plans_without_adb_or_evidence(
+        monkeypatch, tmp_path):
+    fake = FakeAdb([])
+    monkeypatch.setattr(subprocess, "run", fake)
+    image = cv2.imdecode(np.frombuffer(invitation_frame(), np.uint8),
+                         cv2.IMREAD_COLOR)
+    executor = TapExecutor(session_dir=tmp_path)
+
+    outcome = executor.execute_invitation_cancel((630, 590), image=image)
+
+    assert outcome["executed"] is False and outcome["stage"] == "plan"
+    assert outcome["tap"] == [630, 590]
+    assert fake.commands == []
+    assert not (tmp_path / "tap_probe").exists()
+
+
+def test_invitation_phrase_without_cancel_never_sends_a_tap(monkeypatch,
+                                                             tmp_path):
+    fake = FakeAdb([invitation_frame(include_cancel=False)])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    with pytest.raises(TapAborted, match="取消按钮证据不完整"):
+        executor.execute_invitation_cancel((630, 590))
+
+    assert fake.tap_commands() == []
 
 
 def test_claim_geometry_whitelist_is_independent_of_hand_whitelist():

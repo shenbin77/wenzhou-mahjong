@@ -81,7 +81,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -99,7 +99,11 @@ from claim_vision import (
 from harvest_tea import DEFAULT_ADB, DEFAULT_SERIAL, EXPECTED_PACKAGE
 from tea_bot import _TEMPLATE_DIR  # noqa: F401  # 仅复用已验证的茶模板路径，不改动
 from tile_vision import TILE_IDS, TileVision
+from chi_panel_vision import ChiPanelState, read_chi_panel
+from invite_dialog import InvitationState, read_invitation
 from turn_gate import detect_settled_screen
+
+import panel_recovery
 
 # 1600x900 已验证 ADB 原生截图的手牌横排上沿（count_tiles 默认 roi 0.8*h）。
 HAND_ROI_MIN_Y = 720
@@ -186,6 +190,18 @@ CLAIM_ACTION_KINDS: Mapping[str, str] = {
 SELECTION_CANCEL_ACTIONS: frozenset[str] = frozenset({
     "cancel_selection", "取消候选",
 })
+
+
+# 吃候选面板点组通道的独立几何白名单（与 chi_panel_vision.PANEL_ROI 同口径）。
+# 候选牌行 y 恒在 [550,655]，组并集框中心 y≈602；3 组面板最左组中心 x≈736，
+# 已在行动行 x 下限 740 之外——这正是面板点不能套行动行白名单的原因。
+PANEL_ROI_X_MIN: int = 560
+PANEL_ROI_X_MAX: int = 1400
+PANEL_ROI_Y_MIN: int = 500
+PANEL_ROI_Y_MAX: int = 700
+
+#: 吃候选面板点组动作名（只在本模块与吃链台账之间使用）。
+PANEL_ACTION: str = "chi_select"
 
 
 class TapAborted(RuntimeError):
@@ -445,6 +461,13 @@ class TapExecutor:
         self._session_dir_explicit = session_dir is not None
         self._session_dir = (Path(session_dir) if session_dir
                              else SESSION_ROOT / datetime.now().strftime("%Y%m%d_%H%M%S"))
+        # 胡提示面板待二击状态（panel_recovery）：调用方（循环）在每次
+        # execute() 前把局身份/点击前手牌写进 pending_context，execute()
+        # 第一击确认改变目标列后据此落盘、验证成功即清除；None = 本次
+        # 不落盘（缺省，零行为变化）。pending_state_path 可覆盖状态文件
+        # 位置（测试用），缺省按 serial 固定路径。
+        self.pending_context: dict | None = None
+        self.pending_state_path: Path | None = None
 
     @property
     def session_dir(self) -> Path:
@@ -715,6 +738,312 @@ class TapExecutor:
         evidence.dump("clicked", outcome["reason"])
         return outcome
 
+    # ------------------------------------------------------------------
+    # 入桌邀请拒绝入口：矩形“取消”专用，不借道行动圆盘/候选面板取消
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_invitation_cancel(
+        state: InvitationState,
+        point: tuple[int, int] | None,
+    ) -> tuple[int, int, tuple[int, int, int, int]]:
+        if not isinstance(state, InvitationState) or not state.present:
+            raise TapRejected("本帧没有实测到‘邀请您进入’文案，拒绝点击")
+        if (not state.complete or state.cancel_center is None
+                or state.cancel_box is None):
+            raise TapAborted(
+                f"发现入桌邀请，但矩形取消按钮证据不完整：{state.reason}")
+        center = tuple(int(v) for v in state.cancel_center)
+        box = tuple(int(v) for v in state.cancel_box)
+        if point is not None:
+            requested = (int(point[0]), int(point[1]))
+            if not TapExecutor._claim_point_in_box(requested, box):
+                raise TapRejected(
+                    f"邀请取消坐标 {requested} 不在 fresh 帧实测矩形按钮框 "
+                    f"{list(box)} 内，拒绝点击")
+            if max(abs(requested[0] - center[0]),
+                   abs(requested[1] - center[1])) > 12:
+                raise TapRejected(
+                    f"邀请取消按钮两帧中心漂移超过 12px：旧 {requested} / 新 {center}，"
+                    "拒绝点击")
+        return center[0], center[1], box
+
+    def execute_invitation_cancel(
+        self,
+        point: tuple[int, int] | None = None,
+        *,
+        image: np.ndarray | None = None,
+        session_dir: str | Path | None = None,
+        verify_delay: float | None = None,
+    ) -> dict:
+        """拒绝一次入桌邀请；只允许点矩形“取消”按钮。
+
+        dry-run 必须显式传当前帧，只返回计划。真点时重新截屏，要求邀请文案
+        与矩形取消按钮仍同帧存在、按钮中心相对旧帧稳定；点击后还要证明邀请
+        文案消失。该入口与 ``cancel_selection`` 的蓝色圆盘完全分离。
+        """
+        dump_dir = self._resolve_claim_session_dir(session_dir)
+        if not self._enabled:
+            if image is None:
+                raise TapAborted("邀请拒绝 dry_run 必须显式传 image，拒绝盲点")
+            state = read_invitation(image)
+            x, y, box = self._resolve_invitation_cancel(state, point)
+            return {
+                "executed": False, "dry_run": True, "stage": "plan",
+                "action": "decline_invitation", "tap": [x, y],
+                "box": list(box), "invitation": state.ledger(),
+            }
+
+        evidence = _TapEvidence(dump_dir, tile_label="decline_invitation")
+        try:
+            self._require_game_foreground()
+            before = self._screenshot()
+            evidence.before = before
+            state = read_invitation(before)
+            x, y, box = self._resolve_invitation_cancel(state, point)
+            evidence.tap = [x, y]
+            evidence.box = list(box)
+            evidence.claim = {
+                "action": "decline_invitation",
+                "control": "rectangular_cancel",
+                "source": "invite_dialog.read_invitation",
+                "invitation_before": state.ledger(),
+                "selection_cancel_channel_reused": False,
+            }
+            self._require_game_foreground()
+            self._tap(x, y)
+            delay = self.verify_delay if verify_delay is None else max(
+                0.0, float(verify_delay))
+            if delay > 0:
+                time.sleep(delay)
+            after = self._screenshot()
+            evidence.after = after
+            metrics = self._target_column_metrics(before, after, box)
+            evidence.first_click_metrics = metrics
+            after_state = read_invitation(after)
+            evidence.claim["invitation_after"] = after_state.ledger()
+            if not metrics["changed"]:
+                raise TapUnverified(
+                    f"点邀请取消 ({x},{y}) 后按钮区域画面未变化，未证明点击生效")
+            if after_state.present:
+                raise TapUnverified(
+                    "点邀请取消后‘邀请您进入’文案仍在，拒绝重试第二下")
+        except Exception as exc:  # noqa: BLE001 - 先落证据，原异常照抛
+            evidence.dump(type(exc).__name__, str(exc))
+            raise
+
+        outcome = {
+            "executed": True, "dry_run": False, "stage": "verified",
+            "action": "decline_invitation", "tap": [x, y],
+            "box": list(box), "click_metrics": metrics,
+            "verified": True,
+            "reason": "邀请文案与矩形取消按钮双帧确认，点击后邀请文案消失",
+        }
+        evidence.dump("verified", outcome["reason"])
+        return outcome
+
+    # ------------------------------------------------------------------
+    # 吃候选面板点组入口：面板专用白名单，不借道行动行/手牌任何一道闸
+    # ------------------------------------------------------------------
+    def validate_chi_panel_point(self, point: tuple[int, int]) -> tuple[int, int]:
+        """吃候选面板几何白名单：只放行面板区 x∈[560,1400]、y∈[500,700]。
+
+        与 :meth:`validate_target`（手牌 y≥720）、:meth:`validate_claim_point`
+        （行动行 x∈[740,1520]、y∈[560,660]）互不相干：候选组并集框中心
+        y≈602；3 组面板最左组并集框中心实测约 x=736，已落在行动行
+        x 下限 740 之外，硬套行动行白名单会误杀该组；反过来面板点也
+        绝不许借道行动行/手牌通道。
+        """
+        x, y = int(point[0]), int(point[1])
+        if not (PANEL_ROI_X_MIN <= x <= PANEL_ROI_X_MAX
+                and PANEL_ROI_Y_MIN <= y <= PANEL_ROI_Y_MAX):
+            raise TapRejected(
+                f"吃候选面板点击坐标 ({x},{y}) 不在面板 ROI "
+                f"x∈[{PANEL_ROI_X_MIN},{PANEL_ROI_X_MAX}]、"
+                f"y∈[{PANEL_ROI_Y_MIN},{PANEL_ROI_Y_MAX}] 内，拒绝点击")
+        return x, y
+
+    @staticmethod
+    def _chi_group_problem(group) -> str:
+        """候选组本身合法性：恰 3 张互不相同、同花色连续顺子（引擎编码）。"""
+        try:
+            tiles = tuple(sorted(int(v) for v in group))
+        except (TypeError, ValueError):
+            return "候选组不是牌 ID 序列"
+        if len(tiles) != 3 or len(set(tiles)) != 3:
+            return "候选组不是 3 张互不相同的牌"
+        for low, high in ((1, 9), (21, 29), (41, 49)):
+            if low <= tiles[0] and tiles[2] <= high:
+                return "" if tiles[2] - tiles[0] == 2 else "候选组不是同花色顺子"
+        return "候选组不是同花色顺子"
+
+    def execute_chi_panel_group(
+        self,
+        point: tuple[int, int] | None = None,
+        *,
+        group: Sequence[int],
+        image: np.ndarray | None = None,
+        session_dir: str | Path | None = None,
+        verify_delay: float | None = None,
+    ) -> dict:
+        """点一次吃候选面板里选定的那一组，四道闸缺一不可。
+
+        与 :meth:`execute_claim`（行动圆盘）完全分离：候选组不是圆盘，
+        ``read_claims`` 测不到它，所以本入口用 ``chi_panel_vision``
+        在 **fresh 帧** 上实测候选组，落点必须是所选组（牌面与调用方
+        给的 ``group`` 恰好一致的那一组）的实测并集框中心或框内点。
+
+        Args:
+            point: 要点的坐标；``None`` 时点实测组框的中心。给了就必须
+                落进那一组的实测并集框内（留 :data:`CLAIM_BOX_EDGE_MARGIN`
+                边距），否则拒绝。
+            group: 选定的顺子（3 张引擎牌 ID）。先由策略层
+                ``choose_chi_panel_option`` 选出，再经本方法复核合法性。
+            image: 只在 ``dry_run`` 时用的一帧；``enabled=True`` 时忽略，
+                一律重新截图（面板在动，旧帧的组框不能信）。
+            session_dir: 证据落盘目录，规则同 :meth:`execute_claim`
+                （拒收缺省目录）。
+            verify_delay: 点击后到复核截图的等待秒数；``None`` 用构造参数。
+
+        Returns:
+            ``dry_run``：``{"executed": False, "dry_run": True,
+            "stage": "plan", ...}``，零 adb、零落盘。
+            真点成功：``{"executed": True, "stage": "clicked",
+            "ui_responded": True, "semantic_verified": False, ...}``——
+            与行动行入口同一口径：本模块只证明点击送达、组框区域变化、
+            候选面板消失；语义级验证（暗手 −2、副露 +1 组且恰为所选组）
+            归 ``action_policy.verify_after_click`` 与循环侧复核。
+
+        Raises:
+            TapRejected: 组非法 / 坐标不在面板白名单 / fresh 帧面板读不
+                完整 / 所选组在 fresh 帧上不存在或不唯一 / 点不在组框内。
+                全部零点击。
+            TapUnverified: 点击后组框区域没变化，或候选面板仍在画面上。
+            TapAborted: 前景不是游戏、截图失败、缺 ``session_dir`` 等。
+        """
+        problem = self._chi_group_problem(group)
+        if problem:
+            raise TapRejected(f"吃候选组非法：{problem}，拒绝点击")
+        tiles = tuple(sorted(int(v) for v in group))
+        dump_dir = self._resolve_claim_session_dir(session_dir)
+        if point is not None:
+            self.validate_chi_panel_point(point)
+        if not self._enabled:
+            return self._plan_chi_panel_group(image, point, tiles)
+
+        evidence = _TapEvidence(dump_dir, tile_label=PANEL_ACTION)
+        try:
+            self._require_game_foreground()
+            before = self._screenshot()
+            evidence.before = before
+            panel = read_chi_panel(before)
+            target = self._resolve_chi_panel_group(panel, tiles, point)
+            box = tuple(int(v) for v in target.box[:4])
+            if point is None:
+                x, y = int(target.center[0]), int(target.center[1])
+                self.validate_chi_panel_point((x, y))
+            else:
+                x, y = int(point[0]), int(point[1])
+            record = {
+                "action": PANEL_ACTION,
+                "group": list(tiles),
+                "tapped_box": list(box),
+                "tapped_center": [x, y],
+                "panel_before": panel.ledger(),
+                "panel_after": None,
+                "roi": {"x": [PANEL_ROI_X_MIN, PANEL_ROI_X_MAX],
+                        "y": [PANEL_ROI_Y_MIN, PANEL_ROI_Y_MAX]},
+            }
+            evidence.claim = record
+            evidence.tap = [x, y]
+            evidence.box = list(box)
+            self._require_game_foreground()
+            self._tap(x, y)
+            delay = (self.verify_delay if verify_delay is None
+                     else max(0.0, float(verify_delay)))
+            if delay > 0:
+                time.sleep(delay)
+            after = self._screenshot()
+            evidence.after = after
+            metrics = self._target_column_metrics(before, after, box)
+            evidence.first_click_metrics = metrics
+            panel_after = read_chi_panel(after)
+            record["panel_after"] = panel_after.ledger()
+            if not metrics["changed"]:
+                raise TapUnverified(
+                    f"吃候选组点击 ({x},{y}) 后组框区域画面未变化"
+                    f"（diff_mean={metrics['diff_mean']}, "
+                    f"changed_ratio={metrics['changed_ratio']}），未证明点击生效")
+            if panel_after.present:
+                raise TapUnverified(
+                    "点组后候选面板仍在画面上（取消圆盘或面板行牌框未消失），"
+                    "点击未证明生效，不重试")
+        except Exception as exc:  # noqa: BLE001 — 原异常照抛，只是先落盘
+            evidence.dump(type(exc).__name__, str(exc))
+            raise
+        outcome = {
+            "executed": True, "dry_run": False, "stage": "clicked",
+            "action": PANEL_ACTION, "group": list(tiles),
+            "tap": [x, y], "box": list(box),
+            "click_metrics": metrics,
+            "ui_responded": True,
+            "semantic_verified": False,
+            "semantic_verifier": "action_policy.verify_after_click",
+            "reason": (f"吃候选组 {list(tiles)} 已点击 ({x},{y})，组框区域"
+                       "画面已变化、候选面板已消失（UI 响应确认）；语义级"
+                       "验证须由 action_policy.verify_after_click 完成"),
+        }
+        evidence.dump("clicked", outcome["reason"])
+        return outcome
+
+    def _resolve_chi_panel_group(self, panel, tiles, point):
+        """在 fresh 帧面板读数里定位要点的组：牌面必须恰等于 ``tiles``。
+
+        面板读不完整、命中的组不是恰好一个、或给了坐标却不在该组实测
+        并集框内，一律拒绝（零点击、不猜）。
+        """
+        if not isinstance(panel, ChiPanelState) or not panel.complete:
+            raise TapRejected(
+                "fresh 帧候选面板读不完整"
+                f"（{getattr(panel, 'reason', '无读数')}），拒绝点组")
+        matches = [g for g in panel.groups if tuple(g.tiles) == tuple(tiles)]
+        if len(matches) != 1:
+            raise TapRejected(
+                f"fresh 帧面板上与所选组 {list(tiles)} 一致的候选组有 "
+                f"{len(matches)} 个，拒绝点组（不猜）")
+        target = matches[0]
+        if point is not None:
+            x, y = int(point[0]), int(point[1])
+            x0, y0, x1, y1 = (int(v) for v in target.box[:4])
+            if not (x0 + CLAIM_BOX_EDGE_MARGIN <= x <= x1 - CLAIM_BOX_EDGE_MARGIN
+                    and y0 + CLAIM_BOX_EDGE_MARGIN <= y
+                    <= y1 - CLAIM_BOX_EDGE_MARGIN):
+                raise TapRejected(
+                    f"点组坐标 ({x},{y}) 不在实测候选组框 "
+                    f"{list(target.box)} 内（留 {CLAIM_BOX_EDGE_MARGIN}px "
+                    "边距），拒绝点击")
+        return target
+
+    def _plan_chi_panel_group(self, image, point, tiles) -> dict:
+        """``dry_run`` 分支：用调用方给的一帧复核面板组几何，零 adb。"""
+        if image is None:
+            raise TapAborted(
+                "dry_run 的 execute_chi_panel_group 必须显式传 image"
+                "（不截图也能复核候选组几何）")
+        panel = read_chi_panel(image)
+        target = self._resolve_chi_panel_group(panel, tiles, point)
+        if point is None:
+            x, y = int(target.center[0]), int(target.center[1])
+            self.validate_chi_panel_point((x, y))
+        else:
+            x, y = int(point[0]), int(point[1])
+        return {
+            "executed": False, "dry_run": True, "stage": "plan",
+            "action": PANEL_ACTION, "group": list(tiles),
+            "tap": [x, y], "box": list(target.box),
+            "reason": ("dry_run：只复核吃候选组几何，不调用 adb；"
+                       "enabled=True 才会点击"),
+        }
+
     def _resolve_claim_session_dir(
         self,
         session_dir: str | Path | None,
@@ -980,6 +1309,11 @@ class TapExecutor:
             evidence.first_click_metrics = first_metrics
             if not first_metrics["changed"]:
                 raise TapUnverified("第一次点击后目标牌没有抬起，停止确认出牌")
+            # 待二击状态落盘：进程若在两击之间重启，新进程靠它 + 唯一
+            # 抬起牌定位恢复第二击（panel_recovery）。落盘失败不挡第二击。
+            if self.pending_context is not None:
+                self._persist_pending_second_tap(
+                    tap_plan, (x, y), located["box"], before)
             selected_guard = detect_action_ui(selected_image)
             evidence.action_guard_afterselect = _action_guard_record(selected_guard)
             if selected_guard.blocks_discard:
@@ -1002,7 +1336,8 @@ class TapExecutor:
                     f"第一次点击后手牌计数在 {self.settle_deadline:.1f}s 内"
                     f"未落定（样本 {count_samples}），状态未知，禁止第二击")
             gate = self._selected_hand_gate(
-                settled_image, located["box"], before)
+                settled_image, located["box"], before,
+                concealed_boxes=located["concealed_boxes"])
             gate["count_samples"] = count_samples
             evidence.selected_gate = gate
             evidence.hand_boxes_selected = gate["boxes"]
@@ -1018,6 +1353,8 @@ class TapExecutor:
                 }
                 evidence.after_count = gate["count"]
                 evidence.dump("discarded_first_click", gate["reason"])
+                if self.pending_context is not None:
+                    self._clear_pending_second_tap()
                 return outcome
             if not gate["ready"]:
                 raise TapUnverified(gate["reason"])
@@ -1030,7 +1367,10 @@ class TapExecutor:
             after_image = self._screenshot()
             evidence.after = after_image
             after_vision = self._make_vision()
-            after_count, after_boxes = after_vision.count_tiles(after_image)
+            _raw_after_count, raw_after_boxes = after_vision.count_tiles(after_image)
+            after_boxes = self._boxes_in_concealed_columns(
+                raw_after_boxes, located["concealed_boxes"])
+            after_count = len(after_boxes)
             evidence.after_count = after_count
             evidence.hand_boxes_after = [
                 [int(value) for value in box[:4]] for box in after_boxes or []]
@@ -1059,6 +1399,130 @@ class TapExecutor:
         }
         self._fill_selected_diagnostics(evidence)
         evidence.dump("verified", outcome["reason"])
+        if self.pending_context is not None:
+            self._clear_pending_second_tap()
+        return outcome
+
+    # ------------------------------------------------------------------
+    # 待二击状态（panel_recovery）：落盘 / 清除 / 重启后补发第二击
+    # ------------------------------------------------------------------
+    def _pending_state_file(self) -> Path:
+        """待二击状态文件位置：显式覆盖优先，缺省按 serial 固定路径。"""
+        if self.pending_state_path is not None:
+            return Path(self.pending_state_path)
+        return panel_recovery.state_path_for(self.serial)
+
+    def _persist_pending_second_tap(self, tap_plan, tap_point, box,
+                                    before_count: int) -> None:
+        """第一击已确认改变目标列：把待二击状态落盘（失败静默）。
+
+        局身份/点击前手牌来自调用方预先写好的 ``pending_context``；
+        落盘只是给进程重启留恢复入口，失败绝不挡本次第二击。
+        """
+        context = self.pending_context or {}
+        state = panel_recovery.build_state(
+            serial=self.serial,
+            tile_id=tap_plan.tile_id,
+            tile_label=tap_plan.label,
+            tap=tap_point,
+            box=box,
+            before_count=before_count,
+            hand_ids=context.get("hand_ids"),
+            hud_key=context.get("hud_key"),
+            caishen=context.get("caishen"),
+            caishen_id=context.get("caishen_id"),
+            round_seq=context.get("round_seq"),
+        )
+        panel_recovery.write_state(self._pending_state_file(), state)
+
+    def _clear_pending_second_tap(self) -> None:
+        """出牌已验证 / 第一击即离手：待二击状态作废（失败静默）。"""
+        panel_recovery.clear_state(self._pending_state_file())
+
+    def execute_recovery_second_tap(
+        self,
+        state: dict,
+        fresh_locator: Callable[[np.ndarray], dict],
+    ) -> dict:
+        """进程重启后补发「待二击」：只点 fresh 帧重新定位的当前中心。
+
+        ``fresh_locator(fresh_image)`` 由调用方（循环）提供：它必须在
+        fresh 帧上重新确认胡提示面板单信号 + 唯一抬起牌定位
+        （panel_recovery.decide_recovery），任一条件不满足就抛
+        TapAborted（点击前中止，本方法一击不发）；返回与 execute()
+        同形的合成 advise 结果（``suggested_boxes[0]`` = 重新定位的
+        当前牌框、``_locked_before_count`` = 点击前暗手张数、
+        ``_recovery_concealed_boxes`` = fresh 帧暗手框白名单）。
+        本方法只负责前台确认、几何白名单、点击与点后 −1 验证，
+        判定口径不在这里放松。
+        """
+        tile_id = int(state["tile_id"])
+        label = str(state.get("tile_label") or label_for_tile(tile_id))
+        if not self._enabled:
+            return {
+                "executed": False, "dry_run": True,
+                "stage": "recovery_plan",
+                "tile": label, "tile_id": tile_id,
+                "reason": "dry_run：只判定不点击；enabled=True 才会补发第二击",
+            }
+        evidence = _TapEvidence(self.session_dir, tile_label=label,
+                                tile_id=tile_id)
+        try:
+            self._require_game_foreground()
+            fresh = self._screenshot()
+            evidence.before = fresh
+            located = fresh_locator(fresh)
+            box = tuple(int(value) for value
+                        in located["suggested_boxes"][0][:4])
+            x, y = box_center(box)
+            concealed = located.get("_recovery_concealed_boxes") or [list(box)]
+            self.validate_target((x, y), concealed, fresh.shape)
+            before = int(located.get("_locked_before_count")
+                         or state["before_count"])
+            evidence.tap = [x, y]
+            evidence.box = list(box)
+            evidence.before_count = before
+            self._require_game_foreground()
+            self._tap(x, y)
+            if self.verify_delay > 0:
+                time.sleep(self.verify_delay)
+            after_image = self._screenshot()
+            evidence.after = after_image
+            after_vision = self._make_vision()
+            _raw_after_count, raw_after_boxes = after_vision.count_tiles(
+                after_image)
+            after_boxes = self._boxes_in_concealed_columns(
+                raw_after_boxes, concealed)
+            after_count = len(after_boxes)
+            evidence.after_count = after_count
+            evidence.hand_boxes_after = [
+                [int(value) for value in item[:4]]
+                for item in after_boxes or []]
+            if after_count != before - 1:
+                raise TapUnverified(
+                    f"恢复第二击后手牌数量 {after_count} ≠ 点击前 {before} - 1；"
+                    "验证失败，不重试")
+            second_metrics = self._target_column_metrics(
+                fresh, after_image, box)
+            evidence.second_click_metrics = second_metrics
+            if not second_metrics["changed"]:
+                raise TapUnverified(
+                    "恢复第二击后目标列未变化，未证明真正出牌")
+        except Exception as exc:  # noqa: BLE001 — 原异常照抛，只是先落盘
+            self._fill_selected_diagnostics(evidence)
+            evidence.dump(type(exc).__name__, str(exc))
+            raise
+        self._clear_pending_second_tap()
+        outcome = {
+            "executed": True, "dry_run": False,
+            "stage": "recovery_second_tap",
+            "tile": label, "tile_id": tile_id,
+            "tap": [x, y], "box": list(box),
+            "before_count": before, "after_count": after_count,
+            "reason": "重启恢复第二击完成，抬起牌已消失且手牌恰好少一张",
+        }
+        self._fill_selected_diagnostics(evidence)
+        evidence.dump("recovery_verified", outcome["reason"])
         return outcome
 
     def _validate_fresh_with_retry(
@@ -1179,6 +1643,8 @@ class TapExecutor:
         image: np.ndarray,
         reference_box,
         before_count: int,
+        *,
+        concealed_boxes=None,
     ) -> dict:
         """第一次点击后的手牌复核（审计 B）：不过这道闸就不发第二击。
 
@@ -1204,10 +1670,15 @@ class TapExecutor:
                         "hint_panel_selection": False}
         try:
             vision = self._make_vision()
-            count, boxes = vision.count_tiles(image)
+            raw_count, raw_boxes = vision.count_tiles(image)
         except Exception as exc:  # noqa: BLE001 — 拿不到数就禁止第二击
             result["reason"] = f"第一次点击后重新数牌失败: {exc}；禁止第二击"
             return result
+        boxes = self._boxes_in_concealed_columns(raw_boxes, concealed_boxes)
+        count = len(boxes) if concealed_boxes else raw_count
+        result["raw_count"] = raw_count
+        result["raw_boxes"] = [[int(value) for value in box[:4]]
+                               for box in raw_boxes or []]
         result["count"] = count
         result["boxes"] = [[int(value) for value in box[:4]]
                            for box in boxes or []]
@@ -1262,6 +1733,31 @@ class TapExecutor:
                             f"（y1={target[3]} ≤ 中位数 {median_y1:.1f} - "
                             f"{RAISED_BOX_LIFT_PX}），允许第二击确认")
         return result
+
+    @staticmethod
+    def _boxes_in_concealed_columns(boxes, concealed_boxes) -> list[list[int]]:
+        """只保留点击前已确认的暗手列，排除左侧既有碰／吃／杠。
+
+        ``count_tiles`` 在中央胡提示面板出现时可能暂时把左侧副露框并入结果，
+        同时漏掉被抬出常规 ROI 的目标牌。首次点击不会改变暗手各列的 x 位置，
+        所以用 fresh 帧的暗手列作白名单：当前框须与至少一个原暗手框在 x 轴
+        重叠达到原框宽度的一半。拿不到 fresh 暗手框时保留旧行为，由上层继续
+        fail-closed。
+        """
+        normalized = [[int(value) for value in box[:4]] for box in boxes or []]
+        baseline = [[int(value) for value in box[:4]]
+                    for box in concealed_boxes or []]
+        if not baseline:
+            return normalized
+        kept: list[list[int]] = []
+        for box in normalized:
+            for ref in baseline:
+                overlap = min(box[2], ref[2]) - max(box[0], ref[0])
+                ref_width = max(1, ref[2] - ref[0])
+                if overlap * 2 >= ref_width:
+                    kept.append(box)
+                    break
+        return kept
 
     @staticmethod
     def _gate_raised_record(gate: dict) -> dict:

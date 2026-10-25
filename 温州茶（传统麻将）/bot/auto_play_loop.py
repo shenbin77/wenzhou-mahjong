@@ -51,7 +51,7 @@ import traceback
 import uuid
 from collections import Counter
 from statistics import median
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -59,18 +59,24 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+import panel_recovery
 from action_guard import ActionGuardResult, detect_action_ui
 from action_policy import (
     CLAIM_TAP_CHANNEL_READY,
+    ACTION_CHI,
+    ACTION_PASS,
     ActionPolicyConfig,
     BoardState,
     HandState,
+    choose_chi_panel_option,
     decide_action,
     recommended_runner_config,
     validate_runner_config,
     verify_after_click,
 )
 from claim_vision import KIND_CANCEL, read_claims
+from chi_panel_vision import read_chi_panel
+from invite_dialog import read_invitation
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE
 from single_bright_cut import SingleBrightCutTracker, detect_single_bright_cut
 from tap_executor import (
@@ -126,6 +132,14 @@ ROUND_CHANGE_CONFIRM_TICKS = 2
 ROUND_IDENTITY_UNKNOWN_BUDGET = 3
 MANUAL_CAISHEN_CONFLICT_TICKS = 2
 CAISHEN_UNKNOWN_BUDGET = 3
+# 吃链点吃后等候选面板的有界轮询：次数 × 间隔（另加每帧截图/识图耗时）。
+CHI_PANEL_POLL_ATTEMPTS = 6
+CHI_PANEL_POLL_INTERVAL_S = 0.4
+# claim 点后验证的落定轮询（2026-10-25 实机 Bug 2）：首帧决定性读数
+# 直接采用；含糊则每隔 INTERVAL 重拍，直到验证通过、连续两帧签名
+# 一致（落定）或 ATTEMPTS 耗尽（fail-closed）。
+CLAIM_SETTLE_ATTEMPTS = 8
+CLAIM_SETTLE_INTERVAL_S = 0.4
 
 
 def locate_drawn_tile(result: dict, good_hand_ids) -> dict | None:
@@ -352,7 +366,12 @@ class AutoPlayLoop:
         self._last_advise_read: dict | None = None
         self._hint_panel_streak = 0
         self._hint_panel_round: int | None = None
+        # 待二击恢复：状态文件按 serial 固定（跨进程/跨会话目录可找回），
+        # 执行器落盘、循环在面板帧上判定恢复（panel_recovery）。
+        self._panel_recovery_path = panel_recovery.state_path_for(self.serial)
         self._single_bright = SingleBrightCutTracker()
+        # 吃链在本行动窗弃权过的标记（局序+来牌+闭手），防重复点吃。
+        self._chi_abstain_key: tuple | None = None
         self._round_candidate: tuple[bytes | None, str | None] | None = None
         self._round_candidate_ticks = 0
         self._round_identity_unknown_ticks = 0
@@ -520,6 +539,44 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001 - 截图失败计入异常预算
             return self._anomaly("capture_failed", f"{exc}", started)
         image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        # 入桌邀请优先级高于行动行、换局和识牌：弹窗盖住牌桌时继续分析会把
+        # 弹窗元素误读成游戏状态。只允许“邀请您进入”文案 + 矩形“取消”按钮
+        # 同帧完整命中后拒绝；这条通道绝不复用吃牌面板的蓝色圆形取消。
+        invitation = read_invitation(image)
+        if invitation.present:
+            invitation_event = {
+                "ts": datetime.now().astimezone().isoformat(),
+                "event": "idle", "round_seq": self.round.seq,
+                "frame": str(frame_path),
+                "invitation": invitation.ledger(),
+                "reason": invitation.reason,
+            }
+            if not invitation.complete or invitation.cancel_center is None:
+                return self._stop(
+                    "gate_invitation_unresolved",
+                    "发现入桌邀请，但矩形取消按钮证据不完整；停手且不点其它位置",
+                    invitation_event,
+                )
+            try:
+                outcome = self._tap.execute_invitation_cancel(
+                    invitation.cancel_center, image=image,
+                    session_dir=self.session_dir)
+            except TapAborted as exc:
+                return self._stop(
+                    "invitation_cancel_aborted",
+                    f"邀请取消未通过安全复核：{exc}", invitation_event)
+            except Exception as exc:  # noqa: BLE001 - 邀请遮挡下任何未知结果都停手
+                return self._stop(
+                    "invitation_cancel_failed",
+                    f"邀请取消结果未知：{exc}", invitation_event)
+            invitation_event["invitation_cancel"] = outcome
+            if self.dry_run:
+                invitation_event["reason"] = (
+                    "dry_run 已识别邀请及矩形取消按钮；只记录计划，不点击")
+                return self._event(invitation_event)
+            invitation_event["event"] = "invitation_declined"
+            invitation_event["reason"] = "已点矩形取消并验证邀请文案消失"
+            return self._event(invitation_event)
         # 换局判定必须在读牌河**之前**：牌河基线一旦跨局，差分出来的"来牌"
         # 会是上一局的牌。guard 早退分支（行动行可见）在正式的换局判定之前
         # 就会用到 _discard_state，所以这里先判一次。本帧结果存下来复用，
@@ -636,6 +693,8 @@ class AutoPlayLoop:
             # 不会误报，但没必要）。
             self._forget_discards()
             self._single_bright.reset()
+            # 换局确认：上局若有待二击状态一并作废，防跨局误用。
+            panel_recovery.clear_state(self._panel_recovery_path)
             self._write_event({
                 "ts": datetime.now().astimezone().isoformat(),
                 "event": "round_reset", "round_seq": self.round.seq,
@@ -693,6 +752,30 @@ class AutoPlayLoop:
                 "suggestion_id": None,
                 "reason": f"决策事实不足({','.join(missing)})；本帧弃权",
             })
+        # P0-5 状态门控（2026-10-25 实机 Bug 1）：未知计数只在本帧
+        # 确认「已发牌在局中」时才累计。等候室（未发牌）与局间过渡期
+        # 财神指示本就不存在/不可读，此时累计会在 3 帧（≈3.6s）内
+        # 误杀循环——实机当晚等候室启动 3 次、局间过渡 1 次皆中招，
+        # 过渡误杀后牌桌无人操作、整场被系统解散。门控判据 = 本帧
+        # 读到已发牌手牌（TableState.concealed_count 非空）；读不到
+        # 手牌的帧只冻结计数（不清零：局中偶发一帧手牌读残不洗掉
+        # 已积累的预算；换局确认在上方照旧清零，财神恢复已知时
+        # 下方照旧清零）。
+        if (table.should_stop_for_unknown_caishen
+                and table.concealed_count is None):
+            base["unknown_caishen_ticks"] = self._unknown_caishen_ticks
+            base["unknown_caishen_budget"] = CAISHEN_UNKNOWN_BUDGET
+            return self._event({
+                **base,
+                "event": "idle",
+                "status": "abstain",
+                "suggestion": None,
+                "suggestion_id": None,
+                "reason": (
+                    "财神未知但本帧未读到已发牌手牌（等候室/局间过渡），"
+                    "P0-5 计数冻结；期间零点击且不沿用旧财神"
+                ),
+            })
         if table.should_stop_for_unknown_caishen:
             self._unknown_caishen_ticks += 1
             base["unknown_caishen_ticks"] = self._unknown_caishen_ticks
@@ -744,6 +827,12 @@ class AutoPlayLoop:
             return self._event({**base, "event": "idle", "reason": "换局帧跳过，等待下一张清晰画面"})
         # 无建议/弃权 → 只等待，绝不兜底点击。
         if verdict.code == HINT_PANEL_CODE:
+            # 待二击恢复优先于摸切兜底：已有一张牌处于已选状态时，
+            # 绝不能让兜底去点别的牌。无状态/状态失效才回落兜底。
+            recovery_event = self._panel_recovery_attempt(
+                result, base, started, hud_key=hud_key, caishen=caishen)
+            if recovery_event is not None:
+                return recovery_event
             fallback_event = self._hint_panel_fallback(
                 result, verdict, base, started)
             if fallback_event is not None:
@@ -774,6 +863,9 @@ class AutoPlayLoop:
                                 "verified": None,
                                 "elapsed_ms": round((self._clock() - started) * 1000, 1)})
         # 真点：TapExecutor 四道闸（前台/重截屏重定位/白名单/点后 −1 验证）。
+        # 待二击落盘上下文：局身份 + 本帧完整手牌（进程重启恢复用）。
+        self._tap.pending_context = self._pending_context(
+            result.get("hand_ids"), result)
         try:
             outcome = self._tap.execute(result)
         except TapAborted as exc:
@@ -796,6 +888,7 @@ class AutoPlayLoop:
                              == (outcome.get("before_count") or 0) - 1),
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
         })
+        panel_recovery.clear_state(self._panel_recovery_path)
         if not event["verified"]:
             self._stop("tap_unverified", "点击后手牌数量未验证，停止自动点击", base)
         return event
@@ -874,6 +967,8 @@ class AutoPlayLoop:
                 fresh_result, expected_tile, fresh.bright_box,
                 before_count=(fresh.evidence or {}).get("expected_concealed"))
 
+        self._tap.pending_context = self._pending_context(
+            result.get("hand_ids"), result)
         marker["outcome"] = "attempt"
         try:
             outcome = self._tap.execute(synthetic, fresh_validator=validate_fresh)
@@ -930,6 +1025,159 @@ class AutoPlayLoop:
                 "tick": self.tick_index,
                 "actions_done": self.actions_done,
             }
+
+    def _pending_context(self, hand_ids, result: dict | None = None) -> dict:
+        """给执行器的待二击落盘上下文：局身份指纹/财神 + 点击前手牌。
+
+        进程在两击之间重启时，新进程靠这份上下文 + 唯一抬起牌定位恢复
+        第二击（panel_recovery）；缺项就恢复不了，判定侧按未知弃权。
+        """
+        ids: list[int] | None = None
+        if hand_ids:
+            try:
+                ids = sorted(int(tile) for tile in hand_ids)
+            except (TypeError, ValueError):
+                ids = None
+        hud = self.round.hud_key
+        return {
+            "hud_key": hud.hex() if hud else None,
+            "caishen": self.round.caishen or (result or {}).get("caishen"),
+            "caishen_id": known_caishen_id(result) if result else None,
+            "round_seq": self.round.seq,
+            "hand_ids": ids,
+        }
+
+    def _panel_recovery_attempt(self, result: dict, base: dict,
+                                started: float, *, hud_key,
+                                caishen) -> dict | None:
+        """进程重启后的待二击恢复：状态文件 + 唯一抬起牌定位，缺一不可。
+
+        触发前提（调用方已保证）：本帧 turn_gate 判 hint_panel。恢复条件
+        全部走 panel_recovery.decide_recovery（状态合法/未过期、局身份
+        一致、整手可完整读、已选抬起牌唯一定位）；点击只走执行器的
+        execute_recovery_second_tap（fresh 帧重定位 + 白名单 + 点后 −1
+        验证），本方法不直接碰 ADB。
+
+        Returns:
+            已处理本帧的事件 dict（恢复出手 / 继续等待）；``None`` = 无
+            待二击状态，或状态已失效并清除，调用方回落原摸切兜底。
+        """
+        state, error = panel_recovery.read_state(self._panel_recovery_path)
+        if error is not None:
+            base["panel_recovery"] = {"outcome": "state_unreadable",
+                                      "reason": error}
+            panel_recovery.clear_state(self._panel_recovery_path)
+            return None
+        if state is None:
+            return None
+        marker: dict = {"tile_id": state.get("tile_id"),
+                        "saved_at": state.get("saved_at")}
+        base["panel_recovery"] = marker
+        if state.get("serial") != self.serial:
+            marker["outcome"] = "serial_mismatch"
+            panel_recovery.clear_state(self._panel_recovery_path)
+            return None
+        decision = panel_recovery.decide_recovery(
+            state, result, hud_key=hud_key,
+            caishen=self.round.caishen or caishen, now=time.time())
+        marker["decision"] = decision.reason
+        if not decision.allowed:
+            marker["outcome"] = "abstain"
+            marker["reason"] = decision.reason
+            if decision.reason.startswith(
+                    ("identity_mismatch", "state_stale", "state_invalid")):
+                # 状态已失效：清除后交回原兜底（其快照自带新鲜度校验）。
+                panel_recovery.clear_state(self._panel_recovery_path)
+                marker["state_cleared"] = True
+                return None
+            # 状态仍像本局待二击、只是本帧定位不唯一：已有一张牌处于
+            # 已选状态，绝不让摸切兜底去点别的牌，继续等待下一帧。
+            return self._event({
+                **base, "event": "idle",
+                "reason": "胡提示面板待二击恢复条件未满足，继续弃权等待"})
+        marker["outcome"] = "attempt"
+        marker["case"] = decision.case
+        marker["box"] = decision.box
+        if self.actions_done >= self.max_actions:
+            return self._stop("max_actions",
+                              f"达到 --max-actions={self.max_actions}", base)
+        if self.dry_run:
+            marker["outcome"] = "dry_run_ready"
+            return self._event({
+                **base, "event": "dry_run_plan",
+                "tap": list(decision.tap_point), "box": decision.box,
+                "verified": None,
+                "elapsed_ms": round((self._clock() - started) * 1000, 1)})
+        expected_tile = int(decision.tile_id)
+        expected_point = tuple(int(value) for value in decision.tap_point)
+
+        def fresh_locator(fresh_image: np.ndarray) -> dict:
+            fresh_result = self._analyze_fresh_image(
+                fresh_image, "preclick_recovery")
+            settled, settled_evidence = detect_settled_screen(fresh_image)
+            signals = settled_evidence.get("settled_signals") or []
+            if settled or signals != ["central_panel"]:
+                raise TapAborted("fresh 帧不再是单信号胡提示面板")
+            fresh_guard = self._action_guard(fresh_image)
+            if fresh_guard.blocks_discard:
+                raise TapAborted("fresh 帧出现行动圆盘/未知控件，禁止恢复第二击")
+            fresh_decision = panel_recovery.decide_recovery(
+                state, fresh_result, hud_key=self.round.hud_key,
+                caishen=self.round.caishen, now=time.time())
+            if (not fresh_decision.allowed
+                    or fresh_decision.tile_id != expected_tile):
+                raise TapAborted(
+                    f"fresh 帧恢复判定未通过: {fresh_decision.reason}")
+            fresh_point = tuple(int(value)
+                                 for value in fresh_decision.tap_point)
+            if (abs(fresh_point[0] - expected_point[0]) > 20
+                    or abs(fresh_point[1] - expected_point[1]) > 20):
+                raise TapAborted("fresh 帧抬起牌位置漂移，拒绝恢复第二击")
+            synthetic = self._synthetic_discard(
+                fresh_result, expected_tile, fresh_decision.box,
+                before_count=int(state["before_count"]))
+            synthetic["_recovery_concealed_boxes"] = [
+                list(item["box"]) for item in
+                panel_recovery.accepted_concealed_items(fresh_result)]
+            return synthetic
+
+        try:
+            outcome = self._tap.execute_recovery_second_tap(
+                state, fresh_locator)
+        except TapUnverified as exc:
+            return self._stop(
+                "tap_aborted", f"胡提示面板恢复第二击后无法验证：{exc}", base)
+        except TapAborted as exc:
+            marker["outcome"] = "aborted_pre_tap"
+            marker["reason"] = str(exc)
+            return self._event({
+                **base, "event": "idle",
+                "reason": "恢复第二击在点击前被中止，继续等待"})
+        except Exception as exc:  # noqa: BLE001 - 未预期异常与常规路径同口径停手
+            return self._stop("tap_failed", f"恢复第二击结果未知：{exc}", base)
+        self.actions_done += 1
+        panel_recovery.clear_state(self._panel_recovery_path)
+        marker["outcome"] = "recovered"
+        after_path = None
+        try:
+            after_raw = self._shot()
+            after_path = str(self._save_frame(after_raw, "after"))
+        except Exception as exc:  # noqa: BLE001 - 台账不影响已验证的点击
+            after_path = f"<截图失败: {exc}>"
+        event = self._event({
+            **base, "event": "action", "after_frame": after_path,
+            "tap": outcome.get("tap"), "box": outcome.get("box"),
+            "before_count": outcome.get("before_count"),
+            "after_count": outcome.get("after_count"),
+            "verified": bool(outcome.get("executed")
+                             and outcome.get("after_count")
+                             == (outcome.get("before_count") or 0) - 1),
+            "elapsed_ms": round((self._clock() - started) * 1000, 1),
+        })
+        if not event["verified"]:
+            self._stop("tap_unverified",
+                       "恢复第二击后手牌数量未验证，停止自动点击", base)
+        return event
 
     def _hint_panel_fallback(self, result: dict, verdict: TurnVerdict,
                              base: dict, started: float) -> dict | None:
@@ -1032,6 +1280,8 @@ class AutoPlayLoop:
                 fresh_result, expected_tile, fresh_box,
                 before_count=len(snapshot["hand_ids"]))
 
+        self._tap.pending_context = self._pending_context(
+            snapshot["hand_ids"], result)
         try:
             outcome = self._tap.execute(synthetic, fresh_validator=validate_fresh)
         except TapPrecheckRetryExhausted as exc:
@@ -1170,6 +1420,101 @@ class AutoPlayLoop:
             pass
 
     # ------------------------------------------------------------------
+    # claim 点后落定验证（2026-10-25 实机 Bug 2）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _claim_board_signature(board: BoardState) -> tuple:
+        """点后落定签名：连续两帧签名一致才算画面落定（执行器同口径）。"""
+        return (
+            board.concealed_count,
+            board.meld_group_count,
+            board.total,
+            board.claim_buttons,
+            board.settled,
+            board.selection_panel,
+        )
+
+    def _verify_claim_settled(
+        self,
+        before: BoardState,
+        action: str,
+        *,
+        tag: str,
+        note: str,
+        extra_check=None,
+    ) -> tuple[bool, str, "BoardState | None", list]:
+        """claim 点击后的落定语义验证，替代旧的单帧 ``verify_after_click``。
+
+        旧实现点击后只截一帧就判：首帧正处圆盘消失动画/手牌压暗状态，
+        分割计数不可信——实机三例全是「过」实际已生效却被误杀停机
+        （暗手 14→17、16→10、16→10，其中 16→10 在全新进程同数字
+        复现，是确定性坏读而非状态残留）。改法与出牌执行器
+        ``_await_settled_hand`` 同口径：
+
+        * 首帧即验证通过（决定性读数）→ 直接采用，不多截屏；
+        * 未通过 → 每隔 ``CLAIM_SETTLE_INTERVAL_S`` 重拍一帧，直到某
+          帧验证通过、或连续两帧落定签名一致（状态已落定，此时的
+          不符是真不符，照旧判未证实）、或 ``CLAIM_SETTLE_ATTEMPTS``
+          耗尽（未落定 → fail-closed，照旧停机）；
+        * 采样异常只记样本（签名取唯一哨兵、永不算落定），不外抛。
+
+        基线 ``before`` 不变：仍取点击前同帧 fresh 状态（既有暗手列
+        白名单口径保留）。``extra_check(board, verified, reason)`` 可
+        在每帧验证后追加判据（吃链用它核对新增副露组 == 所选组）。
+
+        Returns:
+            ``(verified, reason, last_board, samples)``；samples 逐帧
+            记录计数与判定，调用方随台账落盘供复核。
+        """
+        samples: list[dict] = []
+        board: BoardState | None = None
+        reason = "点后未取得任何复核帧"
+        previous_signature: tuple | None = None
+        for attempt in range(CLAIM_SETTLE_ATTEMPTS):
+            if attempt:
+                self._sleep(CLAIM_SETTLE_INTERVAL_S)
+            try:
+                raw = self._shot()
+                path = self._save_frame(raw, tag)
+                image = cv2.imdecode(
+                    np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+                board = self._board_from_frame(raw, path, image, note=note)
+                verified, reason = verify_after_click(before, board, action)
+                if extra_check is not None:
+                    verified, reason = extra_check(board, verified, reason)
+                signature = self._claim_board_signature(board)
+            except Exception as exc:  # noqa: BLE001 - 坏帧只记样本
+                verified = False
+                reason = f"点后复核帧异常：{exc}"
+                samples.append({
+                    "attempt": attempt, "error": str(exc),
+                    "verified": False, "reason": reason,
+                })
+                previous_signature = ("error", attempt)
+                continue
+            samples.append({
+                "attempt": attempt,
+                "concealed": board.concealed_count,
+                "meld_groups": board.meld_group_count,
+                "total": board.total,
+                "claim_buttons": board.claim_buttons,
+                "settled": board.settled,
+                "selection_panel": board.selection_panel,
+                "verified": verified,
+                "reason": reason,
+                "frame": str(path),
+            })
+            if verified:
+                return True, reason, board, samples
+            if (previous_signature is not None
+                    and signature == previous_signature):
+                # 连续两帧签名一致 = 已落定；落定后仍不符是真未证实。
+                return False, reason, board, samples
+            previous_signature = signature
+        return False, (f"点后状态 {CLAIM_SETTLE_ATTEMPTS} 帧内未落定，"
+                       f"fail-closed：{reason}"), board, samples
+
+    # ------------------------------------------------------------------
     # 行动（吃/碰/杠/胡/过）决策闸门
     # ------------------------------------------------------------------
     def _claim_policy_event(self, image: np.ndarray, frame_path: Path,
@@ -1243,6 +1588,15 @@ class AutoPlayLoop:
             payload["discards"] = self._discard_state
         hand = HandState.from_analysis(payload)
         decision = decide_action(claim_state, hand, self._claim_policy, image=image)
+        if (decision is not None and decision.action == ACTION_CHI
+                and self._chi_abstain_key is not None
+                and self._chi_abstain_key == self._chi_window_key(hand)):
+            # 同一行动窗里吃链已弃权过一次（选组弃权/点组被拒/面板读
+            # 不全）：不再重复点吃，改用关吃配置重新决策（通常落到
+            # 「过」），避免 点吃→取消→点吃 的死循环。
+            decision = decide_action(
+                claim_state, hand,
+                replace(self._claim_policy, chi_enabled=False), image=image)
         if decision is None:
             return {"claim": {
                 "status": "abstain",
@@ -1266,6 +1620,10 @@ class AutoPlayLoop:
         if not CLAIM_TAP_CHANNEL_READY:
             payload["auto_click"]["reason"] = "行动圆盘点击通道未启用"
             return {"claim": payload}
+
+        if decision.action == ACTION_CHI:
+            return self._chi_chain_event(
+                decision, hand, claim_state, image, frame_path, payload)
 
         before = BoardState.from_hand_state(
             hand, claim_buttons=len(claim_state.buttons), settled=False,
@@ -1294,33 +1652,20 @@ class AutoPlayLoop:
             payload["auto_click"]["semantic_verified"] = None
             return {"claim": payload}
 
-        try:
-            after_raw = self._shot()
-            after_path = self._save_frame(after_raw, "after_claim")
-            after_image = cv2.imdecode(
-                np.frombuffer(after_raw, np.uint8), cv2.IMREAD_COLOR)
-            after_result = self._analyze(after_raw, after_path)
-            after_claims = read_claims(after_image)
-            settled, settled_evidence = detect_settled_screen(after_image)
-            after_hand = HandState.from_analysis(after_result)
-            after = BoardState.from_hand_state(
-                after_hand, claim_buttons=len(after_claims.buttons),
-                settled=settled, note="行动点击后 fresh 状态")
-            verified, verify_reason = verify_after_click(
-                before, after, decision.action)
-            payload["auto_click"].update({
-                "semantic_verified": verified,
-                "semantic_reason": verify_reason,
-                "after_frame": str(after_path),
-                "settled_evidence": settled_evidence,
-            })
-        except Exception as exc:  # noqa: BLE001
-            verified = False
-            verify_reason = f"行动点击后语义复核异常：{exc}"
-            payload["auto_click"].update({
-                "semantic_verified": False,
-                "semantic_reason": verify_reason,
-            })
+        # L3 语义复核走落定轮询（_verify_claim_settled）：点后首帧
+        # 常处动画/压暗状态，单帧计数不可信（实机三例误杀）。
+        verified, verify_reason, _after_board, settle_samples = (
+            self._verify_claim_settled(
+                before, decision.action, tag="after_claim",
+                note="行动点击后 fresh 状态"))
+        payload["auto_click"].update({
+            "semantic_verified": verified,
+            "semantic_reason": verify_reason,
+            "settle_samples": settle_samples,
+        })
+        if settle_samples and "frame" in settle_samples[-1]:
+            payload["auto_click"]["after_frame"] = (
+                settle_samples[-1]["frame"])
         if not verified:
             return {"claim": payload, "_terminal": {
                 "gate": "claim_unverified",
@@ -1403,6 +1748,337 @@ class AutoPlayLoop:
     # ------------------------------------------------------------------
     # 主循环
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 吃链：点吃圆盘 → 等面板 → 读面板选组 → 点组 → L3 复核
+    # ------------------------------------------------------------------
+    def _chi_window_key(self, hand: HandState) -> tuple:
+        """同一行动窗的身份：局序 + 来牌 + 闭手。任一变化即新窗。"""
+        return (self.round.seq, hand.incoming_tile, tuple(hand.concealed))
+
+    @staticmethod
+    def _is_engine_sequence(tiles) -> bool:
+        """3 张互不相同的引擎牌是否构成同花色顺子。"""
+        values = sorted(int(v) for v in tiles)
+        if len(values) != 3 or len(set(values)) != 3:
+            return False
+        return any(low <= values[0] and values[2] <= high
+                   and values[2] - values[0] == 2
+                   for low, high in ((1, 9), (21, 29), (41, 49)))
+
+    @staticmethod
+    def _new_meld_groups(before: BoardState,
+                         after: BoardState) -> list[tuple[int, ...]]:
+        """after 相对 before 新增的副露组（多重集差，组内升序）。"""
+        if before.melds is None or after.melds is None:
+            return []
+        remaining = Counter(tuple(sorted(int(v) for v in group))
+                            for group in before.melds)
+        new_groups: list[tuple[int, ...]] = []
+        for group in after.melds:
+            key = tuple(sorted(int(v) for v in group))
+            if remaining.get(key, 0) > 0:
+                remaining[key] -= 1
+            else:
+                new_groups.append(key)
+        return new_groups
+
+    def _board_from_frame(self, raw: bytes, path: Path, image,
+                          *, note: str) -> BoardState:
+        """一帧 → L3 盘面快照（与行动点击后复核同一口径，另带面板标志）。"""
+        result = self._analyze(raw, path)
+        claims = read_claims(image)
+        settled, _evidence = detect_settled_screen(image)
+        hand = HandState.from_analysis(result)
+        panel = read_chi_panel(image)
+        return BoardState.from_hand_state(
+            hand, claim_buttons=len(claims.buttons), settled=settled,
+            selection_panel=panel.present, note=note)
+
+    def _chi_completed_board(self, before: BoardState, raw: bytes,
+                             path: Path, image) -> BoardState | None:
+        """面板未出现时，检查吃是否已被游戏直接完成（单候选免面板）。
+
+        通过 L3 且新增副露恰为一组顺子才算数；读不全/没完成返回 None。
+        """
+        try:
+            board = self._board_from_frame(raw, path, image,
+                                           note="点吃后轮询帧")
+        except Exception:  # noqa: BLE001 - 轮询帧读不全只是"还没等到"
+            return None
+        ok, _why = verify_after_click(before, board, ACTION_CHI)
+        if not ok:
+            return None
+        new_groups = self._new_meld_groups(before, board)
+        if len(new_groups) != 1 or not self._is_engine_sequence(new_groups[0]):
+            return None
+        return board
+
+    def _chi_group_verdict(self, before: BoardState, after: BoardState,
+                           group, verified: bool, reason: str):
+        """吃链追加判据：L3 通过后，新增副露组必须恰为所选组。"""
+        if not verified:
+            return verified, reason
+        new_groups = self._new_meld_groups(before, after)
+        if len(new_groups) != 1:
+            return False, (f"吃后新增副露组数 {len(new_groups)} != 1，"
+                           "判未证实")
+        if (group is not None
+                and tuple(new_groups[0]) != tuple(
+                    sorted(int(v) for v in group))):
+            return False, (f"吃后新增副露组 {list(new_groups[0])} 与所选组 "
+                           f"{sorted(int(v) for v in group)} 不一致，判未证实")
+        return verified, reason
+
+    def _chi_finish_tail(self, payload: dict, chain: dict,
+                         verified: bool, reason: str) -> dict:
+        """吃链收尾落账：通过才记一次动作，未证实一律停机落证据。"""
+        payload["auto_click"].update({
+            "semantic_verified": verified, "semantic_reason": reason})
+        chain["stage"] = "verified" if verified else "unverified"
+        if not verified:
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_unverified", "reason": reason}}
+        self.actions_done += 1
+        return {"claim": payload}
+
+    def _chi_finish_verified(self, payload: dict, chain: dict,
+                             before: BoardState, after: BoardState,
+                             group) -> dict:
+        """吃链收尾：L3 相对变化 + 新增副露组核对，通过才记一次动作。"""
+        verified, reason = verify_after_click(before, after, ACTION_CHI)
+        verified, reason = self._chi_group_verdict(
+            before, after, group, verified, reason)
+        return self._chi_finish_tail(payload, chain, verified, reason)
+
+    def _chi_chain_event(self, decision, hand: HandState, claim_state,
+                         image, frame_path: Path, payload: dict) -> dict:
+        """吃的两段式执行（decision 为 chi 且已过全部闸门时进入）。
+
+        链路：点吃圆盘 → 有界轮询等候选面板 → ``read_chi_panel`` 读组
+        → ``choose_chi_panel_option`` 选组（不劣化向听才选、财神不替代
+        顺子、证据不足恒弃权） → 面板专用通道点组 → L3 复核（暗手相对
+        −2、副露新增组恰为所选组）。任一步证据不足都 fail closed：
+        面板读不完整/选组弃权/点组被拒时先点「取消」关面板再退回
+        自动「过」（见 :meth:`_chi_cancel_and_pass`）；点组后状态未知
+        或 L3 不通过则停机落证据。
+
+        吃成后的出牌不在本方法内做：本 tick 结束后，下一 tick 的常规
+        出牌路径会用新手牌重新算牌、打出推荐牌并自带点后 −1 验证
+        （与「过」之后续打同一机制）。
+        """
+        chain: dict[str, Any] = {"stage": "start", "frame": str(frame_path)}
+        payload["chi_chain"] = chain
+        before = BoardState.from_hand_state(
+            hand, claim_buttons=len(claim_state.buttons), settled=False,
+            selection_panel=False, note="吃链点击前同帧状态")
+        # 第一段：点吃圆盘（独立行动行白名单，与碰/杠/胡/过同一通道）。
+        try:
+            outcome = self._tap.execute_claim(
+                decision.tap_point, action=decision.action, image=image,
+                session_dir=self.session_dir)
+        except TapAborted as exc:
+            payload["auto_click"].update(
+                {"reason": str(exc), "stage": "aborted"})
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_tap_aborted",
+                "reason": f"行动 chi 点击未通过：{exc}"}}
+        except Exception as exc:  # noqa: BLE001
+            payload["auto_click"].update(
+                {"reason": str(exc), "stage": "failed"})
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_tap_failed",
+                "reason": f"行动 chi 点击结果未知：{exc}"}}
+        chain["disc_tap"] = outcome
+        payload["auto_click"].update({
+            "executed": bool(outcome.get("executed")),
+            "stage": outcome.get("stage"), "tap": outcome.get("tap")})
+        if self.dry_run:
+            chain["stage"] = "planned_only"
+            payload["auto_click"]["semantic_verified"] = None
+            return {"claim": payload}
+
+        # 第二段：有界轮询等面板；面板始终不出现时，看吃是否已被游戏
+        # 直接完成（只有一组候选时客户端可能不弹面板、直接成吃）。
+        panel_image = None
+        panel_state = None
+        completed = None
+        for attempt in range(CHI_PANEL_POLL_ATTEMPTS):
+            if attempt:
+                self._sleep(CHI_PANEL_POLL_INTERVAL_S)
+            try:
+                raw = self._shot()
+                path = self._save_frame(raw, "chi_panel")
+                shot_image = cv2.imdecode(
+                    np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            except Exception as exc:  # noqa: BLE001
+                return {"claim": payload, "_terminal": {
+                    "gate": "chi_panel_capture_failed",
+                    "reason": f"点吃后截屏失败，面板状态未知：{exc}"}}
+            if shot_image is None:
+                continue
+            panel_state = read_chi_panel(shot_image)
+            if panel_state.present:
+                panel_image = shot_image
+            if panel_state.complete:
+                break
+            completed = self._chi_completed_board(before, raw, path,
+                                                  shot_image)
+            if completed is not None:
+                break
+        chain["panel"] = (panel_state.ledger() if panel_state is not None
+                          else None)
+        if completed is not None:
+            chain["stage"] = "panel_skipped_completed"
+            return self._chi_finish_verified(payload, chain, before,
+                                             completed, group=None)
+        if panel_image is None or panel_state is None:
+            return {"claim": payload, "_terminal": {
+                "gate": "chi_panel_missing",
+                "reason": "点吃后有界轮询内既没读到完整候选面板，"
+                          "也没观察到成吃迁移，点击结果未知，停手"}}
+        if not panel_state.complete:
+            chain["stage"] = "panel_incomplete"
+            return self._chi_cancel_and_pass(
+                payload, chain, panel_state, panel_image, hand)
+
+        # 第三段：选组（纯决策，证据不足恒弃权，绝不盲点第一个组合）。
+        choice = choose_chi_panel_option(
+            hand, [list(g.tiles) for g in panel_state.groups],
+            self._claim_policy)
+        chain["choice"] = choice.ledger()
+        if not choice.chosen or choice.candidate_index is None:
+            chain["stage"] = "choice_abstained"
+            self._chi_abstain_key = self._chi_window_key(hand)
+            return self._chi_cancel_and_pass(
+                payload, chain, panel_state, panel_image, hand)
+        group = panel_state.groups[choice.candidate_index]
+        if tuple(group.tiles) != tuple(choice.group or ()):
+            chain["stage"] = "choice_mismatch"
+            self._chi_abstain_key = self._chi_window_key(hand)
+            return self._chi_cancel_and_pass(
+                payload, chain, panel_state, panel_image, hand)
+
+        # 第四段：点所选组（TapExecutor 面板专用白名单通道）。
+        try:
+            group_outcome = self._tap.execute_chi_panel_group(
+                group.center, group=choice.group, image=panel_image,
+                session_dir=self.session_dir)
+        except TapRejected as exc:
+            # 发出前被拒 = 零点击：面板还开着，取消后退回过。
+            chain["stage"] = "group_tap_rejected"
+            chain["group_tap_reason"] = str(exc)
+            self._chi_abstain_key = self._chi_window_key(hand)
+            return self._chi_cancel_and_pass(
+                payload, chain, panel_state, panel_image, hand)
+        except TapAborted as exc:
+            return {"claim": payload, "_terminal": {
+                "gate": "chi_group_tap_aborted",
+                "reason": f"吃选组点击未通过：{exc}"}}
+        except Exception as exc:  # noqa: BLE001
+            return {"claim": payload, "_terminal": {
+                "gate": "chi_group_tap_failed",
+                "reason": f"吃选组点击结果未知：{exc}"}}
+        chain["group_tap"] = group_outcome
+
+        # 第五段：L3 语义复核（落定轮询；相对变化 + 新增副露组核对）。
+        def _group_check(board, ok, why):
+            return self._chi_group_verdict(before, board, choice.group,
+                                           ok, why)
+
+        verified, reason, _after_board, settle_samples = (
+            self._verify_claim_settled(
+                before, ACTION_CHI, tag="after_chi",
+                note="吃选组点击后 fresh 状态", extra_check=_group_check))
+        chain["settle_samples"] = settle_samples
+        return self._chi_finish_tail(payload, chain, verified, reason)
+
+    def _chi_cancel_and_pass(self, payload: dict, chain: dict, panel_state,
+                             panel_image, hand: HandState) -> dict:
+        """面板已开但吃链走不下去：点「取消」关面板，再退回自动「过」。
+
+        取消走既有 cancel_selection 通道（唯一取消圆盘 + 专用白名单，
+        与循环顶层那条候选面板取消路径同一口径）。取消结果未知 →
+        停机；取消成功后若行动窗还在，用**关吃配置**重新决策（防再次
+        落进吃链），恰为可执行的「过」才点，并照常做 L3 复核。
+        """
+        cancel = panel_state.cancel if panel_state is not None else None
+        if cancel is None:
+            return {"claim": payload, "_terminal": {
+                "gate": "chi_panel_no_cancel",
+                "reason": "候选面板已开但读不到取消圆盘，无法安全退出，停手"}}
+        try:
+            outcome = self._tap.execute_claim(
+                cancel.center, action="cancel_selection", kind=KIND_CANCEL,
+                image=panel_image, session_dir=self.session_dir)
+        except TapAborted as exc:
+            return {"claim": payload, "_terminal": {
+                "gate": "selection_cancel_unverified",
+                "reason": f"候选面板取消点击结果未知：{exc}"}}
+        except Exception as exc:  # noqa: BLE001
+            return {"claim": payload, "_terminal": {
+                "gate": "selection_cancel_unverified",
+                "reason": f"候选面板取消点击结果未知：{exc}"}}
+        chain["cancel_tap"] = outcome
+        chain["stage"] = "cancelled"
+        # 行动窗可能还在：再读一帧，圆盘重现且决策恰为「过」才收尾。
+        try:
+            raw = self._shot()
+            path = self._save_frame(raw, "chi_after_cancel")
+            image2 = cv2.imdecode(
+                np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        except Exception:  # noqa: BLE001 - 取消已成，读不到后续帧不算失败
+            return {"claim": payload}
+        if image2 is None:
+            return {"claim": payload}
+        claims2 = read_claims(image2)
+        if not claims2.buttons:
+            return {"claim": payload}
+        hand2 = hand
+        try:
+            result2 = self._analyze(raw, path)
+            if isinstance(result2, dict):
+                merged = dict(result2)
+                if self._discard_state is not None and self._discard_trusted:
+                    merged["discards"] = self._discard_state
+                hand2 = HandState.from_analysis(merged)
+        except Exception:  # noqa: BLE001 - 分析失败就只关面板，不试点过
+            return {"claim": payload}
+        decision2 = decide_action(
+            claims2, hand2, replace(self._claim_policy, chi_enabled=False),
+            image=image2)
+        if (decision2 is None or decision2.action != ACTION_PASS
+                or not decision2.executable):
+            return {"claim": payload}
+        before2 = BoardState.from_hand_state(
+            hand2, claim_buttons=len(claims2.buttons), settled=False,
+            note="吃链取消后退回过点击前状态")
+        try:
+            pass_outcome = self._tap.execute_claim(
+                decision2.tap_point, action=ACTION_PASS, image=image2,
+                session_dir=self.session_dir)
+        except TapAborted as exc:
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_tap_aborted",
+                "reason": f"吃链退回过点击未通过：{exc}"}}
+        except Exception as exc:  # noqa: BLE001
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_tap_failed",
+                "reason": f"吃链退回过点击结果未知：{exc}"}}
+        chain["fallback_pass_tap"] = pass_outcome
+        verified, reason, _after2, settle_samples = (
+            self._verify_claim_settled(
+                before2, ACTION_PASS, tag="after_chi_fallback_pass",
+                note="退回过点击后 fresh 状态"))
+        chain["fallback_pass_settle_samples"] = settle_samples
+        chain["fallback_pass_verified"] = verified
+        chain["fallback_pass_reason"] = reason
+        chain["stage"] = "cancelled_then_passed" if verified else "unverified"
+        if not verified:
+            return {"claim": payload, "_terminal": {
+                "gate": "claim_unverified", "reason": reason}}
+        self.actions_done += 1
+        return {"claim": payload}
+
     def run(self) -> dict:
         """直到停手条件满足；返回本次运行摘要。"""
         self.check_gates()

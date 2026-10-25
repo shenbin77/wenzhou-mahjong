@@ -421,18 +421,33 @@ def test_chi_disabled_by_default() -> None:
                   incoming_tile=2, incoming_source="opponent", player_count=4),
         ActionPolicyConfig(require_template_match=False))
     assert not report[ACTION_CHI]["feasible"]
-    assert "未接线" in report[ACTION_CHI]["why"]
+    assert "chi_enabled=False" in report[ACTION_CHI]["why"]
 
 
-def test_chi_needs_four_players() -> None:
-    """2 人局没有上家可吃，即便打开开关也不评估。"""
+def test_chi_feasible_in_two_player_game() -> None:
+    """2 人局可吃（2026-10-25 裁决）：对手即上家；归档帧实证 2 人局
+    反复出现吃窗口与候选面板（如房间 946077 的 130737 帧），旧注释
+    「2 人局无上家」与证据冲突已废除，默认 chi_player_counts={2,4}。"""
     config = ActionPolicyConfig(require_template_match=False, chi_enabled=True)
     report = ap.evaluate_claim_candidates(
         HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 42, 43),
                   incoming_tile=2, incoming_source="opponent", player_count=2),
         config)
+    assert report[ACTION_CHI]["feasible"]
+    assert report[ACTION_CHI]["options"]
+
+
+def test_chi_player_count_gate_still_applies_when_narrowed() -> None:
+    """显式把 chi_player_counts 收窄为 {4} 时，2 人局仍不评估吃。"""
+    config = ActionPolicyConfig(
+        require_template_match=False, chi_enabled=True,
+        chi_player_counts=frozenset({4}))
+    report = ap.evaluate_claim_candidates(
+        HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 42, 43),
+                  incoming_tile=2, incoming_source="opponent", player_count=2),
+        config)
     assert not report[ACTION_CHI]["feasible"]
-    assert "2 人局" in report[ACTION_CHI]["why"]
+    assert "人局不评估吃" in report[ACTION_CHI]["why"]
 
 
 def test_chi_feasible_in_four_player_game() -> None:
@@ -732,6 +747,14 @@ def test_l3_hu_negative(settled, buttons, marker: str) -> None:
 
 def test_l3_pass_positive() -> None:
     after = BoardState(concealed_count=16, melds=(), claim_buttons=0,
+                       settled=False, turn_owner="me")
+    ok, why = verify_after_click(_before(), after, ACTION_PASS)
+    assert ok, why
+
+
+def test_l3_pass_positive_when_own_draw_follows_immediately() -> None:
+    """2 人局实机：点过后马上轮到我方摸牌，16→17（或 13→14）是成功。"""
+    after = BoardState(concealed_count=17, melds=(), claim_buttons=0,
                        settled=False, turn_owner="me")
     ok, why = verify_after_click(_before(), after, ACTION_PASS)
     assert ok, why

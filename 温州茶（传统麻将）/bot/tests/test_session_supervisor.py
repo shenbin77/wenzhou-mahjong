@@ -41,6 +41,7 @@ from session_supervisor import (  # noqa: E402
 
 TAKEOVER = Path(r"D:\温州麻将\_takeover")
 CORPUS = Path(r"D:\温州麻将\温州茶（传统麻将）\采集")
+ROOT_CAPTURE = Path(r"D:\温州麻将\采集")
 TZ8 = timezone(timedelta(hours=8))
 FIXED_NOW = datetime(2026, 10, 25, 3, 0, 0, tzinfo=TZ8)
 
@@ -52,6 +53,12 @@ LOBBY_FRAMES = [
     TAKEOVER / "settle_emulator-5556.png",
     TAKEOVER / "settle_emulator-5558.png",
     TAKEOVER / "play4_5556" / "frames" / "20261025_015008_142139_before_3a1b50.png",
+]
+WAITING_FRAMES = [
+    ROOT_CAPTURE / "dev_auto_play" / "waiting_room_evidence_20261025"
+    / "room_877158_waiting_5556_native.png",
+    ROOT_CAPTURE / "dev_auto_play" / "waiting_room_evidence_20261025"
+    / "room_877158_waiting_5558_native.png",
 ]
 HINT_FRAMES = [
     TAKEOVER / "play3_5556" / "frames" / "20261025_014201_407831_before_6c1e83.png",
@@ -126,6 +133,17 @@ def test_lobby_frames(path: Path) -> None:
     plan = build_plan(result, serial="emulator-5556", session_dir="s")
     assert plan["action"] == "alert_only"
     assert "永久禁止自动点击" in plan["reason"]
+    json.dumps(plan, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("path", WAITING_FRAMES, ids=[p.name for p in WAITING_FRAMES])
+def test_waiting_room_frames_are_not_misclassified_as_in_game(path: Path) -> None:
+    result = classify(_frame(path), events=[], now=FIXED_NOW)
+    assert result.state is SessionState.WAITING_ROOM
+    assert result.evidence["waiting_room"]["player_count"] == 2
+    plan = build_plan(result, serial="emulator-5556", session_dir="s")
+    assert plan["action"] == "wait_for_manual_start"
+    assert "不发布点击计划" in plan["reason"]
     json.dumps(plan, ensure_ascii=False)
 
 

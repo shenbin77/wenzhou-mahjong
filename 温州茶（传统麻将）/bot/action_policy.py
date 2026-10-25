@@ -56,8 +56,11 @@ confirmed_actions)``，即默认任何动作都需要人工确认。确认一个
     自己的弃牌去碰。归属未标注（``None``）时不拦，只用来牌本身判定。
 * 吃会弹出二次选择面板（面板里有 ``取消``）。面板选组的纯决策已经就绪
   （:func:`choose_chi_panel_option`：不劣化向听才选、同分取保留搭子多者，
-  证据不足弃权），但循环侧「点吃圆盘 → 等面板 → 点选组」的连点编排尚未
-  集成，``config.chi_enabled`` 默认仍为 ``False``。
+  证据不足弃权）；循环侧「点吃圆盘 → 等面板 → 读面板选组 → 点选组 →
+  L3 复核」的连点编排已集成在 ``auto_play_loop`` 的吃链里（面板读数走
+  ``chi_panel_vision.read_chi_panel``，点组走 ``TapExecutor`` 的面板
+  专用白名单通道）。``config.chi_enabled`` 默认仍为 ``False``，须由
+  runner 以 ``recommended_runner_config(include_chi=True)`` 显式打开。
 * 行动圆盘已接入 ``TapExecutor.execute_claim`` 的独立几何白名单，并由
   :data:`CLAIM_TAP_CHANNEL_READY` 标记。它不放宽普通出牌的手牌 ROI；调用方
   必须显式打开自动总闸，并在点击后完成 L3 语义验证。
@@ -1044,10 +1047,14 @@ class ActionPolicyConfig:
         caishen_substitutes_for_claim: 财神是否可替代吃碰杠的实体牌；
             默认 ``False``（未实测，按不替代处理＝少碰也不误碰）。
         chi_enabled: 是否启用"吃"；默认 ``False``——吃会弹二次选择面板
-            （面板含 ``取消``），面板选组纯函数已就绪
-            （:func:`choose_chi_panel_option`），循环连点编排未集成前
-            默认关闭。
-        chi_player_counts: 允许吃的人数集合；默认 ``{4}``（2 人局无上家）。
+            （面板含 ``取消``），面板选组纯函数见
+            :func:`choose_chi_panel_option`；循环连点编排已集成在
+            ``auto_play_loop`` 的吃链中（点吃圆盘 → 读面板 → 选组 →
+            点组 → L3 复核），但默认仍关闭，须 runner 显式打开。
+        chi_player_counts: 允许吃的人数集合；默认 ``{2, 4}``。旧口径
+            「2 人局无上家」已被实测证伪：2 人局里对手就是上家，
+            吃/过窗口与吃的候选面板在 2 人局反复出现（归档帧与实机
+            均有证据，见 ``chi_panel_vision`` 的标定帧）。
         allow_pass_without_claim: 只有"过"而没有金/红盘时是否出手；
             默认 ``False``（与已验证口径"过从不单独出现"不符，弃权）。
         require_improvement: 吃碰杠必须不劣化向听才出手；默认 ``True``。
@@ -1062,7 +1069,7 @@ class ActionPolicyConfig:
     forbidden_labels: frozenset[str] = BLACKLISTED_LABELS
     caishen_substitutes_for_claim: bool = False
     chi_enabled: bool = False
-    chi_player_counts: frozenset[int] = frozenset({4})
+    chi_player_counts: frozenset[int] = frozenset({2, 4})
     allow_pass_without_claim: bool = False
     require_improvement: bool = True
     # 归属无法确认时的仲裁开关（详见 :func:`resolve_incoming`）：
@@ -1554,7 +1561,7 @@ def evaluate_claim_candidates(hand: HandState,
 
     # ---- 吃：会弹二次选择面板，默认关闭 ----
     if not config.chi_enabled:
-        report[ACTION_CHI]["why"] = "吃会弹出二次选择面板（含取消），本版未接线，不启用"
+        report[ACTION_CHI]["why"] = "吃未启用（chi_enabled=False），不评估吃"
     elif hand.player_count is None:
         report[ACTION_CHI]["why"] = "人数未确认，不评估吃"
     elif int(hand.player_count) not in set(config.chi_player_counts):
@@ -1989,7 +1996,8 @@ def verify_after_click(
     * 杠：暗手 −3 且多出一组副露（明杠），或暗手 −1 且某组由 3 张变 4 张
       （加杠）；
     * 胡：进入结算画面，或至少行动圆盘消失；
-    * 过：暗手与副露不变、行动圆盘消失、倒计时转到我方。
+    * 过：副露不变、行动圆盘消失、倒计时转到我方；暗手保持不变，或在
+      “过”后立即轮到我方摸牌时合法 +1。
 
     证据口径（fail closed）：行动圆盘消失必须由 ``after.claim_buttons``
     实测为 0 来证明——该字段为 ``None``（不可测）时，碰/吃/杠/过一律判
@@ -2131,11 +2139,12 @@ def _verify_hu(before: BoardState, after: BoardState) -> tuple[bool, str]:
 
 
 def _verify_pass(before: BoardState, after: BoardState) -> tuple[bool, str]:
-    """过：暗手/副露不变、圆盘实测消失、倒计时转到我方（归属查在共用判据）。"""
+    """过：圆盘消失；暗手不变，或按钮消失后立即摸牌而 +1。"""
     if before.concealed_count is not None and after.concealed_count is not None:
-        if after.concealed_count != before.concealed_count:
+        concealed_gap = after.concealed_count - before.concealed_count
+        if concealed_gap not in (0, 1):
             return False, (f"过后暗手 {before.concealed_count}→{after.concealed_count}，"
-                           f"预期不变")
+                           f"预期不变或立即摸牌 +1")
     if (before.meld_group_count is not None and after.meld_group_count is not None
             and before.meld_group_count != after.meld_group_count):
         return False, (f"过后副露组数 {before.meld_group_count}→{after.meld_group_count}，"
@@ -2144,6 +2153,9 @@ def _verify_pass(before: BoardState, after: BoardState) -> tuple[bool, str]:
     if not ok:
         return False, why
     if before.total is not None and after.total is not None:
-        if after.total != before.total:
-            return False, f"过后总张数 {before.total}→{after.total}，预期不变"
-    return True, "过状态迁移已验证（暗手/副露不变、圆盘消失、倒计时转移）"
+        total_gap = after.total - before.total
+        if total_gap not in (0, 1):
+            return False, (f"过后总张数 {before.total}→{after.total}，"
+                           "预期不变或立即摸牌 +1")
+    return True, ("过状态迁移已验证（副露不变、圆盘消失、倒计时转移；"
+                  "暗手不变或立即摸牌 +1）")
