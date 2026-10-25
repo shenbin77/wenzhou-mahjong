@@ -718,6 +718,14 @@ class TapExecutor:
             # 调用方必须接，这里绝不冒充。
             still_there = [b for b in claim_record["buttons_after"]
                            if self._claim_point_in_box((x, y), b["box"])]
+            if allow_selection_cancel:
+                # 取消候选面板后，普通“过”圆盘会回到几乎同一槽位。
+                # 只把同一种 cancel 盘仍在视为点击未生效；pass/gold 等
+                # 新圆盘出现说明面板已退出，不能因为坐标重叠误杀。
+                still_there = [
+                    b for b in still_there
+                    if b.get("kind") == KIND_CANCEL
+                ]
             if still_there:
                 raise TapUnverified(
                     f"行动行点击 ({x},{y}) 后目标圆盘仍实测存在于 "
@@ -1314,11 +1322,12 @@ class TapExecutor:
             first_metrics = self._target_column_metrics(
                 fresh, selected_image, located["box"])
             evidence.first_click_metrics = first_metrics
-            if not first_metrics["changed"]:
-                raise TapUnverified("第一次点击后目标牌没有抬起，停止确认出牌")
             # 待二击状态落盘：进程若在两击之间重启，新进程靠它 + 唯一
             # 抬起牌定位恢复第二击（panel_recovery）。落盘失败不挡第二击。
-            if self.pending_context is not None:
+            # 只有目标列确有像素变化才落“待二击”上下文；若像素没变但
+            # 上层稍后能用整手多重集证明“第一击已直接出牌+立即补摸”，
+            # 本就不应存在待二击状态。
+            if first_metrics["changed"] and self.pending_context is not None:
                 self._persist_pending_second_tap(
                     tap_plan, (x, y), located["box"], before)
             selected_guard = detect_action_ui(selected_image)
@@ -1388,6 +1397,12 @@ class TapExecutor:
                     if self.pending_context is not None:
                         self._clear_pending_second_tap()
                     return outcome
+            # 像素没变化时，只有上面的强语义证明可以放行；证明不了绝不
+            # 仅凭框计数/几何继续发第二击。
+            if not first_metrics["changed"]:
+                raise TapUnverified(
+                    "第一次点击后目标牌区域无变化，且整手语义未证明已直接出牌，"
+                    "停止确认出牌")
             if not gate["ready"]:
                 raise TapUnverified(gate["reason"])
 

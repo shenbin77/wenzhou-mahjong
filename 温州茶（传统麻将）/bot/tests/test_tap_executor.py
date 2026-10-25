@@ -340,6 +340,35 @@ def test_first_click_direct_discard_with_redraw_uses_semantic_proof(
     assert len(fake.tap_commands()) == 1, "语义证明第一击已出牌后绝不允许第二击"
 
 
+def test_semantic_direct_discard_proof_can_override_zero_target_pixel_change(
+        analysis, monkeypatch):
+    """实机回归：同牌补位可让目标列像素近乎不变；强整手证明仍应禁止二击。"""
+    png = frame_png()
+    fake = FakeAdb([png, png])
+    monkeypatch.setattr(subprocess, "run", fake)
+    executor = TapExecutor(enabled=True, adb_path="fake-adb",
+                           serial="emulator-test", select_delay=0,
+                           verify_delay=0, fresh_retry_attempts=1)
+
+    def prove(_image, _fresh_analysis, gate):
+        return {
+            "discarded": True,
+            "after_count": gate["count"],
+            "removed": [analysis["suggestion_id"]],
+            "added": [99],
+            "reason": "测试：整手多重集证明已直出并补摸",
+        }
+
+    outcome = executor.execute(analysis, post_select_validator=prove)
+
+    assert outcome["stage"] == "discarded_first_click_redraw"
+    assert outcome["verified"] is True
+    assert len(fake.tap_commands()) == 1
+    evidence = _read_evidence(Path(executor.session_dir))
+    assert evidence["first_click_metrics"]["changed"] is False
+    assert evidence["post_select_semantic"]["discarded"] is True
+
+
 def test_hint_panel_false_minus_one_still_sends_confirming_second_tap(
         analysis, monkeypatch):
     """实机回归：胡提示面板把抬起牌漏出 ROI，不能误判成已出牌。"""
@@ -755,6 +784,31 @@ def test_explicit_selection_cancel_clicks_unique_panel_disc_and_keeps_evidence(
     assert (probe / "before.png").is_file()
     assert (probe / "after.png").is_file()
     assert _read_evidence(tmp_path)["claim"]["action"] == "cancel_selection"
+
+
+def test_selection_cancel_accepts_pass_reappearing_in_same_slot(
+        monkeypatch, tmp_path):
+    """实机回归：取消后同槽位重新出现“过”，不能误认成取消盘仍存在。"""
+    cancel_center = (1450, 600)
+    before = claim_frame(gold=False, blue=True, blue_center=cancel_center)
+    after_img = _blank_frame()
+    cv2.circle(after_img, (1000, 610), 60, (0, 200, 255), -1)
+    cv2.circle(after_img, (1428, 604), 55, (255, 170, 0), -1)
+    after = _png(after_img)
+    fake = FakeAdb([before, after])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    outcome = executor.execute_claim(
+        cancel_center, action="cancel_selection", kind="cancel")
+
+    assert outcome["executed"] is True
+    assert outcome["ui_responded"] is True
+    assert len(fake.tap_commands()) == 1
+    evidence = _read_evidence(tmp_path)
+    assert any(b["kind"] == "pass"
+               for b in evidence["claim"]["buttons_after"])
+    assert not any(b["kind"] == "cancel"
+                   for b in evidence["claim"]["buttons_after"])
 
 
 def test_claim_tap_rejects_kind_mismatch_and_ambiguous_candidates(

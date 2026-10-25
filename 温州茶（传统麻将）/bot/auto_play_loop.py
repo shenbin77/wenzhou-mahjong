@@ -70,6 +70,7 @@ from action_policy import (
     HandState,
     choose_chi_panel_option,
     decide_action,
+    resolve_incoming,
     recommended_runner_config,
     validate_runner_config,
     verify_after_click,
@@ -1571,8 +1572,9 @@ class AutoPlayLoop:
         * 采样异常只记样本（签名取唯一哨兵、永不算落定），不外抛。
 
         基线 ``before`` 不变：仍取点击前同帧 fresh 状态（既有暗手列
-        白名单口径保留）。``extra_check(board, verified, reason)`` 可
-        在每帧验证后追加判据（吃链用它核对新增副露组 == 所选组）。
+        白名单口径保留）。``extra_check(board, verified, reason, image)``
+        可在每帧验证后追加判据（吃链用它核对新增副露组 == 所选组，
+        并读取吃后专用压暗证据）。
 
         Returns:
             ``(verified, reason, last_board, samples)``；samples 逐帧
@@ -1593,7 +1595,8 @@ class AutoPlayLoop:
                 board = self._board_from_frame(raw, path, image, note=note)
                 verified, reason = verify_after_click(before, board, action)
                 if extra_check is not None:
-                    verified, reason = extra_check(board, verified, reason)
+                    verified, reason = extra_check(
+                        board, verified, reason, image)
                 signature = self._claim_board_signature(board)
             except Exception as exc:  # noqa: BLE001 - 坏帧只记样本
                 verified = False
@@ -1699,15 +1702,22 @@ class AutoPlayLoop:
         if self._discard_state is not None and self._discard_trusted:
             payload["discards"] = self._discard_state
         hand = HandState.from_analysis(payload)
-        decision = decide_action(claim_state, hand, self._claim_policy, image=image)
+        # decide_action 内部会做一次来牌/归属仲裁，但只把结果封装进
+        # ActionDecision，不会把“已恢复 incoming_tile 的 HandState”返回给
+        # 吃候选面板。这里先显式 resolve 一次并沿整条 claim 链复用，避免
+        # L2 已知来牌、进入选组后又退回 incoming_tile=None。
+        resolved_hand, incoming_resolution = resolve_incoming(
+            image, hand, self._claim_policy)
+        decision = decide_action(
+            claim_state, resolved_hand, self._claim_policy, image=image)
         if (decision is not None and decision.action == ACTION_CHI
                 and self._chi_abstain_key is not None
-                and self._chi_abstain_key == self._chi_window_key(hand)):
+                and self._chi_abstain_key == self._chi_window_key(resolved_hand)):
             # 同一行动窗里吃链已弃权过一次（选组弃权/点组被拒/面板读
             # 不全）：不再重复点吃，改用关吃配置重新决策（通常落到
             # 「过」），避免 点吃→取消→点吃 的死循环。
             decision = decide_action(
-                claim_state, hand,
+                claim_state, resolved_hand,
                 replace(self._claim_policy, chi_enabled=False), image=image)
         if decision is None:
             return {"claim": {
@@ -1718,6 +1728,7 @@ class AutoPlayLoop:
                 "reason": claim_state.reason,
             }}
         payload = decision.ledger()
+        payload["incoming_resolution"] = incoming_resolution
         payload["frame"] = str(frame_path)
         payload["status"] = ("blocked" if decision.blocked_reason else
                              "ready" if decision.executable else
@@ -1735,10 +1746,10 @@ class AutoPlayLoop:
 
         if decision.action == ACTION_CHI:
             return self._chi_chain_event(
-                decision, hand, claim_state, image, frame_path, payload)
+                decision, resolved_hand, claim_state, image, frame_path, payload)
 
         before = BoardState.from_hand_state(
-            hand, claim_buttons=len(claim_state.buttons), settled=False,
+            resolved_hand, claim_buttons=len(claim_state.buttons), settled=False,
             note="行动点击前同帧状态")
         try:
             outcome = self._tap.execute_claim(
@@ -1948,36 +1959,55 @@ class AutoPlayLoop:
         ok, why = verify_after_click(before, board, ACTION_CHI)
         if ok:
             return board, why
+        dim_ok, dim_reason = self._chi_dimmed_completion_verdict(
+            before, board, image, group=new_groups[0])
+        return (board, dim_reason) if dim_ok else None
 
+    def _chi_dimmed_completion_verdict(
+        self,
+        before: BoardState,
+        after: BoardState,
+        image: np.ndarray,
+        *,
+        group=None,
+    ) -> tuple[bool, str]:
+        """吃后压暗态专用 L3：只认强结构证据，不改全局识牌阈值。"""
         dim = self._chi_dimmed_hand_evidence(image)
         if not dim["dimmed"]:
-            return None
-        if board.claim_buttons != 0:
-            return None
-        if board.selection_panel is not False:
-            return None
-        if before.meld_group_count is None or board.meld_group_count is None:
-            return None
-        if board.meld_group_count - before.meld_group_count != 1:
-            return None
-        if before.meld_tile_total is None or board.meld_tile_total is None:
-            return None
-        if board.meld_tile_total - before.meld_tile_total != 3:
-            return None
+            return False, "吃后手牌不是已验证的客户端压暗态"
+        if after.claim_buttons != 0:
+            return False, "吃后行动圆盘仍在"
+        if after.selection_panel is not False:
+            return False, "吃后候选面板仍在或不可确认"
+        new_groups = self._new_meld_groups(before, after)
+        if len(new_groups) != 1 or not self._is_engine_sequence(new_groups[0]):
+            return False, "吃后未确认唯一新增合法顺子副露"
+        if (group is not None
+                and tuple(new_groups[0]) != tuple(
+                    sorted(int(v) for v in group))):
+            return False, (
+                f"吃后新增副露组 {list(new_groups[0])} 与所选组 "
+                f"{sorted(int(v) for v in group)} 不一致")
+        if before.meld_group_count is None or after.meld_group_count is None:
+            return False, "吃后副露组数不可测"
+        if after.meld_group_count - before.meld_group_count != 1:
+            return False, "吃后副露组数未增加 1"
+        if before.meld_tile_total is None or after.meld_tile_total is None:
+            return False, "吃后副露张数不可测"
+        if after.meld_tile_total - before.meld_tile_total != 3:
+            return False, "吃后副露张数未增加 3"
         expected = (before.concealed_count - 2
                     if before.concealed_count is not None else None)
-        # 这条分支只处理“明显少读”的压暗态；若暗手读数恰好正常，
-        # 应由上面的标准 L3 通过，不在这里兜底。
-        if (expected is None or board.concealed_count is None
-                or board.concealed_count >= expected):
-            return None
+        if (expected is None or after.concealed_count is None
+                or after.concealed_count >= expected):
+            return False, "暗手读数未呈现吃后压暗少读特征"
         reason = (
             "吃已由结构证据确认：新增合法顺子副露 +1组/+3张、行动圆盘消失、"
             "候选面板消失；暗手处于客户端压暗态 "
             f"(p70={dim['p70']}, bright_ratio={dim['bright_ratio']})，"
-            f"当前暗手读数 {board.concealed_count} 低于应有 {expected}，"
+            f"当前暗手读数 {after.concealed_count} 低于应有 {expected}，"
             "按已知压暗坏读处理，不用该张数否决真实成吃")
-        return board, reason
+        return True, reason
 
     def _chi_group_verdict(self, before: BoardState, after: BoardState,
                            group, verified: bool, reason: str):
@@ -2149,9 +2179,16 @@ class AutoPlayLoop:
         chain["group_tap"] = group_outcome
 
         # 第五段：L3 语义复核（落定轮询；相对变化 + 新增副露组核对）。
-        def _group_check(board, ok, why):
-            return self._chi_group_verdict(before, board, choice.group,
-                                           ok, why)
+        def _group_check(board, ok, why, current_image):
+            checked, checked_reason = self._chi_group_verdict(
+                before, board, choice.group, ok, why)
+            if checked:
+                return checked, checked_reason
+            dim_ok, dim_reason = self._chi_dimmed_completion_verdict(
+                before, board, current_image, group=choice.group)
+            if dim_ok:
+                return True, dim_reason
+            return False, checked_reason
 
         verified, reason, _after_board, settle_samples = (
             self._verify_claim_settled(

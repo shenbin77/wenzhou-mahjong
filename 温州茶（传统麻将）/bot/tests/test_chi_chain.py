@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -125,6 +126,27 @@ def test_direct_chi_completion_accepts_only_known_dimmed_hand_state(tmp_path):
     loop._board_from_frame = lambda *_a, **_k: still_claiming
     assert loop._chi_completed_board(
         before, b"", tmp_path / "claim.png", dimmed) is None
+
+
+def test_selected_chi_dimmed_completion_accepts_matching_group_only():
+    """实机回归：多候选选组吃成后同样会压暗，结构证据必须覆盖该路径。"""
+    loop = apl.AutoPlayLoop.__new__(apl.AutoPlayLoop)
+    before = BoardState(
+        concealed_count=16, melds=(), claim_buttons=2,
+        settled=False, selection_panel=False, note="before")
+    after = BoardState(
+        concealed_count=7, melds=((3, 4, 5),), claim_buttons=0,
+        settled=False, selection_panel=False, note="dimmed selected chi")
+    dimmed = np.full((900, 1600, 3), 100, dtype=np.uint8)
+
+    ok, reason = loop._chi_dimmed_completion_verdict(
+        before, after, dimmed, group=(3, 4, 5))
+    assert ok is True
+    assert "压暗态" in reason
+
+    wrong, _ = loop._chi_dimmed_completion_verdict(
+        before, after, dimmed, group=(4, 5, 6))
+    assert wrong is False
 
 
 class PanelQueue:
@@ -469,6 +491,35 @@ def test_chi_chain_full_success(tmp_path, monkeypatch):
     assert _claim_actions(tap) == [ACTION_CHI]
     assert claim["auto_click"]["semantic_verified"] is True
     assert loop.actions_done == 1
+    assert loop.stopped is False
+
+
+def test_chi_chain_panel_choice_uses_resolved_incoming_hand(
+        tmp_path, monkeypatch):
+    """实机回归：L2 已恢复来牌后，候选选组不能又退回 incoming_tile=None。"""
+    unknown = dict(BEFORE_CHI)
+    unknown["incoming_tile"] = None
+    unknown["incoming_source"] = None
+
+    def fake_resolve(_image, hand, _config):
+        return (replace(hand, incoming_tile=2, incoming_source="opponent"),
+                {"recovered_tile": 2, "arbitrated_source": "opponent"})
+
+    monkeypatch.setattr(apl, "resolve_incoming", fake_resolve)
+    tap = ChiFakeTap()
+    loop, tap = make_chi_loop(
+        tmp_path, monkeypatch, tap=tap,
+        frames=[tal.action_row_frame(), tal.make_frame()],
+        analyses=[unknown, AFTER_CHI],
+        panel_states=[PANEL_OK, PANEL_ABSENT])
+
+    event = loop.tick()
+    claim = event["claim"]
+
+    assert claim["incoming_resolution"]["recovered_tile"] == 2
+    assert claim["chi_chain"]["choice"]["group"] == [1, 2, 3]
+    assert len(tap.group_calls) == 1
+    assert _claim_actions(tap) == [ACTION_CHI]
     assert loop.stopped is False
 
 
