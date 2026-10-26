@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import human_input_monitor
@@ -164,4 +165,22 @@ def test_ldconsole_mapping_requires_exact_default_port_formula(monkeypatch) -> N
         331880, "emulator-5556", True, "ldconsole_list2_index_port")
     assert resolve_ldplayer_target("127.0.0.1:5556", "ldconsole.exe") is None
     assert resolve_ldplayer_target("emulator-5555", "ldconsole.exe") is None
+
+
+def test_ldconsole_mapping_hides_background_console_on_windows(monkeypatch) -> None:
+    captured = {}
+
+    class Done:
+        stdout = b"0,LDPlayer,331994,331996,1,25972,1844,1600,900,240\r\n"
+
+    def run(*args, **kwargs):
+        captured.update(kwargs)
+        return Done()
+
+    monkeypatch.setattr("human_input_monitor.os.name", "nt")
+    monkeypatch.setattr("human_input_monitor.subprocess.run", run)
+    resolve_ldplayer_target("emulator-5554", "ldconsole.exe")
+
+    assert captured["creationflags"] == getattr(
+        subprocess, "CREATE_NO_WINDOW", 0x08000000)
 

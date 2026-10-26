@@ -323,9 +323,15 @@ def resolve_ldplayer_target(
         return None
     expected_index = (port - 5554) // 2
     try:
+        kwargs = {}
+        if os.name == "nt":
+            # The watchdog periodically re-resolves both LDPlayer windows.
+            # Keep those background ldconsole probes invisible.
+            kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NO_WINDOW", 0x08000000)
         completed = subprocess.run(
             [str(ldconsole_path), "list2"], check=True,
-            capture_output=True, timeout=5)
+            capture_output=True, timeout=5, **kwargs)
     except (OSError, subprocess.SubprocessError):
         return None
     for row in parse_ldplayer_list2(completed.stdout):

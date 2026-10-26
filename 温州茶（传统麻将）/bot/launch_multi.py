@@ -9,6 +9,7 @@ Only starts UI windows; never presses any game control or enables auto-play.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,8 +45,13 @@ def existing_ui_processes() -> tuple[list[int], set[str]] | None:
 
 
 def connected_devices(adb_path: str = DEFAULT_ADB) -> list[str]:
+    kwargs = {}
+    if os.name == "nt":
+        # This function is called by the visible launcher on every refresh.
+        # A console window per probe makes the desktop appear to flicker.
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     proc = subprocess.run([str(adb_path), "devices", "-l"], check=True,
-                          capture_output=True, text=True, timeout=12)
+                          capture_output=True, text=True, timeout=12, **kwargs)
     devices: list[str] = []
     for line in proc.stdout.splitlines()[1:]:
         fields = line.split()

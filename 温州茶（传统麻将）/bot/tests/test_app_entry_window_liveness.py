@@ -71,7 +71,7 @@ def test_stale_pid_record_is_not_an_open_window(monkeypatch, tmp_path):
     # command line, the judgement must not call it an open window.
     row = _FakeScanRow(saved, [sys.executable, "assist_window.py",
                               "--serial", "emulator-5556"])
-    monkeypatch.setattr("psutil.process_iter", lambda attrs=None: [row])
+    monkeypatch.setattr("app_entry._assistant_window_pids", lambda: {saved})
     assert existing_window_pids("emulator-5556") == {}
 
 
@@ -121,13 +121,15 @@ def test_shell_wrapper_carrying_the_launch_line_is_not_a_window():
             pass
 
 
-def test_live_window_child_is_counted(tmp_path):
+def test_live_window_child_is_counted(monkeypatch, tmp_path):
     """A really running assist window still maps to its own serial."""
     script = tmp_path / "assist_window.py"
     script.write_text(CHILD_SOURCE, encoding="utf-8")
     child = _spawn(tmp_path, str(script), "--serial", "emulator-5599")
     try:
         assert pid_owns_assist_window(child.pid) is True
+        monkeypatch.setattr(
+            "app_entry._assistant_window_pids", lambda: {child.pid})
         assert existing_window_pids("emulator-5556").get("emulator-5599") == child.pid
     finally:
         _reap(child)

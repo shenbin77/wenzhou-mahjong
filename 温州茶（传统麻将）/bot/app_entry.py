@@ -10,6 +10,7 @@ from pathlib import Path
 from instance_profile import safe_serial
 
 ASSIST_SCRIPT_NAME = "assist_window.py"
+ASSIST_WINDOW_TITLE_PREFIX = "温州麻将辅助器 · emulator-"
 
 
 def _runs_assist_window(argv: object) -> bool:
@@ -71,6 +72,49 @@ def pid_owns_assist_window(pid: object) -> bool:
     return verified_window_argv(pid) is not None
 
 
+def _assistant_window_pids() -> set[int]:
+    """Return only PIDs owning an assistant top-level window on Windows.
+
+    Reading ``cmdline`` for every process through psutil can block for many
+    seconds on one unrelated process.  The launcher only cares about actual
+    assistant windows, including withdrawn Tk roots, so first narrow the scan
+    with ``EnumWindows`` and inspect command lines for those few PIDs only.
+    """
+    if os.name != "nt":
+        return set()
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR,
+                                      ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    found: set[int] = set()
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd, _unused):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title, length + 1)
+        if not title.value.startswith(ASSIST_WINDOW_TITLE_PREFIX):
+            return True
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value > 0:
+            found.add(int(owner.value))
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return found
+
+
 def _argv_serial(argv: list[str], default_serial: str) -> str:
     if "--serial" in argv and argv.index("--serial") + 1 < len(argv):
         return safe_serial(argv[argv.index("--serial") + 1])
@@ -85,14 +129,19 @@ def existing_window_pids(default_serial: str, *, exclude_pid: int | None = None)
     processes that merely mention this script are dropped instead of blocking
     a new window.
     """
-    import psutil
     self_pid = os.getpid()
     owned: dict[str, int] = {}
-    for proc in psutil.process_iter(["pid"]):
-        try:
-            pid = int(proc.info.get("pid"))
-        except (TypeError, ValueError):
-            continue
+    if os.name == "nt":
+        candidates = _assistant_window_pids()
+    else:
+        import psutil
+        candidates = set()
+        for proc in psutil.process_iter(["pid"]):
+            try:
+                candidates.add(int(proc.info.get("pid")))
+            except (TypeError, ValueError):
+                continue
+    for pid in candidates:
         if pid <= 0 or pid == self_pid or pid == exclude_pid:
             continue
         argv = verified_window_argv(pid)
