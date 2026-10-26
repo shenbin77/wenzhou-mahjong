@@ -1,5 +1,6 @@
 """Cross-device profile isolation and migration without any game tap."""
 from __future__ import annotations
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -7,8 +8,12 @@ import sys
 import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from instance_profile import profile_paths, read_binding_for_serial, safe_serial
+from instance_profile import (discover_profile_bindings, profile_paths,
+                              read_assistant_desired_open,
+                              read_binding_for_serial, safe_serial,
+                              set_assistant_desired_open)
 import assist_window
+import instance_profile
 import launch_multi
 from assist_window import TeaAssistWindow
 
@@ -76,6 +81,73 @@ def test_window_geometry_paths_are_independent(tmp_path):
     assist_window.save_window_state({"x":900},second.geometry)
     assert assist_window.load_window_state(first.geometry)["x"]==20
     assert assist_window.load_window_state(second.geometry)["x"]==900
+
+
+def test_saved_profile_discovery_rejects_misplaced_cross_serial_binding(tmp_path):
+    good=profile_paths(tmp_path,"emulator-5554")
+    assist_window.save_binding(
+        {"account":"玉姐","serial":"emulator-5554","mode":"tea_2p"},
+        good.binding)
+    wrong=profile_paths(tmp_path,"emulator-5556")
+    assist_window.save_binding(
+        {"account":"wrong","serial":"emulator-5558","mode":"tea_2p"},
+        wrong.binding)
+
+    found=discover_profile_bindings(tmp_path)
+
+    assert set(found)=={"emulator-5554"}
+    assert found["emulator-5554"]["account"]=="玉姐"
+
+
+def test_assistant_lifecycle_intent_is_per_serial_and_boolean(tmp_path):
+    set_assistant_desired_open(tmp_path,"emulator-5554",True)
+    set_assistant_desired_open(tmp_path,"emulator-5556",False)
+
+    assert read_assistant_desired_open(tmp_path,"emulator-5554") is True
+    assert read_assistant_desired_open(tmp_path,"emulator-5556") is False
+    assert read_assistant_desired_open(tmp_path,"emulator-5558",default=True) is True
+
+
+@pytest.mark.parametrize("payload", [
+    {"schema": "assistant_state/v0", "serial": "emulator-5554",
+     "desired_open": True},
+    {"schema": "assistant_state/v1", "serial": "emulator-5556",
+     "desired_open": True},
+    {"schema": "assistant_state/v1", "serial": "emulator-5554",
+     "desired_open": "yes"},
+])
+def test_invalid_lifecycle_state_fails_closed_even_with_legacy_default(
+        tmp_path, payload):
+    path=profile_paths(tmp_path,"emulator-5554").assistant_state
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(payload),encoding="utf-8")
+
+    assert read_assistant_desired_open(
+        tmp_path,"emulator-5554",default=True) is False
+
+
+def test_corrupt_lifecycle_state_fails_closed(tmp_path):
+    path=profile_paths(tmp_path,"emulator-5554").assistant_state
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken",encoding="utf-8")
+
+    assert read_assistant_desired_open(
+        tmp_path,"emulator-5554",default=True) is False
+
+
+def test_atomic_profile_write_keeps_previous_json_when_replace_fails(
+        tmp_path, monkeypatch):
+    target=tmp_path/"profile.json"
+    target.write_text('{"version":"old"}\n',encoding="utf-8")
+    monkeypatch.setattr(
+        instance_profile.os,"replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("simulated crash")))
+
+    with pytest.raises(OSError,match="simulated crash"):
+        instance_profile.atomic_write_json(target,{"version":"new"})
+
+    assert target.read_text(encoding="utf-8")=='{"version":"old"}\n'
+    assert list(tmp_path.glob("*.tmp"))==[]
 
 
 def test_network_adb_serial_makes_windows_safe_profile(tmp_path):

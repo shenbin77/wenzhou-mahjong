@@ -133,3 +133,17 @@ def test_live_window_child_is_counted(monkeypatch, tmp_path):
         assert existing_window_pids("emulator-5556").get("emulator-5599") == child.pid
     finally:
         _reap(child)
+
+
+def test_tcp_serial_window_child_is_counted(monkeypatch, tmp_path):
+    """Startup handshake supports the TCP serials accepted by profile_paths."""
+    script = tmp_path / "assist_window.py"
+    script.write_text(CHILD_SOURCE, encoding="utf-8")
+    child = _spawn(tmp_path, str(script), "--serial", "127.0.0.1:5555")
+    try:
+        monkeypatch.setattr(
+            "app_entry._assistant_window_pids", lambda: {child.pid})
+        assert existing_window_pids("emulator-5556").get(
+            "127.0.0.1:5555") == child.pid
+    finally:
+        _reap(child)

@@ -34,9 +34,93 @@ def tray_action_for_mouse_message(message: int) -> str | None:
     """Map a Win32 tray mouse message to a product action."""
     if win32con is None:
         return None
-    if message == win32con.WM_LBUTTONUP:
+    event = tray_mouse_event(message)
+    if event in (win32con.WM_LBUTTONUP, win32con.WM_LBUTTONDBLCLK):
         return TRAY_ACTION_RESTORE
     return None
+
+
+def tray_mouse_event(lparam: int) -> int:
+    """Return the notification event from legacy or NOTIFYICON_VERSION_4 data.
+
+    Explorer historically placed the mouse message directly in ``lParam``.
+    Newer shells may pack the event into its low word and the icon id into the
+    high word.  Reading only the full integer makes the overflow-panel icon
+    appear dead even though its callback reached us.
+    """
+    return int(lparam) & 0xFFFF
+
+
+def tray_message_opens_menu(message: int) -> bool:
+    """Accept both legacy right-button-up and modern context-menu callbacks."""
+    if win32con is None:
+        return False
+    event = tray_mouse_event(message)
+    return event in {
+        win32con.WM_RBUTTONUP,
+        getattr(win32con, "WM_CONTEXTMENU", 0x007B),
+    }
+
+
+def tray_menu_anchor(wparam: int) -> tuple[int, int] | None:
+    """Decode the signed screen point supplied by NOTIFYICON_VERSION_4."""
+    raw = int(wparam)
+    x = raw & 0xFFFF
+    y = (raw >> 16) & 0xFFFF
+    x = x - 0x10000 if x & 0x8000 else x
+    y = y - 0x10000 if y & 0x8000 else y
+    return None if (x, y) == (-1, -1) else (x, y)
+
+
+def _set_notify_version_4(hwnd: int, icon_id: int) -> None:
+    """Tell Explorer to use the documented v4 tray callback contract."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Guid(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class _TimeoutVersion(ctypes.Union):
+        _fields_ = [("uTimeout", wintypes.UINT),
+                    ("uVersion", wintypes.UINT)]
+
+    class _NotifyIconDataW(ctypes.Structure):
+        _anonymous_ = ("timeout_or_version",)
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("hWnd", wintypes.HWND),
+            ("uID", wintypes.UINT),
+            ("uFlags", wintypes.UINT),
+            ("uCallbackMessage", wintypes.UINT),
+            ("hIcon", wintypes.HICON),
+            ("szTip", wintypes.WCHAR * 128),
+            ("dwState", wintypes.DWORD),
+            ("dwStateMask", wintypes.DWORD),
+            ("szInfo", wintypes.WCHAR * 256),
+            ("timeout_or_version", _TimeoutVersion),
+            ("szInfoTitle", wintypes.WCHAR * 64),
+            ("dwInfoFlags", wintypes.DWORD),
+            ("guidItem", _Guid),
+            ("hBalloonIcon", wintypes.HICON),
+        ]
+
+    data = _NotifyIconDataW()
+    data.cbSize = ctypes.sizeof(data)
+    data.hWnd = hwnd
+    data.uID = int(icon_id)
+    data.uVersion = 4  # NOTIFYICON_VERSION_4
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.Shell_NotifyIconW.argtypes = [
+        wintypes.DWORD, ctypes.POINTER(_NotifyIconDataW)]
+    shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+    if not shell32.Shell_NotifyIconW(4, ctypes.byref(data)):  # NIM_SETVERSION
+        raise OSError(ctypes.get_last_error(),
+                      "Shell_NotifyIconW(NIM_SETVERSION) failed")
 
 
 class WindowsTrayIcon:
@@ -61,6 +145,7 @@ class WindowsTrayIcon:
         self._hicon = None
         self._notify_data = None
         self._registered = False
+        self._version4 = False
         self._last_error: str | None = None
         if win32con is not None:
             self._wm_tray = win32con.WM_USER + 20
@@ -223,6 +308,15 @@ class WindowsTrayIcon:
         assert win32con is not None
         self._notify_data = self._notification_data()
         win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, self._notify_data)
+        try:
+            _set_notify_version_4(int(self._hwnd), self._ICON_ID)
+        except Exception:
+            # Without v4 Explorer is not required to emit WM_CONTEXTMENU or
+            # packed callbacks, so claiming a working Win11 menu would be false.
+            self._delete_icon()
+            self._version4 = False
+            raise
+        self._version4 = True
 
     def _delete_icon(self) -> None:
         if self._notify_data is None or win32gui is None or win32con is None:
@@ -232,6 +326,7 @@ class WindowsTrayIcon:
         except Exception:  # noqa: BLE001 - Explorer may already be gone
             pass
         self._notify_data = None
+        self._version4 = False
 
     def _on_tooltip_message(self, _hwnd, _msg, _wparam, _lparam):
         assert win32gui is not None
@@ -252,11 +347,15 @@ class WindowsTrayIcon:
         action = tray_action_for_mouse_message(int(lparam))
         if action is not None:
             self._emit(action)
-        elif int(lparam) == win32con.WM_RBUTTONUP:
-            self._show_menu(hwnd)
+        elif tray_message_opens_menu(int(lparam)):
+            event = tray_mouse_event(int(lparam))
+            context = getattr(win32con, "WM_CONTEXTMENU", 0x007B)
+            position = tray_menu_anchor(int(_wparam)) if event == context else None
+            self._show_menu(hwnd, position=position)
         return 0
 
-    def _show_menu(self, hwnd: int) -> None:
+    def _show_menu(self, hwnd: int, *,
+                   position: tuple[int, int] | None = None) -> None:
         assert win32gui is not None
         assert win32con is not None
         menu = win32gui.CreatePopupMenu()
@@ -266,7 +365,7 @@ class WindowsTrayIcon:
             win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, None)
             win32gui.AppendMenu(
                 menu, win32con.MF_STRING, self._COMMAND_QUIT, "退出程序")
-            x, y = win32gui.GetCursorPos()
+            x, y = position if position is not None else win32gui.GetCursorPos()
             win32gui.SetForegroundWindow(hwnd)
             command = win32gui.TrackPopupMenu(
                 menu,
@@ -305,4 +404,7 @@ __all__ = [
     "TRAY_MENU_ITEMS",
     "WindowsTrayIcon",
     "tray_action_for_mouse_message",
+    "tray_message_opens_menu",
+    "tray_menu_anchor",
+    "tray_mouse_event",
 ]

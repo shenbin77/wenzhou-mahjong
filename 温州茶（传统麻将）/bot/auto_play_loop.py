@@ -1246,6 +1246,20 @@ class AutoPlayLoop:
             invitation_event["event"] = "invitation_declined"
             invitation_event["reason"] = "已点矩形取消并验证邀请文案消失"
             return self._event(invitation_event)
+        # 精确促销弹窗必须在换局、行动行、牌河与识牌之前仲裁。2026-10-26
+        # 23:46 真帧证明：弹窗会把 HUD 持续读成 round_suspect；若把本通道
+        # 放在换局早退之后，循环会永远停在“等待第二帧确认”，实际已验证的
+        # 关闭 X 根本没有执行机会。这里只消费专用 promo_popup 指纹；“使用”
+        # 与洗牌/切牌仍在永久黑名单中，且本帧不进入任何牌局状态机。
+        promo_base = {
+            "ts": datetime.now().astimezone().isoformat(),
+            "event": "idle", "round_seq": self.round.seq,
+            "frame": str(frame_path),
+        }
+        promo_event = self._promo_dismiss_event(
+            image, frame_path, promo_base, started)
+        if promo_event is not None:
+            return promo_event
         transition_event = self._round_transition_event(image, frame_path)
         if transition_event is not None:
             return transition_event
@@ -1514,18 +1528,6 @@ class AutoPlayLoop:
                 ),
             })
         self._unknown_caishen_ticks = 0
-        # 促销弹窗（「限时优惠」）盖住整屏：必须比回合门禁、牌局结束更早判。
-        # 弹窗在，下面所有读数（回合所有权、财神、牌河）都是弹窗上的像素。
-        # 不只是"读了也没用"——门禁在弹窗帧上求值会有两个真后果：
-        #   1. verdict.state == "blocked" 时 self.turn_history.clear()，
-        #      连续帧历史白丢一次，弹窗关掉后要从零重新攒稳定帧；
-        #   2. blocked 分支直接 self._stop("gate_turn")，等于一遇到弹窗就把
-        #      整场打停，比"等弹窗关掉"糟得多。
-        # 所以只要弹窗在屏（含"命中但落点不可信"），本帧都不进回合门禁。
-        promo_event = self._promo_dismiss_event(
-            image, frame_path, base, started)
-        if promo_event is not None:
-            return promo_event
         # 门禁三：回合所有权。dry_run 与真点都必须先过这一关，台账逐帧留证。
         verdict = self._evaluate_turn_gate(
             result, image, record=not changed_round)
@@ -1859,10 +1861,10 @@ class AutoPlayLoop:
                              base: dict, started: float) -> dict | None:
         """促销弹窗（「限时优惠」）→ 关掉右上角菱形 ❌。
 
-        调用点刻意放在牌局结束、**回合门禁求值之前**：弹窗一旦在屏，它下面
-        的一切读数（回合所有权、财神、牌河）都不可信，先关再判。门禁若在这
-        种帧上求值，判 ``blocked`` 会既清 ``turn_history`` 又直接停手，所以
-        只要弹窗在屏，本帧一律不进门禁；台账行里写
+        调用点刻意放在换局、牌河、行动行、识牌和**回合门禁求值之前**：
+        弹窗一旦在屏，它下面的一切读数都不可信，先关再判。否则它会把 HUD
+        持续读成 ``round_suspect`` 并在到达本通道前早退。只要弹窗在屏，
+        本帧一律不进入牌局状态机；台账行里写
         ``turn_gate_skipped`` 留证"门禁没看过这一帧"。
 
         三条出口：

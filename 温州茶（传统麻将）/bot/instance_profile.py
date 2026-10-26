@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import re
 import hashlib
+import json
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 SERIAL_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{1,127}$")
+ASSISTANT_STATE_SCHEMA = "assistant_state/v1"
 
 
 def safe_serial(serial: str) -> str:
@@ -25,6 +29,7 @@ class ProfilePaths:
     binding: Path
     account: Path
     geometry: Path
+    assistant_state: Path
 
 
 def profile_paths(base: Path, serial: str) -> ProfilePaths:
@@ -36,7 +41,8 @@ def profile_paths(base: Path, serial: str) -> ProfilePaths:
     profile = Path(base) / "profiles" / folder
     return ProfilePaths(safe, profile / "binding.json",
                         profile / "last_account.txt",
-                        profile / "window_state.json")
+                        profile / "window_state.json",
+                        profile / "assistant_state.json")
 
 
 def read_binding_for_serial(path: Path, serial: str):
@@ -53,3 +59,74 @@ def read_binding_for_serial(path: Path, serial: str):
     if not str(data.get("account") or "").strip():
         return None
     return data
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    """Replace one small profile JSON atomically, preserving the old file on crash."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(
+        f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def discover_profile_bindings(base: Path) -> dict[str, dict]:
+    """Return valid saved bindings, rejecting misplaced/cross-serial files."""
+    root = Path(base)
+    found: dict[str, dict] = {}
+    profiles = root / "profiles"
+    if not profiles.is_dir():
+        return found
+    for candidate in profiles.glob("*/binding.json"):
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+            serial = safe_serial(raw.get("serial") if isinstance(raw, dict) else "")
+            expected = profile_paths(root, serial).binding
+            if candidate.resolve() != expected.resolve():
+                continue
+            binding = read_binding_for_serial(candidate, serial)
+        except (OSError, ValueError, TypeError):
+            continue
+        if binding is not None:
+            found[serial] = binding
+    return found
+
+
+def read_assistant_desired_open(base: Path, serial: str, *,
+                                default: bool = False) -> bool:
+    """Read validated lifecycle intent; only a missing legacy file uses default."""
+    safe = safe_serial(serial)
+    path = profile_paths(base, safe).assistant_state
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return bool(default)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if (not isinstance(data, dict)
+            or data.get("schema") != ASSISTANT_STATE_SCHEMA
+            or data.get("serial") != safe
+            or not isinstance(data.get("desired_open"), bool)):
+        return False
+    return bool(data["desired_open"])
+
+
+def set_assistant_desired_open(base: Path, serial: str, desired: bool) -> None:
+    """Persist only UI lifecycle intent; follow/auto-play authorization is excluded."""
+    safe = safe_serial(serial)
+    atomic_write_json(profile_paths(base, safe).assistant_state, {
+        "schema": ASSISTANT_STATE_SCHEMA,
+        "serial": safe,
+        "desired_open": bool(desired),
+    })

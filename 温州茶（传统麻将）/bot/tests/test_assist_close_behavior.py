@@ -150,7 +150,7 @@ def test_close_box_collapses_to_orb_and_never_quits(monkeypatch):
     monkeypatch.setattr(TeaAssistWindow, "collapse_to_floating_orb",
                         lambda self: calls.append("collapse"))
     monkeypatch.setattr(TeaAssistWindow, "quit_app",
-                        lambda self: calls.append("quit"))
+                        lambda self: calls.append("quit") or True)
 
     assert window.on_window_close() == CLOSE_ACTION_COLLAPSE
     assert calls == ["collapse"]
@@ -238,7 +238,7 @@ def test_tray_quit_stops_tick_after_tk_thread_drains_queue(monkeypatch):
     window._tray_actions = Queue()
     calls = []
     monkeypatch.setattr(TeaAssistWindow, "quit_app",
-                        lambda self: calls.append("quit"))
+                        lambda self: calls.append("quit") or True)
     window._tray_actions.put(TRAY_ACTION_QUIT)
     assert window._drain_system_tray_actions() is False
     assert calls == ["quit"]
@@ -273,7 +273,8 @@ def test_structured_quit_acknowledges_acceptance_before_teardown(monkeypatch):
         assist_module, "acknowledge_control",
         lambda received, *, ok, detail="": events.append(
             ("ack", received, ok, detail)))
-    window.quit_app = lambda: events.append(("quit",))
+    window._persist_quit_intent = lambda: (True, "")
+    window.quit_app = lambda **_kwargs: events.append(("quit",)) or True
 
     assert window._process_window_control() is False
     assert events[0][0:3] == ("ack", request, True)
@@ -369,6 +370,38 @@ def test_quit_app_is_idempotent(tmp_path):
     assert window.stopped == 1
     assert window._system_tray.stopped == 1
     assert window.root.destroyed == 1
+
+
+def test_explicit_quit_persists_window_autorecovery_off(tmp_path, monkeypatch):
+    window = _quit_ready_window(tmp_path)
+    window._profile_paths = SimpleNamespace(serial="emulator-5554")
+    writes = []
+    monkeypatch.setattr(
+        assist_module, "set_assistant_desired_open",
+        lambda base, serial, desired: writes.append((base, serial, desired)))
+
+    window.quit_app()
+
+    assert len(writes) == 1
+    assert writes[0][1:] == ("emulator-5554", False)
+
+
+def test_explicit_quit_write_failure_cancels_exit_and_restores_window(
+        tmp_path, monkeypatch):
+    window = _quit_ready_window(tmp_path)
+    window._profile_paths = SimpleNamespace(serial="emulator-5554")
+    window.status = _Value()
+    restored = []
+    window.restore_from_floating_orb = lambda: restored.append(True)
+    monkeypatch.setattr(
+        assist_module, "set_assistant_desired_open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+
+    assert window.quit_app() is False
+    assert window.root.destroyed == 0
+    assert window.stopped == 0
+    assert restored == [True]
+    assert "已取消退出" in window.status.get()
 
 
 def test_close_alias_still_quits(tmp_path):

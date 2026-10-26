@@ -50,7 +50,9 @@ from tea_bot import tile_name, vision_to_engine
 from mode_vision import detect_shu_rule_text, score_tea_player_count
 from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
-from instance_profile import profile_paths, read_binding_for_serial, safe_serial
+from instance_profile import (atomic_write_json, profile_paths,
+                              read_binding_for_serial, safe_serial,
+                              set_assistant_desired_open)
 from device_connection import DeviceConnection, verify_device
 from player_identity import PlayerIdentity, detect_player_identity
 from system_tray import (TRAY_ACTION_QUIT, TRAY_ACTION_RESTORE,
@@ -241,8 +243,7 @@ def load_window_state(path: Path | None = None) -> dict:
 def save_window_state(state: dict, path: Path | None = None) -> None:
     target = Path(path) if path is not None else WINDOW_STATE_PATH
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(target, state)
     except OSError:
         pass
 
@@ -269,9 +270,7 @@ def save_binding(binding: dict, path: Path | None = None) -> bool:
     """Persist the binding snapshot; returns False when the write fails."""
     target = Path(path) if path is not None else BINDING_PATH
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(binding, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(target, binding)
     except OSError:
         return False
     return True
@@ -654,6 +653,16 @@ class TeaAssistWindow:
         # Closing the main window hides it into the tray + mascot orb instead
         # of exiting: following/logging/auto-play keep running there.
         self._bind_window_close_protocol()
+        # Only a fully constructed window may request crash recovery.  Writing
+        # this at the start of __init__ created a 3-second restart loop when Tk
+        # crashed halfway through construction.  This never restores follow or
+        # auto-play authority.
+        try:
+            set_assistant_desired_open(
+                TEA_ROOT / "采集" / "assist_sessions",
+                self._profile_paths.serial, True)
+        except OSError:
+            pass
 
     # -- window close semantics -------------------------------------------
     def _bind_window_close_protocol(self) -> None:
@@ -2707,8 +2716,7 @@ class TeaAssistWindow:
             if action == TRAY_ACTION_RESTORE:
                 self.restore_from_floating_orb()
             elif action == TRAY_ACTION_QUIT:
-                self.quit_app()
-                return False
+                return not self.quit_app()
 
     def _ready(self, pending: str | None = None) -> bool:
         """Start gate: binding + visual player identity + table-mode check.
@@ -4403,9 +4411,12 @@ class TeaAssistWindow:
                 acknowledge_control(request, ok=True, detail="restored")
                 return True
             if request.command == "quit":
+                ok, detail = self._persist_quit_intent()
+                if not ok:
+                    acknowledge_control(request, ok=False, detail=detail)
+                    return True
                 acknowledge_control(request, ok=True, detail="accepted")
-                self.quit_app()
-                return False
+                return not self.quit_app(intent_persisted=True)
             raise ValueError(
                 f"unsupported UI control command: {request.command!r}")
         except Exception as exc:  # noqa: BLE001 - report command failure via ACK
@@ -5181,14 +5192,37 @@ class TeaAssistWindow:
         """
         self.quit_app()
 
-    def quit_app(self) -> None:
+    def _persist_quit_intent(self) -> tuple[bool, str]:
+        """Persist explicit exit before teardown so the manager cannot revive it."""
+        profile = getattr(self, "_profile_paths", None)
+        if profile is None:  # Offline/minimal harnesses have no persisted profile.
+            return True, ""
+        try:
+            set_assistant_desired_open(
+                TEA_ROOT / "采集" / "assist_sessions",
+                profile.serial, False)
+        except OSError as exc:
+            return False, f"无法保存退出状态，已取消退出：{type(exc).__name__}: {exc}"
+        return True, ""
+
+    def quit_app(self, *, intent_persisted: bool = False) -> bool:
         """Really exit the assistant: stop work, flush logs, destroy the root.
 
         Reached only through explicit entry points: the tray/orb context menu
         and the main window's 更多 menu.
         """
         if getattr(self, "_quitting", False):
-            return
+            return True
+        if not intent_persisted:
+            persisted, detail = self._persist_quit_intent()
+            if not persisted:
+                status = getattr(self, "status", None)
+                if status is not None:
+                    status.set(detail)
+                restore = getattr(self, "restore_from_floating_orb", None)
+                if callable(restore):
+                    restore()
+                return False
         self._quitting = True
         self._cancel_accepted_round_observation()
         self._destroy_floating_orb()
@@ -5248,6 +5282,7 @@ class TeaAssistWindow:
         if check_executor is not None:
             check_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
+        return True
 
 
 #: Whether ``adb_runtime`` is importable in this checkout.  Importing the

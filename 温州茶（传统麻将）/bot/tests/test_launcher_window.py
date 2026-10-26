@@ -9,6 +9,17 @@ import pytest
 import launcher_window as manager
 from instance_profile import profile_paths
 
+WAIT_FOR_STARTED_WINDOW = manager._wait_for_started_window
+
+
+@pytest.fixture(autouse=True)
+def _isolate_lifecycle_state(monkeypatch):
+    """Launcher unit tests must never touch the operator's real profile state."""
+    monkeypatch.setattr(
+        manager, "set_assistant_desired_open", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        manager, "_wait_for_started_window", lambda *_args, **_kwargs: None)
+
 
 def test_collect_device_rows_keeps_each_local_binding_separate(tmp_path, monkeypatch):
     serials = ["emulator-5554", "emulator-5556"]
@@ -30,6 +41,28 @@ def test_collect_device_rows_keeps_each_local_binding_separate(tmp_path, monkeyp
     ]
 
 
+def test_collect_device_rows_keeps_saved_binding_visible_while_offline(
+        tmp_path, monkeypatch):
+    offline = profile_paths(tmp_path, "emulator-5556").binding
+    offline.parent.mkdir(parents=True)
+    offline.write_text(json.dumps({
+        "serial": "emulator-5556", "account": "烘熊瞎", "mode": "tea_2p",
+    }), encoding="utf-8")
+    monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
+    monkeypatch.setattr(manager, "connected_devices",
+                        lambda _adb: ["emulator-5554"])
+    monkeypatch.setattr(manager, "existing_window_pids", lambda _default: {})
+
+    rows = manager.collect_device_rows(base=tmp_path)
+
+    assert rows == [
+        manager.DeviceRow("emulator-5554", None, None, None,
+                          online=True, desired_open=False),
+        manager.DeviceRow("emulator-5556", "烘熊瞎", "tea_2p", None,
+                          online=False, desired_open=True),
+    ]
+
+
 def test_open_existing_device_restores_without_starting(monkeypatch):
     requested = []
     monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
@@ -48,11 +81,25 @@ def test_open_existing_device_restores_without_starting(monkeypatch):
 def test_open_offline_device_refuses_start(monkeypatch):
     monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
     monkeypatch.setattr(manager, "connected_devices", lambda _adb: [])
+    monkeypatch.setattr(manager, "existing_window_pids", lambda _default: {})
     monkeypatch.setattr(manager, "start_window",
                         lambda _serial: pytest.fail("offline assistant started"))
 
     with pytest.raises(RuntimeError, match="已离线"):
         manager.open_or_restore("emulator-5554")
+
+
+def test_existing_assistant_can_be_restored_while_emulator_is_offline(monkeypatch):
+    requested = []
+    monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
+    monkeypatch.setattr(manager, "connected_devices", lambda _adb: [])
+    monkeypatch.setattr(manager, "existing_window_pids",
+                        lambda _default: {"emulator-5554": 1200})
+    monkeypatch.setattr(manager, "_request_confirmed",
+                        lambda serial, command: requested.append((serial, command)))
+
+    assert manager.open_or_restore("emulator-5554") == ("restored", 1200)
+    assert requested == [("emulator-5554", "restore")]
 
 
 def test_open_free_online_device_starts_one_ui(monkeypatch):
@@ -65,6 +112,38 @@ def test_open_free_online_device_starts_one_ui(monkeypatch):
 
     assert manager.open_or_restore("emulator-5556") == ("started", 1300)
     assert launched == ["emulator-5556"]
+
+
+def test_started_window_requires_matching_pid_and_control_ack(monkeypatch):
+    process = SimpleNamespace(pid=1300, poll=lambda: None)
+    scans = iter([{}, {"emulator-5554": 1300}])
+    requested = []
+    monkeypatch.setattr(
+        manager, "_wait_for_started_window",
+        WAIT_FOR_STARTED_WINDOW)
+    monkeypatch.setattr(
+        manager, "existing_window_pids", lambda _default: next(scans))
+    monkeypatch.setattr(
+        manager, "_request_confirmed",
+        lambda serial, command, timeout: requested.append(
+            (serial, command, timeout)))
+    monkeypatch.setattr(manager.time, "sleep", lambda _seconds: None)
+
+    manager._wait_for_started_window("emulator-5554", process, timeout=1.0)
+
+    assert requested and requested[0][:2] == ("emulator-5554", "restore")
+
+
+def test_started_window_early_exit_is_reported(monkeypatch):
+    process = SimpleNamespace(pid=1300, poll=lambda: 2)
+    monkeypatch.setattr(
+        manager, "_wait_for_started_window",
+        WAIT_FOR_STARTED_WINDOW)
+    monkeypatch.setattr(manager, "existing_window_pids", lambda _default: {})
+
+    with pytest.raises(RuntimeError, match="窗口就绪前退出"):
+        manager._wait_for_started_window(
+            "emulator-5554", process, timeout=0.1)
 
 
 def test_restore_timeout_is_reported_not_claimed(monkeypatch):
@@ -178,6 +257,17 @@ def test_desktop_activation_with_no_device_waits():
     assert manager.choose_activation_target([]) is None
 
 
+def test_desktop_activation_never_selects_offline_saved_profile():
+    rows = [
+        manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None,
+                          online=False),
+        manager.DeviceRow("emulator-5556", "烘熊瞎", "tea_2p", None,
+                          online=True),
+    ]
+
+    assert manager.choose_activation_target(rows) == rows[1]
+
+
 def test_duplicate_device_operation_is_not_submitted_twice():
     launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
     launcher._closed = False
@@ -229,6 +319,71 @@ def test_no_device_keeps_activation_pending_and_schedules_retry():
     assert launcher._activation_pending is True
     assert scheduled == [True]
     assert "自动等待" in messages[-1]
+
+
+def test_recovery_opens_only_online_bound_desired_profile_once():
+    launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
+    launcher._closed = False
+    launcher._busy_serials = set()
+    launcher._suppressed_autostart = set()
+    launcher._rows = [
+        manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None,
+                          online=True, desired_open=True),
+        manager.DeviceRow("emulator-5556", "烘熊瞎", "tea_2p", None,
+                          online=False, desired_open=True),
+        manager.DeviceRow("emulator-5558", "拾则", "tea_2p", None,
+                          online=True, desired_open=False),
+    ]
+    messages = []
+    launcher.status_var = SimpleNamespace(set=messages.append)
+    opened = []
+    launcher._operate_device = lambda serial, operation: (
+        opened.append((serial, operation)), launcher._busy_serials.add(serial))
+
+    launcher._recover_bound_assistants()
+    launcher._recover_bound_assistants()
+
+    assert opened == [("emulator-5554", "open")]
+    assert "重新上线" in messages[-1]
+
+
+def test_user_quit_suppresses_same_process_autorecovery():
+    launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
+    launcher._closed = False
+    launcher._busy_serials = set()
+    launcher._suppressed_autostart = {"emulator-5554"}
+    launcher._rows = [
+        manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None,
+                          online=True, desired_open=True),
+    ]
+    launcher.status_var = SimpleNamespace(set=lambda _value: None)
+    launcher._operate_device = lambda *_args: pytest.fail(
+        "explicitly stopped assistant auto-reopened")
+
+    launcher._recover_bound_assistants()
+
+
+def test_recovery_backoff_and_circuit_breaker_prevent_flash_loop(monkeypatch):
+    launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
+    launcher._closed = False
+    launcher._busy_serials = set()
+    launcher._suppressed_autostart = set()
+    launcher._recovery_inflight = set()
+    launcher._rows = [manager.DeviceRow(
+        "emulator-5554", "玉姐", "tea_2p", None,
+        online=True, desired_open=True)]
+    launcher.status_var = SimpleNamespace(set=lambda _value: None)
+    launcher._operate_device = lambda *_args: pytest.fail(
+        "backoff/circuit-breaker profile was restarted")
+
+    monkeypatch.setattr(manager.time, "monotonic", lambda: 100.0)
+    launcher._recovery_failures = {"emulator-5554": (1, 105.0)}
+    launcher._recover_bound_assistants()
+
+    launcher._recovery_failures = {
+        "emulator-5554": (
+            manager.AUTORECOVERY_FAILURE_BUDGET, float("inf"))}
+    launcher._recover_bound_assistants()
 
 
 def test_incident_watchdog_same_serial_set_is_single_instance():

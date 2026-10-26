@@ -36,3 +36,7 @@ def test_explicit_device_focuses_existing_window():
 
 def test_no_connected_device_fails_closed():
     assert choose_device([], {}) == (None,None)
+
+
+def test_window_title_prefix_does_not_exclude_tcp_adb_serials():
+    assert app_entry.ASSIST_WINDOW_TITLE_PREFIX == "温州麻将辅助器 · "

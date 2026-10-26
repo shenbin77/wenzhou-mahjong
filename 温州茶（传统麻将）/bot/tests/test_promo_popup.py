@@ -66,6 +66,7 @@ def test_popup_frame_publishes_close_center_at_measured_spot():
 
     assert state.present is True
     assert state.struct_ok is True
+    assert state.fingerprint_ok is True
     assert state.close_center is not None, state.reason
     assert state.close_box is not None and len(state.close_box) == 4
     assert state.score >= SCORE_MIN
@@ -83,6 +84,7 @@ def test_popup_frame_ledger_is_json_serializable():
 
     assert json.loads(json.dumps(ledger)) == ledger
     assert ledger["present"] is True
+    assert ledger["fingerprint_ok"] is True
     assert ledger["close_center"] == list(state.close_center)
     assert ledger["close_box"] == list(state.close_box)
 
@@ -139,6 +141,40 @@ def test_grayscale_frame_is_rejected_without_raising():
 
     assert state.present is False
     assert state.close_center is None
+
+
+def test_resized_desktop_frame_is_not_treated_as_native_game_frame():
+    image = cv2.resize(load_frame("p1_5556.png"), (1280, 720))
+
+    state = read_promo_popup(image)
+
+    assert state.present is False
+    assert state.close_center is None
+    assert "1600×900" in state.reason
+
+
+def test_close_x_without_full_promo_panel_never_publishes_a_tap():
+    popup = load_frame("p1_5556.png")
+    table = load_frame("t_5556.png").copy()
+    table[130:250, 1380:1540] = popup[130:250, 1380:1540]
+
+    state = read_promo_popup(table)
+
+    assert state.present is False
+    assert state.close_center is None
+    assert state.fingerprint_ok is False
+
+
+def test_full_panel_with_unreadable_x_still_consumes_frame_without_click():
+    image = load_frame("p1_5556.png").copy()
+    image[120:260, 1380:1540] = 0
+
+    state = read_promo_popup(image)
+
+    assert state.present is True
+    assert state.fingerprint_ok is True
+    assert state.close_center is None
+    assert "关闭 X" in state.reason
 
 
 # ----------------------------------------------------------------------

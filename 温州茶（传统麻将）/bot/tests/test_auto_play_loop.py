@@ -35,6 +35,7 @@ if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
 import auto_play_loop  # noqa: E402
+import action_policy as action_policy_module  # noqa: E402
 from auto_play_loop import (  # noqa: E402
     MAX_CONSECUTIVE_ERRORS,
     AutoPlayLoop,
@@ -44,7 +45,10 @@ from auto_play_loop import (  # noqa: E402
     hud_fingerprint,
 )
 from action_guard import ActionGuardResult  # noqa: E402
-from action_policy import ACTION_PASS, ActionDecision, BoardState  # noqa: E402
+from action_policy import (  # noqa: E402
+    ACTION_HU, ACTION_PASS, ActionDecision, ActionPolicyConfig, BoardState,
+)
+from claim_vision import ClaimButton, ClaimState  # noqa: E402
 from harvest_tea import EXPECTED_PACKAGE  # noqa: E402
 from invite_dialog import InvitationState  # noqa: E402
 from match_score import MatchScoreState, read_match_score  # noqa: E402
@@ -1454,6 +1458,47 @@ def test_claim_auto_click_executes_and_l3_verifies_pass(tmp_path, monkeypatch):
     assert len(tap.execute_claim_calls) == 1
     assert tap.execute_claim_calls[0]["action"] == ACTION_PASS
     assert loop.actions_done == 1
+
+
+def test_self_draw_hu_with_unknown_caishen_never_reaches_tap(
+        tmp_path, monkeypatch):
+    """17 张看似成胡也必须先确认财神；行动循环不得调用点击器。"""
+    from tea_bot import engine_to_vision
+
+    hand = [21, 2, 2, 3, 3, 5, 5, 41, 41, 42, 42, 46, 73, 73, 25, 25, 41]
+    analysis = {
+        "hand_ids": [engine_to_vision(tile) for tile in hand],
+        "melds": [], "caishen": None, "mode": "tea_2p",
+    }
+    hu = ClaimButton("hu", (1370, 540, 1460, 630), (1415, 585))
+    passed = ClaimButton("pass", (1480, 540, 1570, 630), (1525, 585))
+    monkeypatch.setattr(
+        auto_play_loop, "read_claims",
+        lambda _image: ClaimState(
+            (hu, passed), "hu", "测试胡/过", {}, True))
+    monkeypatch.setattr(
+        action_policy_module, "_l1_evidence",
+        lambda _state, _image, _config: (
+            {"geometry_ok": True,
+             "template_status": action_policy_module.TEMPLATE_STATUS_MATCHED},
+            {0: {"status": action_policy_module.TEMPLATE_STATUS_MATCHED},
+             1: {"status": action_policy_module.TEMPLATE_STATUS_MATCHED}},
+        ))
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, claim_auto_click=True)
+    loop._claim_policy = ActionPolicyConfig(
+        auto_click_enabled=True,
+        confirmed_actions=frozenset({ACTION_HU, ACTION_PASS}),
+        trust_server_hu_button=True,
+        require_template_match=False,
+    )
+
+    event = loop._claim_policy_event(
+        np.zeros((900, 1600, 3), np.uint8), tmp_path / "before.png", analysis)
+
+    assert event["claim"]["status"] == "blocked"
+    assert "禁止胡也禁止自动过" in event["claim"]["blocked_reason"]
+    assert tap.execute_claim_calls == []
 
 
 def test_unique_selection_cancel_is_auto_clicked_without_hand_decision(tmp_path):
@@ -2906,33 +2951,52 @@ def test_no_promo_popup_leaves_the_original_path_untouched(tmp_path,
     assert events_of(loop, "promo_popup_abstain") == []
 
 
-def test_promo_close_budget_resets_on_new_round(tmp_path, monkeypatch):
-    """换局清零同屏预算：新一局的弹窗重新起算，不继承上一局的关闭次数。
+def test_promo_popup_preempts_round_probe_and_suspect_early_return(
+        tmp_path, monkeypatch):
+    """促销层先于换局层；真帧不能再被 round_suspect 永久截走。
 
-    弹窗全程在屏（这样"没弹窗就清零"那条路径不会掩盖换局清零）：
-    第一局关 1 次 → 换局帧清零 → 换局帧自己再关 1 次，所以计数停在 1
-    而不是 2。中间那帧是 round_suspect，门禁禁止任何点击。
+    2026-10-26 23:46 的 5554 真帧连续写了数十条 round_suspect，虽然
+    promo 识别器能以 0.9646 命中关闭 X，旧顺序却永远到不了 promo 通道。
+    本测试把换局探针设为“调用即失败”，钉住覆盖层的结构优先级。
     """
     monkeypatch.setattr(auto_play_loop, "read_promo_popup",
                         lambda _image: promo_present())
-    loop, _shot, _analyzer, tap, _ = make_loop(
-        tmp_path, enabled=True,
-        analyses=[advise(status="wait", suggested_boxes=[])],
-        hud=[(HUD_A, None), (HUD_B, None), (HUD_B, None)])
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    monkeypatch.setattr(
+        loop, "_probe_round_key",
+        lambda *_args, **_kwargs: pytest.fail(
+            "promo frame reached round identity probe"),
+    )
+
+    event = loop.tick()
+
+    assert event["event"] == "popup_dismiss"
+    assert event["turn_gate_skipped"] == "promo_popup_on_screen"
+    assert loop.round.seq == 1
+    assert loop._promo_close_count == 1
+    assert len(tap.execute_close_popup_calls) == 1
+    assert loop.stopped is False
+
+
+def test_promo_close_budget_resets_after_a_clear_frame(tmp_path, monkeypatch):
+    """同一弹窗有界重试；弹窗确实消失后下一次重新起算。"""
+    popup_on = {"value": True}
+    monkeypatch.setattr(
+        auto_play_loop, "read_promo_popup",
+        lambda _image: promo_present() if popup_on["value"] else promo_absent())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
     assert loop.tick()["event"] == "popup_dismiss"
     assert loop._promo_close_count == 1
-    assert loop.round.seq == 1
 
-    suspect = loop.tick()
-    assert suspect["round_signal"]["state"] == "round_suspect"
-    assert loop._promo_close_count == 1          # 疑似换局帧：零点击
+    popup_on["value"] = False
+    loop.tick()
+    assert loop._promo_close_count == 0
 
+    popup_on["value"] = True
     assert loop.tick()["event"] == "popup_dismiss"
-    assert loop.round.seq == 2
-    assert loop._promo_close_count == 1          # 换局已清零，不继承上一局
+    assert loop._promo_close_count == 1
     assert len(tap.execute_close_popup_calls) == 2
-    assert loop.stopped is False
 
 
 # ---------------------------------------------------------------------------

@@ -116,6 +116,12 @@ NO_CLAIM_HAND = HandState(concealed=(1, 1, 2, 4, 5, 6, 7, 8, 9,
 HU_HAND = HandState(concealed=(1, 1, 2, 3, 4, 5, 6, 7, 8, 9,
                                21, 22, 23, 41, 42, 43),
                     incoming_tile=1, incoming_source="opponent", player_count=2, source="test")
+# 2026-10-26 房 644469 真帧：闭手 17 张、无外部来牌，服务端显示“胡/过”；
+# 财神一筒（21）参与软八对。此前等待态张数门禁把 17 误判为不守恒并点了过。
+SELF_DRAW_HU_HAND = HandState(
+    concealed=(21, 2, 2, 3, 3, 5, 5, 41, 41, 42, 42, 46, 73, 73, 25, 25, 41),
+    caishen=21, incoming_tile=None, incoming_source=None,
+    player_count=2, source="live_room_644469_20261026_231353")
 #: 手里三张 → 碰与杠同时可行（没有字形模板时不可分辨）。
 KONG_HAND = HandState(concealed=(1, 1, 1, 2, 4, 5, 6, 7, 8, 9,
                                  21, 22, 23, 41, 42, 43),
@@ -330,6 +336,39 @@ def test_hu_requires_engine_confirmation() -> None:
     assert decision is not None
     assert decision.action == ACTION_HU
     assert decision.confidence > 0.0
+
+
+def test_closed_self_draw_hu_uses_drawn_count_and_never_passes() -> None:
+    """闭手自摸是 17 张出牌态；引擎判胡时必须点胡，不能按等待态 16 张改点过。"""
+    decision = decide_action(
+        state(hu_button(), pass_button()), SELF_DRAW_HU_HAND, ADVISORY)
+
+    assert decision is not None
+    assert decision.action == ACTION_HU
+    assert decision.needs_human_confirm
+    assert decision.tap_point == GOLD_CENTER
+    assert decision.engine[ACTION_HU]["self_draw"] is True
+    assert "自摸正证据" in decision.l2_reason
+
+
+@pytest.mark.parametrize("hand", [
+    HandState(concealed=SELF_DRAW_HU_HAND.concealed[:-1], caishen=21,
+              incoming_tile=None, incoming_source=None, player_count=2),
+    HandState(concealed=SELF_DRAW_HU_HAND.concealed, caishen=21,
+              incoming_tile=41, incoming_source="self", player_count=2),
+    HandState(concealed=SELF_DRAW_HU_HAND.concealed, caishen=21,
+              incoming_tile=None, incoming_source=None, player_count=2,
+              melds=((1, 2, 3),)),
+    HandState(concealed=SELF_DRAW_HU_HAND.concealed, caishen=None,
+              incoming_tile=None, incoming_source=None, player_count=2),
+    HandState(concealed=SELF_DRAW_HU_HAND.concealed, caishen=21,
+              incoming_tile=None, incoming_source=None, player_count=None),
+    HandState(concealed=SELF_DRAW_HU_HAND.concealed, caishen=21,
+              incoming_tile=None, incoming_source=None, player_count=4),
+])
+def test_self_draw_hu_exception_stays_fail_closed_outside_exact_shape(hand) -> None:
+    report = ap.evaluate_claim_candidates(hand, ADVISORY)
+    assert not report[ACTION_HU]["feasible"]
 
 
 def test_hu_button_without_engine_confirmation_is_blocked() -> None:

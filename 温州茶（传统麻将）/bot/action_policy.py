@@ -28,7 +28,9 @@ fail-closed
 -----------
 * 读不出按钮 → 返回 ``None``（连"过"都不点）。
 * 出现 ``取消`` → 返回 ``None``（点取消会不可逆地中断进行中的选择）。
-* 引擎不可用 / 手牌张数不守恒 / 来牌未知 → 只可能产出"过"，绝不猜碰吃杠胡。
+* 引擎不可用 / 手牌张数不守恒 / 来牌未知 → 只可能产出"过"，绝不猜碰吃杠胡；
+  唯一例外是闭手自摸态：比等待态恰多 1 张、无外部来牌、副露为空且引擎对
+  当前整手明确判胡时，允许把已通过 L1 的服务端“胡”盘交给 L3 复核。
 * 黑名单（:data:`COST_BUTTONS`，含写死的 ``洗牌`` 房卡×2、``切牌`` 房卡×4）
   命中 → 永不产出动作。
 
@@ -1490,7 +1492,9 @@ def evaluate_claim_candidates(hand: HandState,
         "delta", "improves", "concealed_after", "melds_after", "options"}}``。
 
         ``feasible`` 为 ``False`` 时 ``why`` 给出中文原因；引擎不可用、
-        手牌不守恒或来牌未知时，吃碰杠胡一律 ``feasible=False``。
+        手牌不守恒或来牌未知时，吃碰杠胡一律 ``feasible=False``。唯一例外
+        是闭手自摸：当前整手比等待态恰多 1 张、没有外部来牌/来源、副露为空，
+        且引擎明确判胡时只放行 ``hu``；碰/杠/吃仍保持 ``False``。
     """
     blank: dict[str, Any] = {
         "feasible": False, "why": "", "shanten_before": None,
@@ -1505,13 +1509,44 @@ def evaluate_claim_candidates(hand: HandState,
         for action in CLAIM_ACTIONS:
             report[action]["why"] = "算牌引擎不可用，L2 无法验证，弃权"
         return report
-    if not isinstance(hand, HandState) or not hand.is_valid:
+    if not isinstance(hand, HandState):
         for action in CLAIM_ACTIONS:
-            report[action]["why"] = (
-                f"手牌张数不守恒（闭手{len(hand.concealed)}，副露{len(hand.melds)}组/"
-                f"逻辑{hand.logical_meld_slots}张，等待态应为 "
-                f"{hand.concealed_expected}），L2 弃权"
-                if isinstance(hand, HandState) else "手牌状态缺失，L2 弃权")
+            report[action]["why"] = "手牌状态缺失，L2 弃权"
+        return report
+    if not hand.is_valid:
+        # 自摸胡发生在我方刚摸牌后的“出牌态”：闭手比等待态恰多一张，
+        # 因而不能拿等待态的 is_valid（16-3×副露）直接否决。只对当前已
+        # 实机复现并能由引擎独立确认的闭手自摸开放；有副露、存在来牌或
+        # 来源标记、张数不是 +1 时全部保持原 fail-closed。
+        self_draw_shape = (
+            not hand.melds
+            and len(hand.concealed) == hand.concealed_expected + 1
+            and hand.incoming_tile is None
+            and hand.incoming_source is None
+            and hand.caishen is not None
+            and hand.player_count == 2
+        )
+        self_draw_hu = False
+        if self_draw_shape:
+            try:
+                self_draw_hu = bool(engine["is_hu"](
+                    list(hand.concealed), caishen_id=hand.caishen))
+            except Exception:  # noqa: BLE001 - 引擎拒答即不可判定
+                self_draw_hu = False
+        invalid_reason = (
+            f"手牌张数不守恒（闭手{len(hand.concealed)}，副露{len(hand.melds)}组/"
+            f"逻辑{hand.logical_meld_slots}张，等待态应为 "
+            f"{hand.concealed_expected}），L2 弃权"
+        )
+        for action in CLAIM_ACTIONS:
+            report[action]["why"] = invalid_reason
+        if self_draw_hu:
+            report[ACTION_HU].update({
+                "feasible": True,
+                "why": "闭手自摸正证据：出牌态比等待态多 1 张，当前整手经引擎判胡",
+                "shanten_before": -1,
+                "self_draw": True,
+            })
         return report
     tile = hand.incoming_tile
     if tile is None:
@@ -1923,6 +1958,24 @@ def decide_action(
                 ACTION_HU, hu_button, hand.incoming_tile, cfg,
                 evidence, override, report,
                 l2=override["why"], template_status=hu_status)
+        self_draw_candidate = (
+            not hand.melds
+            and len(hand.concealed) == hand.concealed_expected + 1
+            and hand.incoming_tile is None
+            and hand.incoming_source is None
+        )
+        if self_draw_candidate and (
+                hand.caishen is None or hand.player_count != 2):
+            missing = []
+            if hand.caishen is None:
+                missing.append("财神未确认")
+            if hand.player_count != 2:
+                missing.append("茶2人数未确认")
+            reason = "、".join(missing)
+            return _blocked(
+                claim_state, image, cfg,
+                f"自摸胡候选缺少安全门（{reason}），禁止胡也禁止自动过",
+                l2_reason=info["why"], engine=report)
         # A visible 胡 disc must never be guessed when L2 cannot prove it.
         # But leaving a verified 过 disc untouched stalls the table forever.
         # In live auto mode the conservative action is to decline the whole

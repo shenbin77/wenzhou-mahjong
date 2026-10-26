@@ -10,7 +10,7 @@ from pathlib import Path
 from instance_profile import safe_serial
 
 ASSIST_SCRIPT_NAME = "assist_window.py"
-ASSIST_WINDOW_TITLE_PREFIX = "温州麻将辅助器 · emulator-"
+ASSIST_WINDOW_TITLE_PREFIX = "温州麻将辅助器 · "
 
 
 def _runs_assist_window(argv: object) -> bool:

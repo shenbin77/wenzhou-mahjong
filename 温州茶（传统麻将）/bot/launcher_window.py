@@ -19,7 +19,9 @@ from adb_runtime import resolve_adb_path_cached
 from app_entry import (choose_existing_for_restore, existing_window_pids,
                        pid_owns_assist_window)
 from harvest_tea import DEFAULT_SERIAL
-from instance_profile import profile_paths, read_binding_for_serial, safe_serial
+from instance_profile import (discover_profile_bindings,
+                              read_assistant_desired_open, safe_serial,
+                              set_assistant_desired_open)
 from launch_multi import connected_devices, start_window
 from window_restore_signal import (consume_restore, request_control,
                                    request_restore, wait_for_ack)
@@ -32,7 +34,10 @@ MASCOT_PATH = HERE / "assets" / "温州麻将精灵.png"
 MANAGER_SIGNAL = "manager"
 CONTROL_ACK_TIMEOUT_S = 4.0
 PROCESS_EXIT_TIMEOUT_S = 6.0
+STARTUP_READY_TIMEOUT_S = 10.0
 EMPTY_DEVICE_REFRESH_MS = 3000
+AUTORECOVERY_FAILURE_BUDGET = 3
+AUTORECOVERY_BACKOFF_S = (5.0, 30.0)
 MANAGER_MUTEX_NAME = "Local\\WenzhouMahjongAssistantManager"
 LOGS_ROOT = HERE.parent / "采集" / "dev_auto_play"
 INCIDENT_ROOT = HERE.parents[1] / "_incidents" / "tea2"
@@ -53,6 +58,8 @@ class DeviceRow:
     account: str | None
     mode: str | None
     pid: int | None
+    online: bool = True
+    desired_open: bool = True
 
 
 class ManagerInstanceGuard:
@@ -98,16 +105,19 @@ def acquire_manager_instance() -> ManagerInstanceGuard | None:
 
 def choose_activation_target(rows: list[DeviceRow]) -> DeviceRow | None:
     """A desktop activation opens a free serial, else restores one window."""
-    for row in rows:
+    online_rows = [row for row in rows if row.online]
+    for row in online_rows:
         if row.pid is None:
             return row
-    if not rows:
+    restore_rows = online_rows or [row for row in rows if row.pid is not None]
+    if not restore_rows:
         return None
     serial, _pid = choose_existing_for_restore(
-        [row.serial for row in rows],
-        {row.serial: row.pid for row in rows if row.pid is not None},
+        [row.serial for row in restore_rows],
+        {row.serial: row.pid for row in restore_rows if row.pid is not None},
     )
-    return next((row for row in rows if row.serial == serial), rows[0])
+    return next((row for row in restore_rows if row.serial == serial),
+                restore_rows[0])
 
 
 def build_incident_watchdog(serials: tuple[str, ...]):
@@ -131,18 +141,25 @@ def _adb_path() -> str:
 
 
 def collect_device_rows(*, base: Path = PROFILE_BASE) -> list[DeviceRow]:
-    """Read one device/process/profile snapshot without touching game state."""
-    devices = connected_devices(_adb_path())
+    """Merge online devices with crash-safe saved profiles; never hide settings."""
+    devices = set(connected_devices(_adb_path()))
+    bindings = discover_profile_bindings(base)
     occupied = existing_window_pids(DEFAULT_SERIAL)
     rows: list[DeviceRow] = []
-    for serial in devices:
-        profile = profile_paths(base, serial)
-        binding = read_binding_for_serial(profile.binding, serial)
+    serials = sorted(devices | set(bindings),
+                     key=lambda value: (value not in devices, value))
+    for serial in serials:
+        binding = bindings.get(serial)
         rows.append(DeviceRow(
             serial=serial,
             account=str(binding["account"]).strip() if binding else None,
             mode=str(binding.get("mode") or "") if binding else None,
             pid=occupied.get(serial),
+            online=serial in devices,
+            # Existing bindings predate assistant_state/v1. Preserve the old
+            # user expectation that their window should return after a crash.
+            desired_open=read_assistant_desired_open(
+                base, serial, default=binding is not None),
         ))
     return rows
 
@@ -150,14 +167,38 @@ def collect_device_rows(*, base: Path = PROFILE_BASE) -> list[DeviceRow]:
 def open_or_restore(serial: str) -> tuple[str, int]:
     """Recheck online state and ownership immediately before acting."""
     serial = safe_serial(serial)
-    if serial not in connected_devices(_adb_path()):
-        raise RuntimeError(f"{serial} 已离线，未启动辅助器")
     pid = existing_window_pids(DEFAULT_SERIAL).get(serial)
     if pid is not None:
         _request_confirmed(serial, "restore")
+        set_assistant_desired_open(PROFILE_BASE, serial, True)
         return "restored", pid
+    if serial not in connected_devices(_adb_path()):
+        raise RuntimeError(f"{serial} 已离线，设置已保留，未启动辅助器")
     process = start_window(serial)
+    _wait_for_started_window(serial, process)
+    set_assistant_desired_open(PROFILE_BASE, serial, True)
     return "started", int(process.pid)
+
+
+def _wait_for_started_window(serial: str, process, *,
+                             timeout: float = STARTUP_READY_TIMEOUT_S) -> None:
+    """Require a real Tk window and responsive control loop after spawning."""
+    serial = safe_serial(serial)
+    pid = int(process.pid)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while time.monotonic() < deadline:
+        if existing_window_pids(DEFAULT_SERIAL).get(serial) == pid:
+            remaining = max(0.05, deadline - time.monotonic())
+            _request_confirmed(
+                serial, "restore", timeout=min(CONTROL_ACK_TIMEOUT_S, remaining))
+            return
+        poll = getattr(process, "poll", None)
+        if callable(poll) and poll() is not None:
+            raise RuntimeError(
+                f"{serial} 辅助器 PID {pid} 在窗口就绪前退出；已停止自动重试")
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"{serial} 辅助器 PID {pid} 在 {timeout:g} 秒内未完成启动握手")
 
 
 def _request_confirmed(serial: str, command: str, *,
@@ -197,6 +238,7 @@ def quit_assistant(serial: str) -> tuple[str, int]:
         raise RuntimeError(
             f"{serial} 已确认退出请求，但 PID {pid} 在 "
             f"{PROCESS_EXIT_TIMEOUT_S:g} 秒内仍未退出；未强制结束")
+    set_assistant_desired_open(PROFILE_BASE, serial, False)
     return "stopped", pid
 
 
@@ -208,12 +250,16 @@ def restart_assistant(serial: str) -> tuple[str, int]:
     pid = existing_window_pids(DEFAULT_SERIAL).get(serial)
     if pid is None:
         process = start_window(serial)
+        _wait_for_started_window(serial, process)
+        set_assistant_desired_open(PROFILE_BASE, serial, True)
         return "started", int(process.pid)
     _request_confirmed(serial, "quit")
     if not _wait_for_window_exit(pid):
         raise RuntimeError(
             f"{serial} 旧窗口 PID {pid} 未按时退出；为避免双实例，未启动新窗口")
     process = start_window(serial)
+    _wait_for_started_window(serial, process)
+    set_assistant_desired_open(PROFILE_BASE, serial, True)
     return "restarted", int(process.pid)
 
 
@@ -285,6 +331,9 @@ class MahjongLauncher:
         self._buttons: dict[str, list[tk.Button]] = {}
         self._busy_serials: set[str] = set()
         self._activation_pending = True
+        self._suppressed_autostart: set[str] = set()
+        self._recovery_inflight: set[str] = set()
+        self._recovery_failures: dict[str, tuple[int, float]] = {}
         self._empty_refresh_after = None
         self._watchdog = None
         self._watchdog_thread: threading.Thread | None = None
@@ -397,6 +446,15 @@ class MahjongLauncher:
         if serial in self._busy_serials:
             self.status_var.set(f"{serial} 正在处理中；不会重复提交操作。")
             return
+        suppressed = getattr(self, "_suppressed_autostart", None)
+        if suppressed is None:
+            suppressed = self._suppressed_autostart = set()
+        automatic = serial in getattr(self, "_recovery_inflight", set())
+        if operation == "quit":
+            suppressed.add(serial)
+        elif operation in {"open", "restart"} and not automatic:
+            suppressed.discard(serial)
+            getattr(self, "_recovery_failures", {}).pop(serial, None)
         self._busy_serials.add(serial)
         for button in self._buttons.get(serial, []):
             button.configure(state="disabled")
@@ -423,10 +481,31 @@ class MahjongLauncher:
 
         def retry() -> None:
             self._empty_refresh_after = None
-            if not self._closed and self._activation_pending:
+            if not self._closed:
                 self.refresh()
 
         self._empty_refresh_after = self.root.after(EMPTY_DEVICE_REFRESH_MS, retry)
+
+    def _recover_bound_assistants(self) -> None:
+        """Restore one crash-lost bound UI at a time; never restore autoplay."""
+        if self._closed or self._busy_serials:
+            return
+        for row in self._rows:
+            failures = getattr(self, "_recovery_failures", {})
+            count, retry_at = failures.get(row.serial, (0, 0.0))
+            if (row.online and row.account and row.desired_open
+                    and row.pid is None
+                    and row.serial not in self._suppressed_autostart
+                    and count < AUTORECOVERY_FAILURE_BUDGET
+                    and time.monotonic() >= retry_at):
+                self.status_var.set(
+                    f"{row.serial} 已重新上线，正在恢复已保存辅助器窗口…")
+                inflight = getattr(self, "_recovery_inflight", None)
+                if inflight is None:
+                    inflight = self._recovery_inflight = set()
+                inflight.add(row.serial)
+                self._operate_device(row.serial, "open")
+                return
 
     def _run_pending_activation(self) -> None:
         if not self._activation_pending or self._closed:
@@ -522,7 +601,7 @@ class MahjongLauncher:
             }, None))
 
     def _ensure_incident_watchdog(self, rows: list[DeviceRow]) -> None:
-        serials = tuple(sorted(row.serial for row in rows))
+        serials = tuple(sorted(row.serial for row in rows if row.online))
         thread = self._watchdog_thread
         if (serials == self._watchdog_serials and thread is not None
                 and thread.is_alive()):
@@ -572,7 +651,7 @@ class MahjongLauncher:
             self.watchdog_var.set("自动故障包：已停止，等待下次设备刷新重启")
 
     def _retry_incident_watchdog_if_needed(self) -> None:
-        if self._closed or not self._rows:
+        if self._closed or not any(row.online for row in self._rows):
             return
         run_thread = self._watchdog_thread
         config_thread = self._watchdog_config_thread
@@ -632,7 +711,11 @@ class MahjongLauncher:
         for widget in self.list_frame.winfo_children():
             widget.destroy()
         self._buttons.clear()
-        self.count_var.set(f"在线雷电 {len(rows)} 台 · 辅助器已开 {sum(r.pid is not None for r in rows)} 台")
+        online_count = sum(row.online for row in rows)
+        saved_count = sum(row.account is not None for row in rows)
+        self.count_var.set(
+            f"在线雷电 {online_count} 台 · 已保存设备 {saved_count} 台 · "
+            f"辅助器已开 {sum(r.pid is not None for r in rows)} 台")
         if not rows:
             tk.Label(self.list_frame,
                      text="没有在线雷电。管理器会自动等待；启动雷电即可。",
@@ -650,11 +733,13 @@ class MahjongLauncher:
             tk.Label(details, text=row.serial, bg=SURFACE, fg=TEXT,
                      font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
             nickname = row.account or "未设置昵称"
-            tk.Label(details, text=f"本地绑定：{nickname} · 当前登录待核验",
+            connection = "当前登录待核验" if row.online else "雷电离线，设置已保留"
+            tk.Label(details, text=f"本地绑定：{nickname} · {connection}",
                      bg=SURFACE, fg=MUTED,
                      font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(4, 0))
             state = (f"辅助器运行中 · PID {row.pid}" if row.pid is not None
-                     else "辅助器未打开")
+                     else ("辅助器未打开" if row.online
+                           else "等待雷电上线后自动恢复"))
             tk.Label(panel, text=state, bg=SURFACE,
                      fg=GREEN if row.pid is not None else MUTED,
                      font=("Microsoft YaHei UI", 9)).pack(side="left", padx=12)
@@ -662,11 +747,14 @@ class MahjongLauncher:
             controls.pack(side="right")
             buttons: list[tk.Button] = []
             if row.pid is not None:
-                for text, operation, background, foreground in (
+                operations = [
                     ("恢复窗口", "open", GOLD, "#22252e"),
-                    ("重启", "restart", SURFACE_LIGHT, TEXT),
                     ("退出", "quit", BG, MUTED),
-                ):
+                ]
+                if row.online:
+                    operations.insert(
+                        1, ("重启", "restart", SURFACE_LIGHT, TEXT))
+                for text, operation, background, foreground in operations:
                     button = tk.Button(
                         controls, text=text,
                         command=lambda serial=row.serial, op=operation:
@@ -677,7 +765,7 @@ class MahjongLauncher:
                         font=("Microsoft YaHei UI", 9, "bold"))
                     button.pack(side="left", padx=(5, 0))
                     buttons.append(button)
-            else:
+            elif row.online:
                 button = tk.Button(
                     controls, text="打开辅助器",
                     command=lambda serial=row.serial: self._open_device(serial),
@@ -686,6 +774,9 @@ class MahjongLauncher:
                     pady=8, font=("Microsoft YaHei UI", 9, "bold"))
                 button.pack(side="left")
                 buttons.append(button)
+            else:
+                tk.Label(controls, text="配置保留中", bg=SURFACE, fg=MUTED,
+                         font=("Microsoft YaHei UI", 9)).pack(side="left")
             self._buttons[row.serial] = buttons
 
     def _poll(self) -> None:
@@ -719,13 +810,35 @@ class MahjongLauncher:
                      for operation in ("open", "quit", "restart")):
                 operation, serial = tag.split(":", 1)
                 self._busy_serials.discard(serial)
+                automatic = serial in getattr(self, "_recovery_inflight", set())
+                getattr(self, "_recovery_inflight", set()).discard(serial)
                 if error:
-                    self.status_var.set(f"{serial}：{error}")
+                    if automatic:
+                        previous, _retry_at = self._recovery_failures.get(
+                            serial, (0, 0.0))
+                        failures = previous + 1
+                        if failures >= AUTORECOVERY_FAILURE_BUDGET:
+                            self._recovery_failures[serial] = (failures, float("inf"))
+                            self._suppressed_autostart.add(serial)
+                            self.status_var.set(
+                                f"{serial}：连续 {failures} 次启动失败，已熔断自动恢复；"
+                                "不会继续闪窗，请检查后手动点“打开辅助器”。")
+                        else:
+                            delay = AUTORECOVERY_BACKOFF_S[
+                                min(failures - 1, len(AUTORECOVERY_BACKOFF_S) - 1)]
+                            self._recovery_failures[serial] = (
+                                failures, time.monotonic() + delay)
+                            self.status_var.set(
+                                f"{serial}：启动失败（{failures}/"
+                                f"{AUTORECOVERY_FAILURE_BUDGET}），{delay:g} 秒后再试：{error}")
+                    else:
+                        self.status_var.set(f"{serial}：{error}")
                     for button in self._buttons.get(serial, []):
                         button.configure(state="normal")
                     if self._activation_pending:
                         self.refresh()
                 else:
+                    self._recovery_failures.pop(serial, None)
                     action, pid = result
                     verbs = {
                         "restored": "已确认恢复",
@@ -737,9 +850,9 @@ class MahjongLauncher:
                     self.status_var.set(f"{serial}：{verb}辅助器（PID {pid}）")
                     self.refresh()
             if tag == "refresh" and not error:
-                if self._rows:
-                    self._cancel_empty_refresh()
+                self._schedule_empty_refresh()
                 self._run_pending_activation()
+                self._recover_bound_assistants()
             elif tag == "watchdog" and result is not None:
                 self._apply_watchdog_event(result, error)
         self._retry_incident_watchdog_if_needed()
