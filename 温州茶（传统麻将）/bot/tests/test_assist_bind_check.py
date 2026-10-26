@@ -627,7 +627,7 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
             "手动指定财神", "财神牌（茶）",
             "离线预检（旧截图）", "抓图并分析", "导入截图", "修正手牌并重算",
             "历史逐帧复核", "导入录像复核（每秒1帧）", "停止录像复核",
-            "历史会话日志", "下一局"]
+            "历史会话日志", "下一局", "退出程序"]
         window._refresh_menu_state()
         assert window.menu.entrycget(
             raw_index["停止录像复核"], "state") == "disabled"
