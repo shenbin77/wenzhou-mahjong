@@ -16,6 +16,7 @@ import json
 import hashlib
 import argparse
 import os
+import re
 import time
 import tkinter as tk
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -48,7 +49,7 @@ from mode_vision import detect_shu_rule_text, score_tea_player_count
 from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
 from instance_profile import profile_paths, read_binding_for_serial, safe_serial
-from device_connection import verify_device
+from device_connection import DeviceConnection, verify_device
 from player_identity import PlayerIdentity, detect_player_identity
 
 
@@ -59,6 +60,11 @@ WINDOW_STATE_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".window_state.jso
 BINDING_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".binding.json"
 DEFAULT_SIZE = (1180, 860)
 SIZE_RANGE = {"w": (900, 1600), "h": (760, 1200)}
+FLOATING_BAR_SIZE = (132, 36)
+FLOATING_BAR_MARGIN = 8
+_WINDOW_GEOMETRY_PATTERN = re.compile(
+    r"^\s*(?P<width>\d+)x(?P<height>\d+)"
+    r"(?P<x>[+-]\d+)(?P<y>[+-]\d+)\s*$")
 STALE_SECONDS = 3.0
 OFFLINE_SOURCES = {"offline_preflight", "imported_image", "mp4_1fps", "manual_correction"}
 OFFLINE_NOTICES = {
@@ -281,7 +287,7 @@ def read_table_mode(serial: str) -> tuple[str | None, str]:
         from live_capture import capture_frame
 
         raw, _timing = capture_frame(
-            mode="tea_2p", adb_path=DEFAULT_ADB_PATH, serial=serial,
+            mode="tea_2p", adb_path=get_adb_path(), serial=serial,
             session_dir=TEA_ROOT / "采集" / "assist_sessions")
     except Exception as exc:  # noqa: BLE001 - 抓不到图就是读不出，按未识别处理
         return None, f"抓图失败：{exc}"
@@ -297,7 +303,7 @@ def read_player_identity(serial: str, expected_account: str) -> PlayerIdentity:
         from live_capture import capture_frame
 
         raw, _timing = capture_frame(
-            mode="tea_2p", adb_path=DEFAULT_ADB_PATH, serial=serial,
+            mode="tea_2p", adb_path=get_adb_path(), serial=serial,
             session_dir=TEA_ROOT / "采集" / "assist_sessions")
     except Exception as exc:  # noqa: BLE001 - identity failure must fail closed
         return PlayerIdentity(
@@ -306,6 +312,40 @@ def read_player_identity(serial: str, expected_account: str) -> PlayerIdentity:
         )
     image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
     return detect_player_identity(image, expected_account)
+
+
+def parse_window_geometry(geometry: str) -> tuple[int, int, int, int] | None:
+    """Parse a Tk geometry string as ``(width, height, x, y)``.
+
+    Tk permits signed coordinates (for example ``1180x860-8+24``).  Invalid
+    or incomplete strings are rejected instead of being partially restored.
+    """
+    match = _WINDOW_GEOMETRY_PATTERN.fullmatch(str(geometry or ""))
+    if match is None:
+        return None
+    return (
+        int(match.group("width")),
+        int(match.group("height")),
+        int(match.group("x")),
+        int(match.group("y")),
+    )
+
+
+def format_window_geometry(width: int, height: int, x: int, y: int) -> str:
+    """Return a complete Tk geometry string from integer dimensions."""
+    return f"{int(width)}x{int(height)}{int(x):+d}{int(y):+d}"
+
+
+def calculate_bottom_right_position(
+        screen_width: int, screen_height: int,
+        bar_width: int = FLOATING_BAR_SIZE[0],
+        bar_height: int = FLOATING_BAR_SIZE[1],
+        margin: int = FLOATING_BAR_MARGIN) -> tuple[int, int]:
+    """Calculate a non-negative bottom-right position for a floating bar."""
+    safe_margin = max(0, int(margin))
+    x = max(0, int(screen_width) - max(1, int(bar_width)) - safe_margin)
+    y = max(0, int(screen_height) - max(1, int(bar_height)) - safe_margin)
+    return x, y
 
 
 def clamp_geometry(x: int, y: int, width: int, height: int,
@@ -317,6 +357,21 @@ def clamp_geometry(x: int, y: int, width: int, height: int,
     x = max(0, min(int(x), max(0, screen_w - width)))
     y = max(0, min(int(y), max(0, screen_h - height)))
     return x, y, width, height
+
+
+def restore_window_geometry(
+        geometry: str, screen: tuple[int, int]) -> str | None:
+    """Return a parsed, on-screen main-window geometry, or ``None``.
+
+    This is deliberately Tk-independent so persistence and restore behavior
+    can be verified without opening a desktop window.
+    """
+    parsed = parse_window_geometry(geometry)
+    if parsed is None:
+        return None
+    width, height, x, y = parsed
+    x, y, width, height = clamp_geometry(x, y, width, height, screen)
+    return format_window_geometry(width, height, x, y)
 
 
 class TeaAssistWindow:
@@ -416,6 +471,8 @@ class TeaAssistWindow:
         self._check_executor = ThreadPoolExecutor(max_workers=1)
         self._binding_future: Future | None = None
         self._binding_fields_pending: dict | None = None
+        self._adb_diagnostic_events: Queue | None = None
+        self._adb_diagnostic_timer: str | None = None
         self.full_auto_status = tk.StringVar(value="全自动未开启。")
         self.auto_state = tk.StringVar(value="不可开启：未开始跟随")
         self.lamp_status = tk.StringVar(value="待处理")
@@ -472,8 +529,13 @@ class TeaAssistWindow:
         self._follow_pipeline = None
         self._last_stop_reason = ""
         self.display_source: str | None = None
+        self._floating_bar: tk.Toplevel | None = None
+        self._collapsed_geometry = format_window_geometry(width, height, x, y)
+        self._collapsed_topmost = bool(state.get("topmost", True))
+        self._floating_status = tk.StringVar(value="茶2 · 待命")
         self._restore_binding()
         self._build()
+        self._warn_when_adb_missing()
         self._refresh_binding_views()
         self._apply_preview_layout(False)
         self.recorder_timer = root.after(500, self._poll_recorder)
@@ -512,15 +574,19 @@ class TeaAssistWindow:
             controls, text="身份/玩法核验", width=12,
             command=self._verify_identity_and_mode)
         self.preflight_button.grid(row=0, column=9, padx=2)
+        self.collapse_button = ttk.Button(
+            controls, text="收起到右下角", width=13,
+            command=self.collapse_to_floating_bar)
+        self.collapse_button.grid(row=0, column=10, padx=2)
         ttk.Button(controls, text="更多", width=5, command=self._open_menu).grid(
-            row=0, column=10, sticky="e")
-        controls.grid_columnconfigure(10, weight=1)
+            row=0, column=11, sticky="e")
+        controls.grid_columnconfigure(11, weight=1)
         ttk.Label(
             controls,
             text=("填写当前游戏玩家昵称；程序会读取左下本人昵称并匹配，"
                   "一致后才允许推荐和代打。雷电编号由启动器自动读取，无需手填。"),
             foreground="#a55700", wraplength=1040,
-        ).grid(row=1, column=0, columnspan=11, sticky="w", pady=(3, 0))
+        ).grid(row=1, column=0, columnspan=12, sticky="w", pady=(3, 0))
 
         # Always-visible operational summary: identity, stage and the latest
         # actionable problem.  Color is semantic, not decorative.
@@ -897,7 +963,7 @@ class TeaAssistWindow:
         from app_entry import activate_window, choose_device, existing_window_pids
         from launch_multi import connected_devices, start_window
         try:
-            devices = connected_devices(DEFAULT_ADB_PATH)
+            devices = connected_devices(get_adb_path())
             occupied = existing_window_pids(DEFAULT_SERIAL)
             serial, pid = choose_device(devices, occupied)
             if serial is not None:
@@ -1309,19 +1375,93 @@ class TeaAssistWindow:
             self.status.set(f"正在连接 {serial}，检查ADB及实时截图…")
             self._set_operational_status("连接中", serial, level="wait")
             self._binding_future = self._check_executor.submit(
-                verify_device, serial, DEFAULT_ADB_PATH)
+                self._probe_device, serial)
             self._refresh_bind_controls()
             self.root.after(100, self._poll_binding_probe)
             return
         # Minimal offline test doubles have no live profile.
         self._save_verified_binding(fields)
 
+    def _probe_device(self, serial: str):
+        """Worker-thread binding probe: resolve adb first, then verify."""
+        adb_path = get_adb_path()
+        if not adb_path:
+            return DeviceConnection(
+                False, serial,
+                f"无法连接ADB/读取画面：{ADB_RESOLVE_NOTE}")
+        return verify_device(serial, adb_path)
+
+    def _adb_diagnostic_text(self) -> str:
+        """Read-only ``adb_inventory`` notes for the *failed* bind branch."""
+        try:
+            from adb_runtime import adb_inventory
+
+            inventory = adb_inventory()
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
+            return f"adb 体检失败：{exc}"
+        if not isinstance(inventory, dict):
+            return "adb 体检返回了意外结构，已跳过。"
+        notes = inventory.get("notes") or []
+        if isinstance(notes, str):
+            notes = [notes]
+        text = "；".join(str(note) for note in notes if str(note).strip())
+        return text or "adb 体检未给出额外原因。"
+
+    def _schedule_adb_diagnostic(self) -> None:
+        """Run ``adb_inventory()`` on a worker thread after a failed bind.
+
+        ``adb_inventory()`` costs up to ~10 s (version + devices + process
+        scan), so the Tk thread only schedules it; the notes arrive through
+        :meth:`_poll_adb_diagnostic` on the existing ``after`` cadence.
+        """
+        executor = getattr(self, "_check_executor", None)
+        if executor is None:
+            return
+        self._adb_diagnostic_events = Queue()
+        try:
+            executor.submit(self._run_adb_diagnostic)
+        except Exception:  # noqa: BLE001 - diagnostics are best-effort
+            return
+        if getattr(self, "_adb_diagnostic_timer", None) is None:
+            try:
+                self._adb_diagnostic_timer = self.root.after(
+                    150, self._poll_adb_diagnostic)
+            except Exception:  # noqa: BLE001
+                self._adb_diagnostic_timer = None
+
+    def _run_adb_diagnostic(self) -> None:
+        """Worker thread: collect read-only adb notes; never touch Tk."""
+        events = getattr(self, "_adb_diagnostic_events", None)
+        if events is None:
+            return
+        events.put(self._adb_diagnostic_text())
+
+    def _poll_adb_diagnostic(self) -> None:
+        self._adb_diagnostic_timer = None
+        events = getattr(self, "_adb_diagnostic_events", None)
+        if events is None:
+            return
+        try:
+            notes = events.get_nowait()
+        except Empty:
+            notes = None
+        status = getattr(self, "status", None)
+        if notes and status is not None:
+            status.set(f"{status.get()} adb体检：{notes}")
+        if getattr(self, "_adb_diagnostic_timer", None) is None and \
+                notes is None:
+            try:
+                self._adb_diagnostic_timer = self.root.after(
+                    300, self._poll_adb_diagnostic)
+            except Exception:  # noqa: BLE001
+                self._adb_diagnostic_timer = None
+
     def _open_other_device(self, serial: str) -> None:
         """Open or focus another UI for the chosen device; never switch this UI's lease."""
         from app_entry import activate_window, existing_window_pids
         from launch_multi import connected_devices, start_window
         try:
-            if serial not in connected_devices(DEFAULT_ADB_PATH):
+            if serial not in connected_devices(get_adb_path()):
                 self.status.set(f"{serial} 未连接，未打开新窗口。")
                 return
             pid = existing_window_pids(DEFAULT_SERIAL).get(serial)
@@ -1357,6 +1497,8 @@ class TeaAssistWindow:
                 pending["account"] != self.account.get().strip()):
             detail = (result.detail if not result.success
                       else "连接期间编号或备注改变，请重新连接")
+            if not result.success:
+                self._schedule_adb_diagnostic()
             self.status.set(f"连接失败：{detail}；未保存绑定。")
             self._set_operational_status("连接失败", detail, level="error")
             self._refresh_binding_views()
@@ -2007,6 +2149,147 @@ class TeaAssistWindow:
     def _set_always_on_top(self) -> None:
         self.root.attributes("-topmost", self.always_on_top.get())
 
+    def _warn_when_adb_missing(self) -> None:
+        """Surface a missing adb instead of silently using a stale path.
+
+        Never auto-restarts the adb server: ``ensure_single_server`` stays
+        read-only unless an operator explicitly asks for a restart.
+        """
+        if not ADB_RESOLVE_NOTE:
+            return
+        status = getattr(self, "status", None)
+        if status is None:
+            return
+        status.set(f"{ADB_RESOLVE_NOTE}：请先安装雷电/平台工具或指定 adb 路径，再连接设备。")
+
+    def _floating_status_text(self) -> str:
+        """Return compact state text for the right-bottom floating bar."""
+        try:
+            mode_name = str(self.mode.get()) if hasattr(self, "mode") else ""
+        except Exception:  # noqa: BLE001 - a status label must never raise
+            mode_name = ""
+        mode_short = {
+            "温州茶 · 2人": "茶2",
+            "温州茶 · 4人": "茶4",
+            "温州熟 · 4人": "熟4",
+        }.get(mode_name, "麻将")
+        if getattr(self, "full_auto_running", False):
+            state = "全自动"
+        elif getattr(self, "continuous", False):
+            state = "跟随中"
+        else:
+            state = "待命"
+        return f"{mode_short} · {state}"
+
+    def _refresh_floating_status(self) -> None:
+        """Refresh the floating text from the existing Tk tick cadence."""
+        status = getattr(self, "_floating_status", None)
+        if status is None:
+            return
+        try:
+            status.set(self._floating_status_text())
+        except tk.TclError:
+            # The bar was destroyed between ticks; the next collapse recreates
+            # it, so a stale variable must not break the main tick loop.
+            pass
+
+    def _destroy_floating_bar(self) -> None:
+        """Destroy this serial window's floating bar if it exists."""
+        bar = getattr(self, "_floating_bar", None)
+        self._floating_bar = None
+        if bar is None:
+            return
+        try:
+            if bar.winfo_exists():
+                bar.destroy()
+        except tk.TclError:
+            pass
+
+    def _show_floating_bar(self) -> None:
+        """Create one borderless, topmost floating bar for this window."""
+        existing = getattr(self, "_floating_bar", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    return
+            except tk.TclError:
+                self._floating_bar = None
+
+        width, height = FLOATING_BAR_SIZE
+        x, y = calculate_bottom_right_position(
+            self.root.winfo_screenwidth(), self.root.winfo_screenheight(),
+            width, height, FLOATING_BAR_MARGIN)
+        bar = tk.Toplevel(self.root)
+        self._floating_bar = bar
+        bar.overrideredirect(True)
+        bar.configure(background="#263238", cursor="hand2")
+        bar.geometry(format_window_geometry(width, height, x, y))
+        bar.resizable(False, False)
+        bar.attributes("-topmost", True)
+        label = tk.Label(
+            bar, textvariable=self._floating_status, background="#263238",
+            foreground="#ffffff", cursor="hand2",
+            font=("Microsoft YaHei UI", 9, "bold"), padx=8, pady=4)
+        label.pack(fill="both", expand=True)
+        for widget in (bar, label):
+            widget.bind("<Button-1>", self.restore_from_floating_bar)
+        bar.protocol("WM_DELETE_WINDOW", self.restore_from_floating_bar)
+        self._refresh_floating_status()
+        bar.lift()
+
+    def collapse_to_floating_bar(self) -> None:
+        """Hide the main window while keeping all follow work running."""
+        existing = getattr(self, "_floating_bar", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    return
+            except tk.TclError:
+                self._floating_bar = None
+        try:
+            self.root.update_idletasks()
+            current_geometry = self.root.geometry()
+            if parse_window_geometry(current_geometry) is None:
+                current_geometry = format_window_geometry(
+                    self.root.winfo_width(), self.root.winfo_height(),
+                    self.root.winfo_x(), self.root.winfo_y())
+            self._collapsed_geometry = current_geometry
+            self._collapsed_topmost = bool(
+                self.root.attributes("-topmost"))
+            self.always_on_top.set(self._collapsed_topmost)
+            self._remember_geometry()
+            self.root.withdraw()
+            self._show_floating_bar()
+        except tk.TclError:
+            # A bar creation failure must not strand the application hidden.
+            self._destroy_floating_bar()
+            try:
+                self.root.deiconify()
+            except tk.TclError:
+                pass
+
+    def restore_from_floating_bar(self, _event=None) -> None:
+        """Restore geometry/topmost state and remove the floating bar."""
+        try:
+            screen = (self.root.winfo_screenwidth(),
+                      self.root.winfo_screenheight())
+            geometry = restore_window_geometry(
+                getattr(self, "_collapsed_geometry", ""), screen)
+            topmost = bool(getattr(self, "_collapsed_topmost", True))
+            self._destroy_floating_bar()
+            if geometry is not None:
+                self.root.geometry(geometry)
+                self._collapsed_geometry = geometry
+            self.root.deiconify()
+            self.always_on_top.set(topmost)
+            self.root.attributes("-topmost", topmost)
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            self._floating_bar = None
+
     def _ready(self, pending: str | None = None) -> bool:
         """Start gate: binding + visual player identity + table-mode check.
 
@@ -2187,8 +2470,8 @@ class TeaAssistWindow:
         executor = getattr(self, "_round_transition", None)
         if executor is None or getattr(executor, "_serial", None) != serial:
             executor = RoundTransitionExecutor(
-                capture=lambda: _capture_image(serial, DEFAULT_ADB_PATH, session_dir),
-                tap=lambda x, y: _tap_lobby(serial, DEFAULT_ADB_PATH, x, y),
+                capture=lambda: _capture_image(serial, get_adb_path(), session_dir),
+                tap=lambda x, y: _tap_lobby(serial, get_adb_path(), x, y),
                 report_dir=session_dir)
             executor._serial = serial
             self._round_transition = executor
@@ -2299,7 +2582,7 @@ class TeaAssistWindow:
         if self._lobby_future is None:
             from lobby_follow import advance
             self._lobby_future = self.executor.submit(
-                advance, self.serial.get().strip(), DEFAULT_ADB_PATH,
+                advance, self.serial.get().strip(), get_adb_path(),
                 self.session_dir,
                 allow_start=True,
                 expected_account=self.account.get().strip(),
@@ -2594,7 +2877,7 @@ class TeaAssistWindow:
         started = time.perf_counter()
         capture = getattr(self, "_capture", None)
         if capture is None or capture.serial != serial:
-            capture = LiveCapture(DEFAULT_ADB_PATH, serial)
+            capture = LiveCapture(get_adb_path(), serial)
             self._capture = capture
         raw = capture.grab()
         capture_ms = (time.perf_counter() - started) * 1000
@@ -3220,6 +3503,10 @@ class TeaAssistWindow:
                     self.fresh.set("已停止跟随 · 最后一帧不作为当前依据")
         else:
             self.fresh.set(describe_age(None))
+        if getattr(self, "_floating_bar", None) is not None:
+            # Only meaningful while the collapsed bar is on screen; this also
+            # lets window test doubles that bind ``_tick`` alone skip it.
+            self._refresh_floating_status()
         self.ticker = self.root.after(200, self._tick)
 
     # -- one-shot actions ------------------------------------------------
@@ -3434,7 +3721,7 @@ class TeaAssistWindow:
         self._auto_loop = AutoPlayLoop(
             enabled=True,
             serial=serial,
-            adb_path=DEFAULT_ADB_PATH,
+            adb_path=get_adb_path(),
             mode="tea_2p",
             caishen_label="",
             session_dir=auto_session,
@@ -3717,16 +4004,34 @@ class TeaAssistWindow:
     def _remember_geometry(self) -> None:
         state = load_window_state(self._geometry_file())
         try:
+            is_withdrawn = self.root.state() == "withdrawn"
+            geometry = (getattr(self, "_collapsed_geometry", "")
+                        if is_withdrawn else self.root.geometry())
+            parsed = parse_window_geometry(geometry)
+            if parsed is None:
+                parsed = (
+                    self.root.winfo_width(), self.root.winfo_height(),
+                    self.root.winfo_x(), self.root.winfo_y())
+            width, height, x, y = parsed
+            topmost = (bool(getattr(self, "_collapsed_topmost", True))
+                       if is_withdrawn else bool(self.always_on_top.get()))
             state.update({
-                "x": self.root.winfo_x(), "y": self.root.winfo_y(),
-                "w": self.root.winfo_width(), "h": self.root.winfo_height(),
-                "topmost": bool(self.always_on_top.get()),
+                "geometry": format_window_geometry(width, height, x, y),
+                "x": x, "y": y, "w": width, "h": height,
+                "topmost": topmost,
             })
         except tk.TclError:
             return
         save_window_state(state, self._geometry_file())
 
     def close(self) -> None:
+        self._destroy_floating_bar()
+        if getattr(self, "_adb_diagnostic_timer", None) is not None:
+            try:
+                self.root.after_cancel(self._adb_diagnostic_timer)
+            except tk.TclError:
+                pass
+            self._adb_diagnostic_timer = None
         self._suppress_review = True
         self.stop()
         self.stop_video_review()
@@ -3776,11 +4081,66 @@ class TeaAssistWindow:
         self.root.destroy()
 
 
-DEFAULT_ADB_PATH = str(Path(__file__).resolve().parent.parent / "采集" / "scrcpy" / "adb.exe")
-if not Path(DEFAULT_ADB_PATH).is_file():
-    from harvest_tea import DEFAULT_ADB as _DEFAULT_ADB
+#: Whether ``adb_runtime`` is importable in this checkout.  Importing the
+#: helper costs nothing (no subprocess); only :func:`get_adb_path` probes.
+_ADB_SOURCE_READY = True
+try:
+    from adb_runtime import resolve_adb_path_cached  # noqa: F401 - lazy use
+except Exception:  # noqa: BLE001 - older checkout without the helper module
+    _ADB_SOURCE_READY = False
 
-    DEFAULT_ADB_PATH = _DEFAULT_ADB
+
+def get_adb_path(refresh: bool = False) -> str:
+    """Resolve the single adb binary through ``adb_runtime`` (never hard-coded).
+
+    The lookup spawns short ``adb version`` probes, so it is resolved lazily
+    at first real use instead of at import time: several assist windows can
+    start at once and every one of them would otherwise pay the probe cost
+    before painting.  Results come from ``resolve_adb_path_cached``, which
+    only caches non-empty hits, so a one-off probe failure is retried later
+    instead of being remembered forever.
+
+    Args:
+        refresh: discard the cached path and probe again (a user-visible
+            action such as choosing another adb should pass ``True``).
+
+    Returns:
+        str: an absolute adb path, or ``""`` when none is usable.  Callers
+        must treat ``""`` as "no adb" and surface ``ADB_RESOLVE_NOTE`` rather
+        than substituting a hard-coded path (two adb builds fight port 5037).
+    """
+    global DEFAULT_ADB_PATH
+    global ADB_RESOLVE_NOTE
+    path = ""
+    if _ADB_SOURCE_READY:
+        try:
+            path = resolve_adb_path_cached(refresh=refresh)
+        except Exception:  # noqa: BLE001 - resolver must fail open
+            path = ""
+    if not path:
+        # Historical single-source fallback: only used when ``adb_runtime``
+        # is unavailable (older checkout), and only when that file really
+        # exists on disk.  It is never combined with a second adb build.
+        try:
+            from harvest_tea import DEFAULT_ADB as _DEFAULT_ADB
+
+            if _DEFAULT_ADB and Path(_DEFAULT_ADB).is_file():
+                path = str(_DEFAULT_ADB)
+        except Exception:  # noqa: BLE001 - fallback must not raise either
+            path = ""
+    if path:
+        DEFAULT_ADB_PATH = path
+        ADB_RESOLVE_NOTE = ""
+    else:
+        DEFAULT_ADB_PATH = ""
+        ADB_RESOLVE_NOTE = "未找到可用 adb（adb_runtime 未探测到可用 adb）"
+    return path
+
+
+#: Last resolved adb path; ``""`` until :func:`get_adb_path` has succeeded.
+DEFAULT_ADB_PATH = ""
+#: Empty while an adb was resolved; otherwise the operator-facing reason.
+ADB_RESOLVE_NOTE = ""
 
 
 if __name__ == "__main__":
@@ -3790,7 +4150,7 @@ if __name__ == "__main__":
     from app_entry import activate_window, choose_device, existing_window_pids
     from launch_multi import connected_devices
     try:
-        discovered = connected_devices(DEFAULT_ADB_PATH)
+        discovered = connected_devices(get_adb_path())
         occupied = existing_window_pids(DEFAULT_SERIAL)
         chosen, open_pid = choose_device(discovered, occupied, args.serial)
     except (OSError, RuntimeError, ImportError, ValueError) as exc:

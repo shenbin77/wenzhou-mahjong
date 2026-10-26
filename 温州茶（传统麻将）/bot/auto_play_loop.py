@@ -44,6 +44,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -117,11 +118,53 @@ from turn_gate import (
 # 本机实测路径优先，其次回落到 harvest_tea 的默认（两处是同一份 adb）。
 ADB_CANDIDATES = ("D:/leidian/LDPlayer14/adb.exe",
                   "C:/leidian/LDPlayer14/adb.exe")
-DEFAULT_ADB = next((path for path in ADB_CANDIDATES if Path(path).is_file()),
-                   ADB_CANDIDATES[-1])
+# adb 路径统一：优先用 adb_runtime.resolve_adb_path()（唯一真源），取不到就
+# 原样回退到上面的元组逻辑。该模块可能尚未就绪/导入失败，一律 except 兜底。
+try:                                                    # pragma: no cover
+    from adb_runtime import resolve_adb_path
+
+    _RESOLVED_ADB = str(resolve_adb_path() or "")
+    _ADB_SOURCE_READY = True
+except Exception:                                       # noqa: BLE001
+    _RESOLVED_ADB = ""
+    _ADB_SOURCE_READY = False
+if _RESOLVED_ADB:
+    DEFAULT_ADB = _RESOLVED_ADB
+elif _ADB_SOURCE_READY:
+    # 统一到 adb_runtime.resolve_adb_path() 单点治理，消除多路径分歧；
+    # 真源给不出路径 = 本机确实确认不了 adb，这时不回退硬编码候选，留空后由
+    # check_gates() 用 Path(adb).is_file() 判否并抛 GateBlocked("ADB 不存在")
+    # 停手——失败是响亮的、可诊断的，而不是带着不确定的 adb 继续跑。
+    #
+    # 这条分支的真正理由是「真源已确认无解，回退只是把不确定性藏起来」。
+    # **它不是**"防止 server 冲突"——多个 adb server 互相冲突只是早期推测，
+    # 至今未被证实（今晨 3221225773 崩溃真因未定性），不要把推测写进理由。
+    # 已核实的实测事实（2026-10-26）：
+    #   * 本机此刻只有 1 个 adb 进程（PID 18368）；
+    #   * adb_inventory()["found"] 里的 3 条是**候选路径**，不是进程；
+    #     其中 采集/scrcpy/adb.exe 磁盘上并不存在；
+    #   * C:\leidian 与 D:\leidian 两份 adb.exe 字节完全相同
+    #     （MD5 F1F479BBA21298E758FC22D8D98F8E48，同为 1.0.41）。
+    # 写"实测"之前先跑数：以上三条都是跑出来的，不是推的。
+    DEFAULT_ADB = ""
+else:
+    # adb_runtime 还没落地 / 导入失败：完整保留原元组逻辑，与改动前逐字一致。
+    DEFAULT_ADB = next((path for path in ADB_CANDIDATES
+                        if Path(path).is_file()),
+                       ADB_CANDIDATES[-1])
 
 DEV_ROOT = Path(__file__).resolve().parent.parent / "采集" / "dev_auto_play"
 MAX_CONSECUTIVE_ERRORS = 3
+# 内存熔断阈值：从环境变量读，**未设置 = 只观测不停手**。
+# ``limit_mb`` 的 1500 是未经标定的初值，采到真实峰值之前开启 abort 会误停
+# 正常代打（误停比漏停更糟）。标定方法：先不带这个变量跑一轮真实代打，
+# 读台账里 resource_guard_sample 的 peak_mb，再按 peak+50% 设这个变量。
+RSS_LIMIT_ENV_VAR = "WZMJ_RSS_LIMIT_MB"
+# 看门狗自身的节流/迟滞：interval_s=5.0（一秒一轮也只真采一次）、
+# consecutive=2（连续两次超限才停，抗单次尖峰）。迟滞不自己再实现一套。
+RSS_GUARD_INTERVAL_S = 5.0
+RSS_GUARD_CONSECUTIVE = 2
+RSS_GUARD_DEFAULT_LIMIT_MB = 1500.0
 FRAME_SIZE = (900, 1600)          # 已验证的 ADB 原生截图尺寸
 DEFAULT_INTERVAL_S = 1.2
 # 与 tap_executor 同口径：mCurrentFocus / mFocusedApp / topResumedActivity。
@@ -347,6 +390,71 @@ def hud_fingerprint(image_path: str | Path | None) -> bytes | None:
         return None
 
 
+def _read_rss_limit_from_env() -> float | None:
+    """读 ``WZMJ_RSS_LIMIT_MB``；**未设置 / 非正数 / 非法 → 返回 None**。
+
+    None 的语义是「未标定 = 只观测，绝不停手」。这是刻意的两阶段设计：
+    ``RSS_GUARD_DEFAULT_LIMIT_MB`` 是拍脑袋的初值，采到真实峰值之前开启
+    abort 会误停正常代打——误停比漏停更糟。
+    """
+    raw = os.environ.get(RSS_LIMIT_ENV_VAR, "")
+    if not str(raw).strip():
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value <= 0:        # NaN / 非正数一律当未设置
+        return None
+    return value
+
+
+def _build_resource_guard(limit_mb: float | None, *,
+                          sampler: Callable[[], dict] | None = None
+                          ) -> tuple[object | None, bool]:
+    """构造内存看门狗，返回 ``(guard, 是否回退到假阈值)``。
+
+    mem_guard 缺失或构造异常时返回 ``(None, False)``（永不误杀）。
+
+    能力边界（务必按这个理解，别当成 OOM 万能保险）：它测的是**本进程**
+    RSS/commit，抓得住自身泄漏，**抓不住**"被别人的进程把系统整体挤爆"——
+    后者要看系统可用内存，是本模块目前没覆盖的另一个量。
+
+    ``limit_mb=None`` **原样透传**，不替换成默认阈值：mem_guard 把它解释成
+    「纯观测模式」（``over`` 恒 False、``reason="no-limit…"``，但 ``peak_mb``
+    照样记）。**绝不能**塞一个假的 1500 进去——假阈值写进遥测会看起来像已
+    标定，那正是我们要避免的事（"未标定"必须是可辨认的状态）。
+
+    第二个返回值是「是否回退到了假阈值」：只有旧版 mem_guard 不接受
+    ``limit_mb=None`` 时才会为 True。这条回退**绝不能是静默的**——它会把刚
+    修掉的问题原样放回（遥测重新出现 ``over: true`` vs 1500，看起来像已标定）。
+    所以调用方必须把这个标记写进每一条遥测（见 ``limit_fallback`` 字段）。
+    """
+    try:
+        from mem_guard import ResourceGuard
+    except Exception:                       # noqa: BLE001 - 观测件缺失不得影响代打
+        return None, False
+    try:
+        return (ResourceGuard(
+            limit_mb=limit_mb,
+            interval_s=RSS_GUARD_INTERVAL_S,
+            consecutive=RSS_GUARD_CONSECUTIVE,
+            sampler=sampler,
+        ), False)
+    except TypeError:                       # 旧版 mem_guard 不支持 None：回退默认阈值
+        try:
+            return (ResourceGuard(
+                limit_mb=RSS_GUARD_DEFAULT_LIMIT_MB,
+                interval_s=RSS_GUARD_INTERVAL_S,
+                consecutive=RSS_GUARD_CONSECUTIVE,
+                sampler=sampler,
+            ), True)
+        except Exception:                   # noqa: BLE001 - 构造失败就当没有看门狗
+            return None, False
+    except Exception:                       # noqa: BLE001 - 构造失败就当没有看门狗
+        return None, False
+
+
 class AutoPlayLoop:
     """单帧一周期的连续代打循环（默认 dry_run）。
 
@@ -382,7 +490,14 @@ class AutoPlayLoop:
         discard_key: str | None = None,
         discard_fn: Callable[[np.ndarray], Any] | None = None,
         event_callback: Callable[[dict, dict | None], None] | None = None,
+        adb_inventory_fn: Callable[[], dict] | None = None,
+        rss_sampler_fn: Callable[[], dict] | None = None,
         lobby_open_enabled: bool = LOBBY_OPEN_ENABLED_DEFAULT,
+        # 生产 CLI 不提供该开关，恒为 False；True 仅供离线测试验证授权后的
+        # 原行为，任何自动离桌路径不得接线。（项目红线 AGENTS.md 把「返回
+        # 大厅」与充值/洗切/分享战绩/游戏中心同列，永久禁止自动点击；牌局
+        # 结束时必须停在牌桌留证，由人工决定去向。）
+        allow_return_lobby: bool = False,
     ) -> None:
         if not isinstance(enabled, bool):
             raise TypeError("enabled 必须是显式 bool；True 才允许真实点击")
@@ -427,6 +542,8 @@ class AutoPlayLoop:
         self.session_dir = Path(session_dir) if session_dir else DEV_ROOT / stamp
         self.frame_dir = self.session_dir / "frames"
         self.ledger_path = self.session_dir / "actions.jsonl"
+        # 内存遥测（标定 limit_mb 的依据）：独立文件，不掺进审计台账。
+        self._resource_log_path = self.session_dir / "resource_guard.jsonl"
         # Structured follow-session debug log (vision/gates/caishen/decisions).
         # Never flips CLAIM_TAP_CHANNEL_READY; dual-writes beside actions.jsonl.
         self.follow_log_path = self.session_dir / "follow_session.jsonl"
@@ -506,6 +623,21 @@ class AutoPlayLoop:
         # ---- 开新场通道的状态（G5 预算 / G6 告警节流，离桌与换局都清零）----
         # G7 授权门：默认关。关着时只把「该点哪个空座」算出来记进台账，零点击。
         self.lobby_open_enabled = bool(lobby_open_enabled)
+        # 返回大厅授权门（2026-10-26 Codex P0）：牌局结束时**不许**自动把
+        # 用户带离牌桌。只认显式 True——字符串/"1"/1 一律按未授权处理。
+        self.allow_return_lobby = allow_return_lobby is True
+        # ---- adb 单点治理现场（只读枚举，供故障定性） -------------------
+        # ``adb_inventory()`` 只做只读枚举（adb devices / 进程列表），不发任何
+        # tap/keyevent。注入点存在是为了离线测试完全不接触真实模拟器。
+        self._adb_inventory = adb_inventory_fn or self._default_adb_inventory
+        # 最近一次 check_gates 的 report（含 adb 现场），失败时也可回查。
+        self._last_gate_report: dict | None = None
+        # ---- 内存看门狗（观测优先，默认不停手） -------------------------
+        # None = 未标定 → 只记台账；设了 WZMJ_RSS_LIMIT_MB 才启用 abort。
+        self._rss_limit_mb: float | None = _read_rss_limit_from_env()
+        self._guard, self._rss_limit_fell_back = _build_resource_guard(
+            self._rss_limit_mb, sampler=rss_sampler_fn)
+        self._guard_last_ts: float | None = None
         # 本屏已真实点击过几次入座（G5 预算）。
         self._lobby_open_taps = 0
         # 上一次入座点击的帧号（G5 间隔）。
@@ -530,21 +662,223 @@ class AutoPlayLoop:
     # ------------------------------------------------------------------
     # 只读门禁
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 内存看门狗（观测优先；只在标定后才停手）
+    # ------------------------------------------------------------------
+    def _resource_guard_tick(self) -> dict | None:
+        """每帧一次内存体检；返回非 None 表示已停手，调用方直接返回该事件。
+
+        两阶段，刻意如此（1500 是未标定的初值，误停比漏停更糟）：
+
+        * ``WZMJ_RSS_LIMIT_MB`` **未设置** → 只往台账写
+          ``resource_guard_sample``（含 ``peak_mb``），**绝不停手**；
+        * 设置了 → 才启用 ``should_abort()``，连续超限（迟滞 ``consecutive=2``）
+          时 ``stop(gate="resource_guard")``，reason 带 rss/commit/limit 实测值。
+
+        只做"停手留证"这一件事：**不**降采样、**不**关预览、**不**重启子进程、
+        **不**自愈重试。读数不可用时恒不停手（与 mem_guard 的红线一致）。
+
+        关于口径（别读错 ``peak_mb``）：``ResourceGuard.peak_mb`` 是
+        **max(rss, commit)**，不是纯 RSS——熔断判定用的就是这个值。所以标定
+        ``WZMJ_RSS_LIMIT_MB`` 要对着 ``peak_mb`` / ``--summarize`` 的
+        ``peak_guard_mb``，别对着 ``peak_rss_mb``，否则口径不一致。
+        系统级读数（``sys_available_mb`` 等）只进遥测、**不参与** should_abort()。
+        """
+        guard = self._guard
+        if guard is None:
+            return None
+        try:
+            snapshot = guard.sample()
+        except Exception:                   # noqa: BLE001 - 看门狗异常不当门禁
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        # 节流命中（ts 未变）的快照不重复落盘：一秒一帧也只 5 秒一行。
+        # 单独写 resource_guard.jsonl，不掺进 actions.jsonl —— 后者是"每次动作
+        # 一行"的审计口径，被既有用例逐行断言；也不走 follow_session.jsonl，
+        # 它的 build_follow_record 只保留固定字段，rss/peak 会被静默丢掉。
+        fresh = self._guard_last_ts != snapshot.get("ts")
+        self._guard_last_ts = snapshot.get("ts")
+        if fresh:
+            try:
+                self._ensure_dirs()
+                self._append_line(
+                    self._resource_log_path,
+                    json.dumps({
+                        "ts": datetime.now().astimezone().isoformat(),
+                        "event": "resource_guard_sample",
+                        "tick": self.tick_index,
+                        "serial": self.serial,
+                        "rss_mb": snapshot.get("rss_mb"),
+                        "commit_mb": snapshot.get("commit_mb"),
+                        # 系统级读数（mem_guard 新增，键名与其保持一致，好让
+                        # `mem_guard.py --summarize` 直接算出 min_sys_available_mb）。
+                        # **只观测**：不参与 should_abort()，本帧也不会因此停手。
+                        "sys_reading_ok": snapshot.get("sys_reading_ok"),
+                        "sys_available_mb": snapshot.get("sys_available_mb"),
+                        "sys_used_percent": snapshot.get("sys_used_percent"),
+                        "over": bool(snapshot.get("over")),
+                        "reason": snapshot.get("reason"),
+                        "peak_mb": guard.peak_mb,
+                        "over_streak": guard.over_streak,
+                        "limit_mb": self._rss_limit_mb,      # None = 未标定/只观测
+                        "abort_enabled": self._rss_limit_mb is not None,
+                        # True = 旧版 mem_guard 不接受 None，看门狗用的是回退的
+                        # 假阈值，遥测里的 over 不能当成"已标定且超限"来读。
+                        "limit_fallback": bool(self._rss_limit_fell_back),
+                    }, ensure_ascii=False) + "\n",
+                )
+            except Exception:               # noqa: BLE001 - 遥测落盘失败不许停手
+                pass
+        if self._rss_limit_mb is None:
+            return None                     # 未标定：只观测，绝不停手
+        try:
+            should_abort = guard.should_abort()
+        except Exception:                   # noqa: BLE001 - 判定异常不停手
+            return None
+        if not should_abort:
+            return None
+        return self._stop(
+            "resource_guard",
+            (f"连续 {RSS_GUARD_CONSECUTIVE} 次内存超限："
+             f"rss={snapshot.get('rss_mb')}MB "
+             f"commit={snapshot.get('commit_mb')}MB "
+             f"peak={guard.peak_mb}MB "
+             f"limit={self._rss_limit_mb}MB（{RSS_LIMIT_ENV_VAR}）；"
+             "停手留证，不做降采样/重启/自愈"),
+            {
+                "event": "resource_guard_sample",
+                "rss_mb": snapshot.get("rss_mb"),
+                "commit_mb": snapshot.get("commit_mb"),
+                "peak_mb": guard.peak_mb,
+                "over_streak": guard.over_streak,
+                "limit_mb": self._rss_limit_mb,
+                "abort_enabled": True,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # adb 单点治理现场（只读枚举，供故障定性）
+    # ------------------------------------------------------------------
+    def _default_adb_inventory(self) -> dict:
+        """调 ``adb_runtime.adb_inventory()``，任何失败都归一成同构 dict。
+
+        只读枚举（``adb devices`` + 进程列表），**不发** tap/keyevent/sendevent，
+        也不调 ``ensure_single_server()``——kill-server 只能是用户显式动作。
+        """
+        try:
+            from adb_runtime import adb_inventory
+        except Exception as exc:            # noqa: BLE001 - 模块缺失不得挡住代打
+            return {"available": False, "error": f"adb_runtime 不可用: {exc}",
+                    "chosen": None, "version": None, "servers": [],
+                    "devices": [], "found": [], "notes": []}
+        try:
+            raw = adb_inventory()
+        except Exception as exc:            # noqa: BLE001 - 枚举失败只记为不可用
+            return {"available": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "chosen": None, "version": None, "servers": [],
+                    "devices": [], "found": [], "notes": []}
+        if not isinstance(raw, dict):
+            return {"available": False,
+                    "error": f"adb_inventory() 返回 {type(raw).__name__}，应为 dict",
+                    "chosen": None, "version": None, "servers": [],
+                    "devices": [], "found": [], "notes": []}
+        return {
+            "available": True, "error": "",
+            "chosen": raw.get("chosen"),
+            "version": raw.get("version"),
+            "servers": [str(item) for item in (raw.get("servers") or ())],
+            "devices": [str(item) for item in (raw.get("devices") or ())],
+            "found": [str(item) for item in (raw.get("found") or ())],
+            "notes": [str(item) for item in (raw.get("notes") or ())],
+        }
+
+    def _gate_blocked(self, report: dict, reason: str) -> GateBlocked:
+        """门禁失败：把 adb 现场补进 report 后再抛（失败要响亮且可诊断）。
+
+        ``servers`` / ``devices`` 是「adb 到底起没起来、有几个 server」的现场
+        证据。今晨 3221225773 崩溃一直没定性，就是因为故障那一刻没有留下
+        任何现场，所以这里**每次失败都自动留一份**。
+        """
+        self._last_gate_report = dict(report)
+        inventory = report.get("adb_inventory")
+        # 现场直接进异常消息：哪怕这次没能落盘，stdout / 上层调用方也一定看得到。
+        if inventory is not None:
+            message = (f"{reason}｜adb 现场: servers={inventory['servers']} "
+                       f"devices={inventory['devices']} "
+                       f"version={inventory['version']}")
+        elif report.get("adb_inventory_error"):
+            message = f"{reason}｜adb 现场不可用: {report['adb_inventory_error']}"
+        else:
+            message = reason
+        # 只在会话目录**已经存在**时落盘：绝不为了留证去新建一个目录。
+        # 既有用例（test_runner_exits_nonzero_when_adb_missing）钉死的是
+        # 「门禁不放行时不留空会话目录」，冷启动自检失败就该什么都不建。
+        if self._dirs_ready or self.ledger_path.exists():
+            try:
+                self._write_event({
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "event": "gate_blocked", "reason": reason,
+                    "serial": self.serial, "adb": self.adb_path,
+                    **{key: report.get(key) for key in
+                       ("adb_exists", "adb_inventory", "adb_inventory_error")},
+                })
+            except Exception:               # noqa: BLE001 - 落盘失败不许盖掉门禁原因
+                pass
+        return GateBlocked(message)
+
     def check_gates(self) -> dict:
-        """启动前自检：设备/前台包/房卡。任一硬门禁失败抛 GateBlocked。"""
+        """启动前自检：adb / 设备在线 / 前台包 / 房卡。任一硬门禁失败抛 GateBlocked。"""
         report: dict = {"adb": self.adb_path, "adb_exists": Path(self.adb_path).is_file(),
                         "serial": self.serial, "mode": self.mode,
                         "enabled": self.enabled, "dry_run": self.dry_run}
         if not report["adb_exists"]:
-            raise GateBlocked(f"ADB 不存在: {self.adb_path}")
+            report.update(self._adb_inventory_evidence())
+            raise self._gate_blocked(report, f"ADB 不存在: {self.adb_path}")
+        report.update(self._adb_inventory_evidence())
         if not self.serial or any(ch.isspace() for ch in self.serial):
-            raise GateBlocked(f"模拟器序列号无效: {self.serial!r}")
+            raise self._gate_blocked(report, f"模拟器序列号无效: {self.serial!r}")
+        inventory = report.get("adb_inventory")
+        if inventory is not None and self.serial not in inventory["devices"]:
+            # 靶机不在线（offline/unauthorized/掉线）→ fail closed，明确停手。
+            # 读不到 inventory 时不拦（读不到 ≠ 不在线），避免误杀。
+            raise self._gate_blocked(
+                report,
+                f"靶机不在线：serial={self.serial!r} 不在 adb devices "
+                f"{inventory['devices']} 内；不重试、不自愈")
         package = self._foreground()
         report["foreground"] = package
         if package != EXPECTED_PACKAGE:
-            raise GateBlocked(f"前台包不是游戏: {package}（要求 {EXPECTED_PACKAGE}）")
+            raise self._gate_blocked(
+                report, f"前台包不是游戏: {package}（要求 {EXPECTED_PACKAGE}）")
         report["card_count"] = self._read_card_count(None)
+        self._last_gate_report = dict(report)
         return report
+
+    def _adb_inventory_evidence(self) -> dict:
+        """把只读现场按台账口径摊平：devices/servers/version/chosen + 错误。"""
+        snapshot = self._adb_inventory()
+        if not isinstance(snapshot, dict):
+            snapshot = {"available": False,
+                        "error": f"adb_inventory 返回 {type(snapshot).__name__}"}
+        available = snapshot.get("available")
+        if available is None:
+            # 注入的替身可能直接给 adb_runtime 的原始口径（没有 available 键）：
+            # 有内容且没报错就当作"读到了"，避免静默退化成 None。
+            available = not snapshot.get("error") and bool(snapshot)
+        inventory = None
+        if available is True:
+            inventory = {
+                "chosen": snapshot.get("chosen"),
+                "version": snapshot.get("version"),
+                "servers": [str(v) for v in (snapshot.get("servers") or ())],
+                "devices": [str(v) for v in (snapshot.get("devices") or ())],
+                "found": [str(v) for v in (snapshot.get("found") or ())],
+                "notes": [str(v) for v in (snapshot.get("notes") or ())],
+            }
+        return {"adb_inventory": inventory,
+                "adb_inventory_error": str(snapshot.get("error") or "")}
 
     def _read_card_count(self, image: np.ndarray | None) -> int | None:
         """房卡读数只有显式注入的 reader 才可信，否则记 unknown。"""
@@ -759,6 +1093,11 @@ class AutoPlayLoop:
         started = self._clock()
         if self.stopped:
             return {"event": "skip", "reason": self.stop_reason}
+        # 门禁零：内存看门狗。默认只观测；标定后（设了 WZMJ_RSS_LIMIT_MB）
+        # 才会在连续超限时停手。放在最前面，保证任何一帧都不会漏检。
+        guard_event = self._resource_guard_tick()
+        if guard_event is not None:
+            return guard_event
         # 门禁一：前台包。不放行立即停手（不计异常预算）。
         try:
             package = self._foreground()
@@ -1123,7 +1462,7 @@ class AutoPlayLoop:
         # 压暗帧兜底建议：本帧 analyze 读残（abstain）时，用账本手牌 + 本帧
         # 亮牌白名单算"该打白名单里的哪一张"。换局帧不参与（账本已清空）。
         ledger_advice = None if changed_round else self._ledger_advice(
-            subset, result)
+            subset, result, frame=str(frame_path))
         base["hand_ledger"] = self._hand_ledger.ledger()
         if ledger_advice is not None:
             base["ledger_advice"] = ledger_advice
@@ -1447,6 +1786,18 @@ class AutoPlayLoop:
         if not state.present:
             return None
         base["match_end"] = state.ledger()
+        # ---- 授权门：返回大厅必须显式授权（默认关） ----------------------
+        # 牌局结束时自动点「返回大厅」会把用户带离牌桌，且离桌后所有跨帧
+        # 状态（牌河/账本/白名单连击）一次性作废，无法回滚。未授权时本帧
+        # 零点击：把按钮证据原样留进台账，停手等人工决定。
+        base["allow_return_lobby"] = self.allow_return_lobby
+        if not self.allow_return_lobby:
+            return self._stop(
+                "match_complete",
+                "牌局结束，返回大厅需要显式授权（allow_return_lobby=False）："
+                "本帧零点击，停在牌桌留证等人工处理",
+                base,
+            )
         if self.dry_run:
             try:
                 plan = self._tap.execute_leave_table(image=image)
@@ -1677,14 +2028,20 @@ class AutoPlayLoop:
         top = sorted(rejects.items(), key=lambda item: -item[1])[:2]
         return "、".join(f"{code}×{count}" for code, count in top)
 
-    def _ledger_advice(self, subset, result: dict) -> dict | None:
+    def _ledger_advice(self, subset, result: dict, *,
+                       frame: str = "") -> dict | None:
         """压暗帧兜底建议：用账本手牌 + 本帧亮牌白名单算出该打哪一张。
 
         只在本帧 ``analyze`` 已经读残（没有可用建议）时介入。白名单只是
         **可打范围**，这里也不越界：先让算牌器给出完整候选序列，再取
         「第一个落在白名单内」的牌——顺序沿用引擎自己的优劣排序，不另设
-        评分口径。三条件（同局同财神 / 张数相等 / 白名单是手牌子集）任一
-        不成立就返回 ``None``，调用方保持原有弃权语义。
+        评分口径。
+
+        ``frame`` 是本帧的帧标识（与 ``HandLedger.remember`` 写入用的同一个
+        ``str(frame_path)``）。账本只在**另一帧**写入的读数上生效：本帧刚
+        ``remember`` 进去的读数不能反过来证明本帧读对了（循环论证，
+        2026-10-26 Codex P0）。漏传 frame 时账本按 ``unknown_frame`` 弃权，
+        本函数也返回 ``None``——绝不为了兜底率放宽这条判据。
         """
         if not getattr(subset, "hit", False):
             return None
@@ -1711,7 +2068,7 @@ class AutoPlayLoop:
         memory = self._hand_ledger.recall(
             round_seq=self.round.seq,
             caishen=self.round.caishen or result.get("caishen"),
-            count=expected, whitelist=whitelist)
+            count=expected, whitelist=whitelist, current_frame=str(frame))
         if memory is None or memory.caishen_id is None:
             return None
         try:

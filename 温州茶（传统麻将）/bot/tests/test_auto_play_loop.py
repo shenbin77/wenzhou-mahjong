@@ -18,9 +18,12 @@
 
 from __future__ import annotations
 
+import itertools
 import json
+import string
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -278,10 +281,18 @@ def make_loop(tmp_path, *, enabled: bool = False, analyses=None, frames=None,
     if cards is not None:
         card_reader = cards if callable(cards) else Feeder(cards)
     fake_tap = tap if tap is not None else FakeTap()
+    # adb 现场枚举默认是**离线替身**：本文件全程不接触真实模拟器，所以这里
+    # 绝不能落到真实的 adb_runtime.adb_inventory()（会真起 adb devices 子进程）。
+    # 替身把测试 serial 报成在线，保证 check_gates() 的设备门禁走得通。
+    inventory = kwargs.pop("adb_inventory_fn", None) or (
+        lambda: {"chosen": sys.executable, "version": "adb-fake-1.0.41",
+                 "servers": ["18368"], "devices": ["emulator-test"],
+                 "found": [sys.executable], "notes": ["offline test double"]})
     loop = AutoPlayLoop(
         enabled=enabled,
         adb_path=sys.executable,          # 只做 is_file() 检查，不会被执行
         serial="emulator-test",
+        adb_inventory_fn=inventory,
         session_dir=Path(tmp_path) / "session",
         max_actions=kwargs.pop("max_actions", 20),
         duration_s=kwargs.pop("duration_s", 600.0),
@@ -2016,11 +2027,16 @@ def _fake_subset(tile_ids, *, expected=17, hit=True, unresolved=False):
     )
 
 
-def _prime_ledger(loop):
+#: 账本读数写于上一帧、取回发生在当前帧：账本只在**另一帧**上生效。
+LEDGER_PREV_FRAME = "frames/20261026_001122_000001_before_ab12cd.png"
+LEDGER_THIS_FRAME = "frames/20261026_001123_000002_before_34ef56.png"
+
+
+def _prime_ledger(loop, frame: str = LEDGER_PREV_FRAME):
     loop._hand_ledger.remember(
         {"status": "advise", "hand_ids": list(LEDGER_HAND17), "melds": [],
          "caishen": "w1", "caishen_id": 1},
-        round_seq=loop.round.seq, caishen="w1")
+        round_seq=loop.round.seq, caishen="w1", frame=frame)
 
 
 def test_ledger_advice_replaces_missing_advice(tmp_path):
@@ -2031,13 +2047,15 @@ def test_ledger_advice_replaces_missing_advice(tmp_path):
 
     advice = loop._ledger_advice(subset, {"status": "abstain",
                                           "reason": "识牌不完整，停止决策",
-                                          "caishen": "w1"})
+                                          "caishen": "w1"},
+                                 frame=LEDGER_THIS_FRAME)
 
     assert advice is not None
     assert advice["tile_id"] in (24, 62)
     assert advice["whitelist"] == [24, 62]
     assert sorted(advice["hand"]) == sorted(LEDGER_HAND17)
     assert advice["candidate_count"] >= 1
+    assert advice["memory_frame"] == LEDGER_PREV_FRAME
 
 
 def test_ledger_advice_never_overrides_real_advice(tmp_path):
@@ -2047,7 +2065,8 @@ def test_ledger_advice_never_overrides_real_advice(tmp_path):
 
     advice = loop._ledger_advice(
         _fake_subset([24, 62]),
-        {"status": "advise", "suggestion_id": 24, "caishen": "w1"})
+        {"status": "advise", "suggestion_id": 24, "caishen": "w1"},
+        frame=LEDGER_THIS_FRAME)
 
     assert advice is None
 
@@ -2064,7 +2083,8 @@ def test_ledger_advice_takes_over_when_real_advice_is_illegal(tmp_path):
 
     advice = loop._ledger_advice(
         _fake_subset([24, 62]),
-        {"status": "advise", "suggestion_id": 1, "caishen": "w1"})
+        {"status": "advise", "suggestion_id": 1, "caishen": "w1"},
+        frame=LEDGER_THIS_FRAME)
 
     assert advice is not None
     assert advice["tile_id"] in (24, 62)
@@ -2077,7 +2097,8 @@ def test_ledger_advice_rejects_whitelist_outside_memory(tmp_path):
 
     assert loop._ledger_advice(
         _fake_subset([24, 63]),
-        {"status": "abstain", "caishen": "w1"}) is None
+        {"status": "abstain", "caishen": "w1"},
+        frame=LEDGER_THIS_FRAME) is None
 
 
 def test_ledger_advice_rejects_count_mismatch(tmp_path):
@@ -2087,7 +2108,8 @@ def test_ledger_advice_rejects_count_mismatch(tmp_path):
 
     assert loop._ledger_advice(
         _fake_subset([24, 62], expected=16),
-        {"status": "abstain", "caishen": "w1"}) is None
+        {"status": "abstain", "caishen": "w1"},
+        frame=LEDGER_THIS_FRAME) is None
 
 
 def test_ledger_advice_rejects_without_memory(tmp_path):
@@ -2095,7 +2117,8 @@ def test_ledger_advice_rejects_without_memory(tmp_path):
 
     assert loop._ledger_advice(
         _fake_subset([24, 62]),
-        {"status": "abstain", "caishen": "w1"}) is None
+        {"status": "abstain", "caishen": "w1"},
+        frame=LEDGER_THIS_FRAME) is None
 
 
 def test_ledger_advice_requires_whitelist_hit(tmp_path):
@@ -2105,7 +2128,119 @@ def test_ledger_advice_requires_whitelist_hit(tmp_path):
     from types import SimpleNamespace
     empty = SimpleNamespace(hit=False, unresolved=False, candidates=[],
                             evidence={}, whitelist_ids=lambda: ())
-    assert loop._ledger_advice(empty, {"status": "abstain"}) is None
+    assert loop._ledger_advice(empty, {"status": "abstain"},
+                               frame=LEDGER_THIS_FRAME) is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-26 Codex P0：账本禁止同帧自证
+#
+# 实机（_takeover/wb_live/w9）台账里 **8 条**「账本辅助动作」的 memory_frame
+# 与当前帧相同：那一帧自己写进账本、同一个 tick 再取出来当"本帧手牌"。这是
+# 循环论证——账本不是独立证据，只是本帧残读的复读机。这里锁死两条判据。
+#
+# 条数（software-architect 2026-10-26 按 ledger_advice.memory_frame 与同行
+# frame 逐条全量比对实测，不是估的）：
+#   emulator-5556_20261025_235242_g1 → 2 条
+#   emulator-5558_20261025_235242_g1 → 6 条
+#   emulator-5558_20261026_003543_g2 → 0 条
+#   合计 8 条。早期注释写的"4 次"偏小，别再拿它当基线估算修好了多少。
+# ---------------------------------------------------------------------------
+def test_ledger_advice_rejects_same_frame_memory(tmp_path):
+    """读数写于本帧 → 绝不当作本帧手牌使用（same_frame 弃权）。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop, frame=LEDGER_THIS_FRAME)
+
+    advice = loop._ledger_advice(
+        _fake_subset([24, 62]),
+        {"status": "abstain", "caishen": "w1"},
+        frame=LEDGER_THIS_FRAME)
+
+    assert advice is None
+    assert loop._hand_ledger.ledger()["rejects"]["same_frame"] == 1
+    assert loop._hand_ledger.ledger()["recalls"] == 0
+
+
+def test_saved_frame_names_are_unique_per_frame(tmp_path, monkeypatch):
+    """帧名每帧唯一 —— 账本「禁同帧自证」判据全靠它，必须是硬断言。
+
+    三条一起锁死，任何一条被改都会立刻红，不留软断言：
+
+    1. 连续两次 ``_save_frame`` 得到的文件名**必须不同**；
+    2. 把 ``datetime.now()`` 冻成常量后仍**必须不同** —— 证明唯一性不是靠
+       系统时钟撑的；
+    3. 文件名结构必须真的含 ``%f`` 微秒段（6 位数字）与 uuid 段（6 位 hex）。
+
+    为什么第 2 条要冻时钟而不是冻 uuid：本机实测 ``datetime.now()`` 分辨率
+    只有 ~15.6ms（20000 组连续采样里 19853 组微秒段完全相同），所以**不能**
+    指望两次调用拿到不同微秒——反过来靠"两次调用必须不同"根本测不出有没有
+    ``%f``。冻时钟才能把时钟的贡献摘干净，剩下的差异必须来自 uuid。
+    谁把帧名改成按秒（去掉 ``%f``）→ 第 3 条立刻红；谁把 uuid 段去掉→
+    第 2 条立刻红。
+    """
+    loop, *_ = make_loop(tmp_path, enabled=False)
+    raw = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+
+    first = loop._save_frame(raw, "before")
+    second = loop._save_frame(raw, "before")
+    assert str(first) != str(second), "同一会话连续两帧拿到了同一个帧名"
+
+    parts = first.stem.split("_")
+    assert len(parts) == 5, f"帧名结构变了（{first.name}），不再是 时间戳_微秒_tag_uuid"
+    date_part, time_part, micro_part, tag_part, uuid_part = parts
+    assert len(date_part) == 8 and date_part.isdigit()
+    assert len(time_part) == 6 and time_part.isdigit()
+    assert len(micro_part) == 6 and micro_part.isdigit(), "帧名缺少 %f 微秒段"
+    assert tag_part == "before"
+    assert len(uuid_part) == 6 and set(uuid_part) <= set(string.hexdigits), \
+        "帧名缺少 uuid 段（唯一性不能只靠时钟）"
+
+    class _FrozenDatetime(datetime):
+        """``now()`` 恒返回同一时刻：把时钟对帧名的贡献彻底摘掉。"""
+
+        @classmethod
+        def now(cls, tz=None):  # noqa: D102 - 测试替身
+            return datetime(2026, 10, 26, 12, 0, 0, 0)
+
+    monkeypatch.setattr(auto_play_loop, "datetime", _FrozenDatetime)
+    frozen_a = loop._save_frame(raw, "before")
+    frozen_b = loop._save_frame(raw, "before")
+    assert str(frozen_a) != str(frozen_b), \
+        "时钟冻结后两帧重名：帧名唯一性只剩时钟撑着，uuid 段被去掉了"
+
+
+def test_ledger_advice_rejects_when_frame_is_missing(tmp_path):
+    """本帧标识缺失 → fail-closed 弃权，绝不为了兜底率放宽判据。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop)
+
+    assert loop._ledger_advice(
+        _fake_subset([24, 62]),
+        {"status": "abstain", "caishen": "w1"}) is None
+    assert loop._hand_ledger.ledger()["rejects"]["unknown_frame"] == 1
+
+
+def test_tick_feeds_current_frame_into_ledger_recall(tmp_path):
+    """整环回归：tick 把本帧 frame_path 传进 recall，账本不由本帧写入。
+
+    同一 tick 里先 remember(本帧) 再 recall(本帧) 必须弃权；下一帧的
+    frame_path 变了，账本才允许命中。
+    """
+    loop, _shot, _analyzer, _tap, _ = make_loop(tmp_path, enabled=True)
+    loop._hand_ledger.remember(
+        {"status": "advise", "hand_ids": list(LEDGER_HAND17), "melds": [],
+         "caishen": "w1", "caishen_id": 1},
+        round_seq=loop.round.seq, caishen="w1", frame="frame-of-this-tick")
+
+    same_tick = loop._ledger_advice(
+        _fake_subset([24, 62]), {"status": "abstain", "caishen": "w1"},
+        frame="frame-of-this-tick")
+    next_tick = loop._ledger_advice(
+        _fake_subset([24, 62]), {"status": "abstain", "caishen": "w1"},
+        frame="frame-of-next-tick")
+
+    assert same_tick is None
+    assert next_tick is not None
 
 
 # ---------------------------------------------------------------------------
@@ -2113,6 +2248,10 @@ def test_ledger_advice_requires_whitelist_hit(tmp_path):
 #
 # 实机 20261025 22:58：局数 16/16，画面为「牌局结束」+ 冠军横幅 + 底部三按钮。
 # 旧行为被 gate_turn 判 blocked 直接停机，整场会话结束、必须人工点返回大厅。
+#
+# 2026-10-26 Codex P0：返回大厅必须**显式授权**。默认（allow_return_lobby=
+# False）时这条通道零点击、落 stop/gate=match_complete，把用户留在牌桌上，
+# 由人工决定要不要回大厅。
 # ---------------------------------------------------------------------------
 MATCH_END_BOXES = ((246, 777, 554, 872), (646, 777, 954, 872),
                    (1046, 764, 1413, 873))
@@ -2127,8 +2266,12 @@ def match_end_frame() -> np.ndarray:
 
 
 def test_match_end_clicks_return_lobby_once(tmp_path):
-    """牌局结束 → 点返回大厅（一次），并清空本局所有跨帧状态。"""
-    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    """已授权（allow_return_lobby=True）→ 点返回大厅（一次），状态全部作废。
+
+    逐行沿用授权前的原行为，只是把开关显式打开。
+    """
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, allow_return_lobby=True)
     loop._bright_subset_advice = (loop.round.seq, 24, 2)
 
     event = loop._match_end_event(
@@ -2145,6 +2288,60 @@ def test_match_end_clicks_return_lobby_once(tmp_path):
     assert len(tap.execute_leave_calls) == 1
 
 
+# ---------------------------------------------------------------------------
+# 返回大厅授权门（2026-10-26 Codex P0）：默认不许把用户带离牌桌
+# ---------------------------------------------------------------------------
+def test_match_end_without_authorization_never_clicks_return_lobby(tmp_path):
+    """默认（未授权）→ 零点击，落 stop/gate=match_complete，按钮证据留台账。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop._bright_subset_advice = (loop.round.seq, 24, 2)
+
+    event = loop._match_end_event(
+        match_end_frame(), Path(tmp_path) / "f.png", {}, 0.0)
+
+    assert event is not None
+    assert event["event"] == "stop"
+    assert event["gate"] == "match_complete"
+    assert "返回大厅需要显式授权（allow_return_lobby=False）" in event["reason"]
+    # 按钮证据必须留下来（人工据此决定要不要回大厅）
+    assert event["match_end"]["present"] is True
+    assert event["allow_return_lobby"] is False
+    # 零点击：离桌通道一次都没走
+    assert tap.execute_leave_calls == []
+    assert loop._left_table is False
+    # 停手留证，不是"打完了继续跑"
+    assert loop.stopped is True
+    # 跨帧状态不许因为"牌局结束"被清掉（人还没离开牌桌）
+    assert loop._bright_subset_advice == (loop.round.seq, 24, 2)
+
+
+def test_match_end_gate_ledger_row_carries_button_evidence(tmp_path):
+    """未授权的 stop 行必须写进 actions.jsonl，且带 match_end 证据。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    loop._match_end_event(
+        match_end_frame(), Path(tmp_path) / "f.png", {}, 0.0)
+
+    rows = events_of(loop, "stop")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["gate"] == "match_complete"
+    assert row["match_end"]["present"] is True
+    assert tap.execute_leave_calls == []
+
+
+@pytest.mark.parametrize("bad", ["True", "yes", 1, None, "1"])
+def test_allow_return_lobby_only_accepts_real_bool(tmp_path, bad):
+    """只认显式 bool：字符串 / 1 / None 一律按未授权处理。"""
+    loop, *_ = make_loop(tmp_path, enabled=True, allow_return_lobby=bad)
+    assert loop.allow_return_lobby is False
+
+    allowed, *_ = make_loop(tmp_path / "ok", enabled=True,
+                            allow_return_lobby=True)
+    assert allowed.allow_return_lobby is True
+    assert make_loop(tmp_path / "def", enabled=True)[0].allow_return_lobby is False
+
+
 def test_match_end_ignores_normal_table(tmp_path):
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
     plain = np.zeros((900, 1600, 3), dtype=np.uint8)
@@ -2154,9 +2351,38 @@ def test_match_end_ignores_normal_table(tmp_path):
     assert tap.execute_leave_calls == []
 
 
+def test_match_end_ignores_normal_table_when_authorized(tmp_path):
+    """授权开着也不会在普通牌桌上误触发离桌。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, allow_return_lobby=True)
+    plain = np.zeros((900, 1600, 3), dtype=np.uint8)
+    plain[:, :] = (48, 96, 60)
+
+    assert loop._match_end_event(plain, Path(tmp_path) / "f.png", {}, 0.0) is None
+    assert tap.execute_leave_calls == []
+
+
+# ---------------------------------------------------------------------------
+# adb 单点治理（2026-10-26）：adb_runtime 是 adb 路径的唯一真源
+#
+# 本机实测有 3 个 adb.exe（含 采集/scrcpy/adb.exe）。真源确认不了 adb 时
+# **不许**静默回退硬编码候选——那正是"两个 server 互踢"的成因，宁可停手。
+# ---------------------------------------------------------------------------
+def test_default_adb_follows_the_single_source():
+    """真源就绪时 DEFAULT_ADB 必须就是它给的路径；它给不出就留空，不回退。"""
+    if not getattr(auto_play_loop, "_ADB_SOURCE_READY", False):
+        pytest.skip("adb_runtime 未就绪：本次验收的是回退分支之外的语义")
+    if auto_play_loop._RESOLVED_ADB:
+        assert auto_play_loop.DEFAULT_ADB == auto_play_loop._RESOLVED_ADB
+    else:
+        assert auto_play_loop.DEFAULT_ADB == ""
+        assert auto_play_loop.DEFAULT_ADB not in auto_play_loop.ADB_CANDIDATES
+
+
 def test_after_leaving_blocked_frame_is_idle_not_stop(tmp_path):
     """已返回大厅后，即使画面被判 blocked 也不许硬停机。"""
-    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, allow_return_lobby=True)
     loop._left_table = True
 
     event = loop._match_end_event(
@@ -2351,3 +2577,272 @@ def test_promo_close_budget_resets_on_new_round(tmp_path, monkeypatch):
     assert loop._promo_close_count == 1          # 换局已清零，不继承上一局
     assert len(tap.execute_close_popup_calls) == 2
     assert loop.stopped is False
+
+
+# ---------------------------------------------------------------------------
+# adb 单点治理现场（2026-10-26）：check_gates() 留证据 + 靶机在线门禁
+#
+# 只读枚举（adb devices / 进程列表），不发 tap/keyevent。**绝不**调
+# ensure_single_server(allow_restart=True)——kill-server 只能是用户显式动作。
+# 离线测试一律走 make_loop 注入的替身，本文件全程不接触真实模拟器。
+# ---------------------------------------------------------------------------
+def test_check_gates_records_adb_inventory_evidence(tmp_path):
+    """放行时也要把 devices/servers/version/chosen 原样带出来，供故障定性。"""
+    loop, *_ = make_loop(tmp_path, enabled=False)
+    loop.adb_inventory_fn = lambda: {
+        "chosen": "D:/leidian/LDPlayer14/adb.exe", "version": "1.0.41",
+        "servers": ["18368"], "devices": ["emulator-test", "emulator-5558"],
+        "found": ["D:/leidian/LDPlayer14/adb.exe"], "notes": []}
+    loop._adb_inventory = loop.adb_inventory_fn
+
+    report = loop.check_gates()
+
+    inv = report["adb_inventory"]
+    assert inv is not None
+    assert inv["devices"] == ["emulator-test", "emulator-5558"]
+    assert inv["servers"] == ["18368"]
+    assert inv["version"] == "1.0.41"
+    assert inv["chosen"] == "D:/leidian/LDPlayer14/adb.exe"
+    assert report["adb_inventory_error"] == ""
+    assert loop._last_gate_report == report
+
+
+def test_check_gates_blocks_when_serial_is_not_online(tmp_path):
+    """靶机不在 adb devices 里 → fail closed 停手，不重试、不自愈。"""
+    loop, *_ = make_loop(tmp_path, enabled=False)
+    loop._adb_inventory = lambda: {
+        "chosen": "adb", "version": "1.0.41", "servers": ["18368"],
+        "devices": ["emulator-5556", "emulator-5558"],
+        "found": [], "notes": []}
+
+    with pytest.raises(GateBlocked, match="靶机不在线"):
+        loop.check_gates()
+
+    report = loop._last_gate_report
+    assert report["adb_inventory"]["devices"] == ["emulator-5556", "emulator-5558"]
+
+
+def test_check_gates_fails_open_when_inventory_is_unreadable(tmp_path):
+    """枚举读不到 → 不因此拦人（读不到 ≠ 靶机不在线），但错误要留痕。"""
+    loop, *_ = make_loop(tmp_path, enabled=False)
+    loop._adb_inventory = lambda: {
+        "available": False, "error": "adb 调用超时", "chosen": None,
+        "version": None, "servers": [], "devices": [], "found": [], "notes": []}
+
+    report = loop.check_gates()             # 不许抛
+
+    assert report["adb_inventory"] is None
+    assert "adb 调用超时" in report["adb_inventory_error"]
+
+
+def test_gate_blocked_writes_the_adb_evidence_to_the_ledger(tmp_path):
+    """门禁失败那一刻必须有现场：今晨 3221225773 就是没留下任何现场才没定性。
+
+    这里先把会话目录建起来（= 循环已经在跑的情形），所以证据要真的落盘。
+    """
+    loop, *_ = make_loop(tmp_path, foreground=["com.android.launcher3"])
+    loop._adb_inventory = lambda: {
+        "chosen": "adb", "version": "1.0.41", "servers": ["18368", "20001"],
+        "devices": ["emulator-test"], "found": [], "notes": ["two servers?"]}
+    loop._ensure_dirs()                     # 循环已建目录 → 留证走落盘
+
+    with pytest.raises(GateBlocked, match="前台包不是游戏"):
+        loop.check_gates()
+
+    rows = [row for row in read_ledger(loop) if row.get("event") == "gate_blocked"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["adb_inventory"]["servers"] == ["18368", "20001"]
+    assert row["adb_inventory"]["devices"] == ["emulator-test"]
+    assert "前台包不是游戏" in row["reason"]
+
+
+def test_cold_start_gate_failure_never_creates_a_session_dir(tmp_path):
+    """冷启动自检失败：现场进异常消息，但**绝不**为此新建会话目录。
+
+    既有用例钉死「门禁不放行时不留空会话目录」——留证不能把这条打破，所以
+    冷启动路径只把 servers/devices 挂进 GateBlocked 的消息里（stdout 可见）。
+    """
+    loop, *_ = make_loop(tmp_path, foreground=["com.android.launcher3"])
+    # devices 里带上测试 serial，让门禁走到"前台包"这一关再失败。
+    loop._adb_inventory = lambda: {
+        "chosen": "adb", "version": "1.0.41", "servers": ["18368"],
+        "devices": ["emulator-test", "emulator-5556"], "found": [], "notes": []}
+
+    with pytest.raises(GateBlocked) as excinfo:
+        loop.check_gates()
+
+    assert not loop.session_dir.exists(), "不该为了留证新建会话目录"
+    message = str(excinfo.value)
+    assert "前台包不是游戏" in message
+    assert "servers=['18368']" in message
+    assert "devices=['emulator-test', 'emulator-5556']" in message   # 现场仍可见
+
+
+# ---------------------------------------------------------------------------
+# 内存看门狗（2026-10-26）：观测优先，未标定绝不停手
+#
+# limit_mb 的 1500 是未标定的初值。WZMJ_RSS_LIMIT_MB 没设 → 只记遥测；
+# 设了 → 连续 consecutive=2 次超限才 stop(gate="resource_guard")。
+# 只停手留证：不降采样、不关预览、不重启子进程、不自愈重试。
+# ---------------------------------------------------------------------------
+def _read_resource_log(loop: AutoPlayLoop) -> list[dict]:
+    """读 resource_guard.jsonl（内存遥测，与审计台账 actions.jsonl 分开）。"""
+    path = loop._resource_log_path
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8"
+                                                        ).splitlines() if line.strip()]
+
+
+def _over_sampler(rss: float = 999.0, commit: float = 1200.0):
+    return lambda: {"rss_mb": rss, "commit_mb": commit,
+                    "available": True, "reason": ""}
+
+
+def _ticking_guard(loop, *, limit_mb, sampler, consecutive=2):
+    """装一个"每次调用都真采样"的看门狗（interval_s=0、时钟自增）。
+
+    迟滞与节流本身是 mem_guard 的职责、由 test_mem_guard.py 覆盖；这里只验
+    auto_play_loop 侧的接线口径（未标定不停手 / 标定后连续超限才停手）。
+    """
+    try:
+        from mem_guard import ResourceGuard
+    except Exception as exc:                # noqa: BLE001 - 别人的模块可能正在改
+        pytest.skip(f"mem_guard 不可用（{type(exc).__name__}: {exc}），"
+                    "跳过看门狗接线口径的验收")
+    ticks = itertools.count(0.0, 1.0)
+    loop._guard = ResourceGuard(
+        limit_mb=limit_mb, interval_s=0.0, consecutive=consecutive,
+        sampler=sampler, clock=lambda: next(ticks))
+    return loop
+
+
+def test_resource_guard_only_observes_without_calibration(tmp_path):
+    """没设 WZMJ_RSS_LIMIT_MB → 哪怕爆表也只记遥测，绝不停手。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    assert loop._rss_limit_mb is None, "默认必须是未标定（只观测）"
+    _ticking_guard(loop, limit_mb=1.0, sampler=_over_sampler(99999.0))
+
+    for _ in range(5):
+        assert loop._resource_guard_tick() is None
+
+    assert loop.stopped is False
+    assert loop.stop_reason == ""
+    rows = _read_resource_log(loop)
+    assert rows, "观测模式下必须留下遥测，否则拿不到标定依据"
+    assert rows[0]["abort_enabled"] is False
+    assert rows[0]["limit_mb"] is None
+    assert rows[0]["peak_mb"] == 99999.0
+    assert rows[0]["rss_mb"] == 99999.0
+    # 只观测：审计台账 actions.jsonl 不许被遥测污染（只观测时压根不该建）
+    assert not loop.ledger_path.exists(), "观测模式不该往审计台账写任何东西"
+
+
+def test_resource_guard_stops_after_consecutive_overruns(tmp_path):
+    """设了阈值 → 连续 2 次超限才停手（迟滞：单次尖峰不杀）。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _ticking_guard(loop, limit_mb=10.0, sampler=_over_sampler(999.0))
+    loop._rss_limit_mb = 10.0
+
+    assert loop._resource_guard_tick() is None     # 第 1 次超限：不杀
+    assert loop.stopped is False
+    event = loop._resource_guard_tick()            # 第 2 次连续超限 → 停手
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "resource_guard"
+    assert "rss=999.0MB" in event["reason"]
+    assert "commit=1200.0MB" in event["reason"]
+    assert "limit=10.0MB" in event["reason"]
+    assert event["limit_mb"] == 10.0
+    assert event["abort_enabled"] is True
+    assert loop.stopped is True
+
+
+def test_resource_guard_never_aborts_on_unavailable_reading(tmp_path):
+    """读数不可用 → 只记遥测，绝不停手（读不到 ≠ 超限）。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _ticking_guard(loop, limit_mb=1.0,
+                   sampler=lambda: {"rss_mb": None, "commit_mb": None,
+                                    "available": False, "reason": "unavailable"})
+    loop._rss_limit_mb = 1.0
+
+    for _ in range(4):
+        assert loop._resource_guard_tick() is None
+
+    assert loop.stopped is False
+
+
+def test_rss_limit_env_var_parsing(monkeypatch):
+    """WZMJ_RSS_LIMIT_MB：合法正数才生效；未设/非法/非正数一律 = 未标定。"""
+    cases = [("900", 900.0), ("1500.5", 1500.5), ("abc", None),
+             ("0", None), ("-5", None), ("", None)]
+    for raw, expected in cases:
+        monkeypatch.setenv("WZMJ_RSS_LIMIT_MB", raw)
+        assert auto_play_loop._read_rss_limit_from_env() == expected, raw
+    monkeypatch.delenv("WZMJ_RSS_LIMIT_MB", raising=False)
+    assert auto_play_loop._read_rss_limit_from_env() is None
+
+
+def test_uncalibrated_guard_never_signals_abort(tmp_path):
+    """未标定（_rss_limit_mb=None）→ 构造出的看门狗**不许**导致停手。
+
+    ``_build_resource_guard(None)`` 必须把 None **原样透传**（mem_guard 的纯观测
+    模式），不能塞一个假的 1500 冒充已标定——假阈值写进遥测会看起来像已标定，
+    那正是要避免的事。这里刻意不做"新旧 mem_guard 版本"的断言：无论走哪条实现，
+    只要 ``_rss_limit_mb is None``，``_resource_guard_tick()`` 都必须在
+    ``should_abort()`` 之前短路返回。
+    """
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop._guard, loop._rss_limit_fell_back = auto_play_loop._build_resource_guard(
+        None, sampler=_over_sampler(99999.0))
+    if loop._guard is None:
+        pytest.skip("mem_guard 不可用")
+    loop._rss_limit_mb = None
+
+    for _ in range(3):
+        assert loop._resource_guard_tick() is None
+
+    assert loop.stopped is False
+    rows = _read_resource_log(loop)
+    assert rows and rows[0]["limit_mb"] is None      # 遥测里也必须是"未标定"
+    assert rows[0]["abort_enabled"] is False
+    assert rows[0]["limit_fallback"] is False        # 新版：没走回退
+
+
+def test_limit_fallback_is_never_silent(tmp_path, monkeypatch):
+    """回退到假阈值时**必须**在遥测里留痕，绝不能静默。
+
+    回退一旦静默生效，就等于把"未标定时塞假 1500"那个错误原样放回：遥测会
+    重新出现 ``over: true``，看起来像"已标定且超限"，而其实根本没有阈值。
+    所以这里强制要求每一条遥测都带 ``limit_fallback`` 标记。
+    """
+    try:
+        import mem_guard
+    except Exception as exc:                # noqa: BLE001 - 别人的模块可能正在改
+        pytest.skip(f"mem_guard 不可用（{type(exc).__name__}: {exc}）")
+    real = mem_guard.ResourceGuard
+
+    class _OldGuard(real):
+        """模拟旧版 mem_guard：不接受 limit_mb=None。"""
+
+        def __init__(self, limit_mb=1500, **kwargs):
+            if limit_mb is None:
+                raise TypeError("旧版 mem_guard 不支持 limit_mb=None")
+            super().__init__(limit_mb=limit_mb, **kwargs)
+
+    monkeypatch.setattr(mem_guard, "ResourceGuard", _OldGuard)
+    guard, fell_back = auto_play_loop._build_resource_guard(
+        None, sampler=_over_sampler(99999.0))
+    assert guard is not None and fell_back is True   # 回退确实发生了
+
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop._guard, loop._rss_limit_fell_back = guard, fell_back
+    loop._rss_limit_mb = None
+
+    assert loop._resource_guard_tick() is None       # 仍然不许停手
+    assert loop.stopped is False
+
+    rows = _read_resource_log(loop)
+    assert rows and rows[0]["limit_fallback"] is True    # 留痕：不许静默
+    assert rows[0]["limit_mb"] is None                   # 同时仍是"未标定"
