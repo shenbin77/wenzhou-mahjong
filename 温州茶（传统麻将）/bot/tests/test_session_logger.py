@@ -104,6 +104,20 @@ def test_claim_decision_block_never_marks_channel_ready():
     assert any("claim_blocked" in item for item in reasons)
 
 
+def test_follow_record_preserves_bot_action_provenance():
+    record = build_follow_record({
+        "ts": "2026-10-26T19:00:00+08:00",
+        "event": "action",
+        "action_id": "emulator-5554:r7:t42:abc123",
+        "action_source": "bot",
+        "verified": True,
+        "tap": [800, 820],
+    }, session="s", tick=42)
+
+    assert record["action_id"] == "emulator-5554:r7:t42:abc123"
+    assert record["action_source"] == "bot"
+
+
 def test_session_logger_writes_jsonl(tmp_path: Path):
     logger = SessionLogger(tmp_path)
     logger.write_header({"mode": "tea_2p"})

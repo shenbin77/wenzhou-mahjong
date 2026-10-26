@@ -47,7 +47,7 @@ def test_lobby_probe_uses_read_only_capture(monkeypatch,tmp_path):
     assert not out.can_consider_entry
 
 
-def test_start_in_lobby_bypasses_table_mode_gate_until_in_game():
+def test_start_preflights_restart_settlement_before_lobby_gate():
     window=TeaAssistWindow.__new__(TeaAssistWindow)
     window.continuous=False
     window.video_future=None
@@ -57,10 +57,10 @@ def test_start_in_lobby_bypasses_table_mode_gate_until_in_game():
     window.mode=Variable("温州茶 · 2人")
     window._is_bound=lambda:True
     actions=[]
-    window._begin_lobby_follow=lambda:actions.append("lobby")
+    window._begin_startup_round_transition=lambda mode:actions.append(("recover",mode))
     window._ready=lambda *a,**k: (_ for _ in ()).throw(AssertionError("table check too early"))
     window.start()
-    assert actions==["lobby"]
+    assert actions==[("recover","follow")]
 
 
 def test_lobby_watcher_handoffs_after_in_game():

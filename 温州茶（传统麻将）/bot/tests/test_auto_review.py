@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import auto_review
 from auto_review import review_session
+from incident_inbox import mark_incident_resolved
 
 BOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -82,6 +83,26 @@ ADVISE_ROW = {
     "ts": "2026-10-25T04:16:50.000000+08:00", "event": "idle",
     "status": "advise", "reason": "等待对方出牌", "round_seq": 1,
 }
+
+
+def _stuck_candidate(second: int, frame: str, own=None) -> dict:
+    own = [] if own is None else own
+    return {
+        "ts": f"2026/10/26 17:37:{second:02d}", "event": "idle",
+        "status": "abstain", "gate": "bright_subset_unconfirmed",
+        "frame": f"frames/{frame}", "round_seq": 1,
+        "frame_facts": {
+            "round_seq": 1, "turn_actionable": False,
+            "concealed": [1, 2, 3], "melds": [], "river_own": own,
+            "river_opp": [], "claim_buttons": [], "caishen": "w1",
+        },
+        "table_state": {"discards_trusted": True},
+        "bright_subset_cut": {
+            "hit": True, "confirmed": True,
+            "whitelist": [{"tile_id": 61}, {"tile_id": 63}],
+            "evidence": {"physical_boxes": 17, "expected_concealed": 17},
+        },
+    }
 
 
 def _settle_sample(attempt, concealed, verified=False, reason="过后暗手不符"):
@@ -267,6 +288,136 @@ def test_abstain_run_broken_by_advise(tmp_path):
     session = _session(tmp_path, actions=rows)
     summary = review_session(session)
     assert _by_category(summary, "abstain_run") == []
+
+
+def test_progress_suspicions_are_written_with_original_line_numbers(tmp_path):
+    rows = [HEADER_DEV,
+            _stuck_candidate(0, "f1.png", own=[9]),
+            _stuck_candidate(2, "f2.png", own=[9]),
+            _stuck_candidate(5, "f3.png", own=[9]),
+            {
+                "ts": "2026/10/26 17:37:07", "event": "idle",
+                "status": "wait", "frame": "frames/f4.png", "round_seq": 1,
+                "frame_facts": {"round_seq": 1, "river_own": [9, 11]},
+                "table_state": {"discards_trusted": True},
+            }]
+    session = _session(tmp_path, actions=rows)
+    summary = review_session(session)
+    stuck = _by_category(summary, "stuck_suspected")
+    external = _by_category(summary, "external_advance_suspected")
+    assert len(stuck) == 1 and len(external) == 1
+    assert stuck[0]["excerpt"]["line_start"] == 2
+    assert stuck[0]["line"] == 4
+    assert external[0]["line"] == 5
+    assert external[0]["excerpt"]["bot_action_between"] is False
+    assert "仅标记" in external[0]["excerpt"]["reason"]
+
+
+def test_progress_suspicion_does_not_use_unconfirmed_bot_guess(tmp_path):
+    rows = [HEADER_CLEAN]
+    for second, frame in ((0, "f1.png"), (3, "f2.png"), (6, "f3.png")):
+        row = _stuck_candidate(second, frame)
+        row["bright_subset_cut"]["confirmed"] = False
+        rows.append(row)
+    summary = review_session(_session(tmp_path, actions=rows))
+    assert _by_category(summary, "stuck_suspected") == []
+    assert _by_category(summary, "external_advance_suspected") == []
+
+
+def test_verified_window_click_plus_external_progress_is_human_action_likely(tmp_path):
+    rows = [
+        HEADER_CLEAN,
+        _stuck_candidate(0, "h1.png", own=[9]),
+        _stuck_candidate(2, "h2.png", own=[9]),
+        _stuck_candidate(5, "h3.png", own=[9]),
+        {
+            "ts": "2026/10/26 17:37:07", "event": "idle", "status": "wait",
+            "frame": "frames/h4.png", "round_seq": 1,
+            "frame_facts": {"round_seq": 1, "river_own": [9, 11]},
+            "table_state": {"discards_trusted": True},
+        },
+    ]
+    session = _session(tmp_path, actions=rows)
+    _write_jsonl(session / "human_input.jsonl", [{
+        "event": "human_click_observed", "ts": "2026/10/26 17:37:06",
+        "serial": "emulator-5556", "mapping_status": "verified",
+        "hwnd": 88, "window_title": "雷电模拟器", "screen_xy": [1, 2],
+        "client_xy": [1, 2],
+    }])
+    inbox = tmp_path / "incident-inbox"
+    summary = review_session(session, incident_root=inbox)
+    hits = _by_category(summary, "human_action_likely")
+    assert len(hits) == 1
+    assert hits[0]["excerpt"]["base_type"] == "external_advance_suspected"
+    assert hits[0]["excerpt"]["human_click"]["delta_to_progress_s"] == 1.0
+    assert summary["sources"]["human_input.jsonl"]["rows"] == 1
+    assert summary["incident"]["status"] == "open"
+    assert (Path(summary["incident"]["path"]) / "incident.json").is_file()
+
+
+def test_unknown_or_wrong_serial_click_does_not_claim_human(tmp_path):
+    rows = [
+        HEADER_CLEAN,
+        _stuck_candidate(0, "u1.png", own=[9]),
+        _stuck_candidate(2, "u2.png", own=[9]),
+        _stuck_candidate(5, "u3.png", own=[9]),
+        {
+            "ts": "2026/10/26 17:37:07", "event": "idle", "status": "wait",
+            "frame": "frames/u4.png", "round_seq": 1,
+            "frame_facts": {"round_seq": 1, "river_own": [9, 11]},
+            "table_state": {"discards_trusted": True},
+        },
+    ]
+    session = _session(tmp_path, actions=rows)
+    _write_jsonl(session / "human_input.jsonl", [{
+        "event": "human_click_observed", "ts": "2026/10/26 17:37:06",
+        "serial": None, "mapping_status": "unknown",
+    }])
+    summary = review_session(session, incident_root=tmp_path / "inbox")
+    assert len(_by_category(summary, "external_advance_suspected")) == 1
+    assert _by_category(summary, "human_action_likely") == []
+
+
+def test_unverified_action_preserves_action_id_and_source(tmp_path):
+    action = {
+        "ts": "2026-10-26T18:00:00+08:00", "event": "action",
+        "verified": False, "action_id": "act-7", "action_source": "bot",
+        "reason": "post verify timeout",
+    }
+    summary = review_session(
+        _session(tmp_path, actions=[HEADER_CLEAN, action]),
+        incident_root=tmp_path / "inbox")
+    issue = _by_category(summary, "action_unverified")[0]
+    assert issue["excerpt"]["action_id"] == "act-7"
+    assert issue["excerpt"]["action_source"] == "bot"
+
+
+def test_later_distinct_failure_gets_open_incident_after_old_is_resolved(
+        tmp_path):
+    first_action = {
+        "ts": "2026-10-26T18:00:00+08:00", "event": "action",
+        "verified": False, "action_id": "act-1", "action_source": "bot",
+    }
+    second_action = {
+        "ts": "2026-10-26T18:00:05+08:00", "event": "action",
+        "verified": False, "action_id": "act-2", "action_source": "bot",
+    }
+    session = _session(tmp_path, actions=[HEADER_CLEAN, first_action])
+    inbox = tmp_path / "inbox"
+    initial = review_session(session, incident_root=inbox)
+    old_id = initial["incident"]["incident_id"]
+    mark_incident_resolved(inbox, old_id, resolution="fixed")
+    with (session / "actions.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second_action, ensure_ascii=False) + "\n")
+
+    rescanned = review_session(session, incident_root=inbox)
+    by_line = {item["line"]: item for item in rescanned["incidents"]}
+
+    assert by_line[2]["incident_id"] == old_id
+    assert by_line[2]["status"] == "resolved"
+    assert by_line[3]["status"] == "open"
+    assert by_line[3]["incident_id"] != old_id
+    assert rescanned["incident"] == by_line[3]
 
 
 # ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ from action_policy import ACTION_PASS, ActionDecision, BoardState  # noqa: E402
 from harvest_tea import EXPECTED_PACKAGE  # noqa: E402
 from invite_dialog import InvitationState  # noqa: E402
 from promo_popup import PromoPopupState  # noqa: E402
+from round_transition import TransitionResult  # noqa: E402
 from tap_executor import TapPlan, TapRejected  # noqa: E402
 
 HUD_A = b"hud-" + bytes(range(32))
@@ -2009,6 +2010,14 @@ def test_multi_bright_changed_advice_waits_for_stable_frame(tmp_path):
 # 超时才恢复。这里锁住新行为：同局同张数时用账本手牌算出该打哪张。
 # ---------------------------------------------------------------------------
 LEDGER_HAND17 = [1, 1, 2, 2, 3, 3, 4, 4, 21, 21, 22, 22, 23, 23, 24, 24, 62]
+DIM_GAIN_REAL_FRAMES = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261026_172351_emulator5554_玉姐" / "frames"
+    / "20261026_173700_841310_before_3fe653.png",
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261026_172351_emulator5554_玉姐" / "frames"
+    / "20261026_173703_517647_before_65fe30.png",
+)
 
 
 def _fake_subset(tile_ids, *, expected=17, hit=True, unresolved=False):
@@ -2021,10 +2030,157 @@ def _fake_subset(tile_ids, *, expected=17, hit=True, unresolved=False):
         for index, tile_id in enumerate(tile_ids)
     ]
     return SimpleNamespace(
-        hit=hit, unresolved=unresolved, candidates=candidates,
+        hit=hit, multi_candidate=len(candidates) >= 2,
+        unresolved=unresolved, candidates=candidates,
         evidence={"expected_concealed": expected},
         whitelist_ids=lambda: tuple(c.tile_id for c in candidates),
     )
+
+
+def _dim_gain_result(caishen="s2"):
+    return {
+        "mode": "tea_2p",
+        "status": "abstain",
+        "reason": "识牌不完整，停止决策",
+        "caishen": caishen,
+        "caishen_source": "image",
+    }
+
+
+@pytest.mark.skipif(
+    not all(path.is_file() for path in DIM_GAIN_REAL_FRAMES),
+    reason="17:37 dim-gain real frames missing",
+)
+def test_dim_gain_real_frames_only_fill_hand_then_choose_inside_whitelist(
+        tmp_path):
+    """17:37 实机压暗手：增益只补齐17张，不扩大可点范围。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop.round.caishen = "s2"
+    subset = _fake_subset([ID_NAN, 63])
+    images = [cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+              for path in DIM_GAIN_REAL_FRAMES]
+
+    first = loop._dim_gain_whitelist_advice(
+        images[0], subset, _dim_gain_result(), frame=str(DIM_GAIN_REAL_FRAMES[0]))
+    second = loop._dim_gain_whitelist_advice(
+        images[1], subset, _dim_gain_result(), frame=str(DIM_GAIN_REAL_FRAMES[1]))
+
+    assert first is None
+    assert second is not None
+    assert len(second["hand"]) == 17
+    assert second["tile_id"] in (ID_NAN, 63)
+    assert second["whitelist"] == [ID_NAN, 63]
+    assert second["source"] == "dim_gain_independent_frames"
+    assert loop._dim_gain_evidence["outcome"] == "advice"
+    # 补读本身只产出受限建议；点击仍必须另走 fresh-frame/TapExecutor。
+    assert tap.execute_calls == [] and tap.plan_calls == []
+
+
+@pytest.mark.skipif(
+    not DIM_GAIN_REAL_FRAMES[0].is_file(),
+    reason="17:37 dim-gain real frame missing",
+)
+def test_dim_gain_same_frame_cannot_self_confirm(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop.round.caishen = "s2"
+    subset = _fake_subset([ID_NAN, 63])
+    image = cv2.imdecode(
+        np.fromfile(str(DIM_GAIN_REAL_FRAMES[0]), np.uint8), cv2.IMREAD_COLOR)
+    frame = str(DIM_GAIN_REAL_FRAMES[0])
+
+    assert loop._dim_gain_whitelist_advice(
+        image, subset, _dim_gain_result(), frame=frame) is None
+    assert loop._dim_gain_whitelist_advice(
+        image, subset, _dim_gain_result(), frame=frame) is None
+    assert loop._dim_gain_evidence["outcome"] == "independent_frame_pending"
+    assert loop._dim_gain_evidence["streak"] == 1
+
+
+@pytest.mark.parametrize("read_error", [
+    OSError("frame read failed"),
+    cv2.error("opencv decode failed"),
+])
+def test_dim_gain_read_errors_fail_closed_with_evidence(
+        tmp_path, monkeypatch, read_error):
+    """OSError/cv2.error 是无建议证据，不得穿透成整环 anomaly。"""
+    import tile_vision
+
+    class BrokenVision:
+        def __init__(self, **_kwargs):
+            self.dim_gain_all = False
+
+        def recognize_hand(self, _image, **_kwargs):
+            raise read_error
+
+    monkeypatch.setattr(tile_vision, "TileVision", BrokenVision)
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop.round.caishen = "s2"
+
+    advice = loop._dim_gain_whitelist_advice(
+        np.zeros((900, 1600, 3), np.uint8),
+        _fake_subset([ID_NAN, 63]), _dim_gain_result(), frame="fresh-b.png")
+
+    assert advice is None
+    assert loop._dim_gain_snapshot is None
+    assert loop._dim_gain_evidence == {
+        "attempted": True,
+        "outcome": "no_advice",
+        "reason": "enhanced_read_exception",
+        "frame": "fresh-b.png",
+        "error_type": type(read_error).__name__,
+    }
+    assert tap.execute_calls == [] and loop.stopped is False
+
+
+def test_dim_gain_never_runs_outside_exact_bright_subset_gate(
+        tmp_path, monkeypatch):
+    """模式/原始状态/画面财神任一不对，连增益识牌器都不实例化。"""
+    import tile_vision
+
+    def forbidden(**_kwargs):
+        raise AssertionError("门禁外不得实例化 TileVision")
+
+    monkeypatch.setattr(tile_vision, "TileVision", forbidden)
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    subset = _fake_subset([ID_NAN, 63])
+    result = _dim_gain_result()
+    result["caishen_source"] = "manual"
+
+    assert loop._dim_gain_whitelist_advice(
+        np.zeros((900, 1600, 3), np.uint8), subset, result,
+        frame="fresh-c.png") is None
+    assert loop._dim_gain_evidence is None
+
+
+def test_dim_gain_read_error_is_logged_by_tick_without_loop_anomaly(
+        tmp_path, monkeypatch):
+    """整环也必须把补读异常写进当帧证据，不进异常预算。"""
+    import tile_vision
+
+    class BrokenVision:
+        def __init__(self, **_kwargs):
+            self.dim_gain_all = False
+
+        def recognize_hand(self, _image, **_kwargs):
+            raise OSError("offline real-frame read failed")
+
+    monkeypatch.setattr(tile_vision, "TileVision", BrokenVision)
+    result = bright_result(TWO_BRIGHT_IDS, caishen="s2")
+    result["caishen_source"] = "image"
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[bright_frame(TWO_BRIGHT_LEVELS)],
+        analyses=[result])
+
+    settle(loop, frames=2)  # 财神换局门需两帧；换局帧不许补读
+    event = loop.tick()
+
+    assert event["event"] == "idle"
+    assert event["gate"] == "bright_subset_unconfirmed"
+    assert event["dim_gain_read"]["reason"] == "enhanced_read_exception"
+    assert event["dim_gain_read"]["error_type"] == "OSError"
+    assert event["consecutive_errors"] == 0
+    assert loop.stopped is False
+    assert tap.execute_calls == [] and tap.plan_calls == []
 
 
 #: 账本读数写于上一帧、取回发生在当前帧：账本只在**另一帧**上生效。
@@ -2241,6 +2397,74 @@ def test_tick_feeds_current_frame_into_ledger_recall(tmp_path):
 
     assert same_tick is None
     assert next_tick is not None
+
+
+# ---------------------------------------------------------------------------
+# 局间「下一局」：瞬时 fresh 帧不匹配不是末局；点后未知必须显式停手
+# ---------------------------------------------------------------------------
+class FakeRoundTransition:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.attempt_kwargs = []
+
+    def probe(self, _image):
+        return True, {
+            "button": {"ok": True, "score": 0.9755,
+                       "reason": "button_ok"},
+            "scene": {"ok": True, "reason": "round_summary_scene"},
+        }
+
+    def attempt(self, **kwargs):
+        self.attempt_kwargs.append(kwargs)
+        return self.outcome
+
+
+def test_round_transition_transient_fresh_miss_keeps_loop_alive(tmp_path):
+    """外层0.9755后 fresh 帧0.683只记 no_click，不得 match_complete。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop._round_transition = FakeRoundTransition(TransitionResult(
+        "no_click",
+        "fresh 帧未再次确认下一局按钮：template_score_low:0.683"))
+
+    event = loop._round_transition_event(
+        np.zeros((900, 1600, 3), dtype=np.uint8),
+        Path(tmp_path) / "before.png")
+
+    assert event["event"] == "round_transition"
+    assert event["round_transition"]["status"] == "no_click"
+    assert loop.stopped is False
+
+
+def test_round_transition_does_not_treat_local_seq_as_actual_16_of_16(tmp_path):
+    """中途接管时 local round.seq 与画面 13/16 不对齐，不得用于末局。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop.round.seq = 16
+    transition = FakeRoundTransition(TransitionResult(
+        "no_click", "fresh 帧等待重拍"))
+    loop._round_transition = transition
+
+    event = loop._round_transition_event(
+        np.zeros((900, 1600, 3), dtype=np.uint8),
+        Path(tmp_path) / "before.png")
+
+    assert event["event"] == "round_transition"
+    assert loop.stopped is False
+    assert transition.attempt_kwargs == [{"round_no": 16, "round_total": 0}]
+
+
+@pytest.mark.parametrize("status", ["post_verify_uncertain", "halted"])
+def test_round_transition_uncertain_or_halted_stops_explicitly(tmp_path, status):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop._round_transition = FakeRoundTransition(TransitionResult(
+        status, "点下一局后未观察到新局证据"))
+
+    event = loop._round_transition_event(
+        np.zeros((900, 1600, 3), dtype=np.uint8),
+        Path(tmp_path) / "before.png")
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "round_transition_uncertain"
+    assert loop.stopped is True
 
 
 # ---------------------------------------------------------------------------
@@ -2965,3 +3189,34 @@ def test_limit_fallback_is_never_silent(tmp_path, monkeypatch):
     rows = _read_resource_log(loop)
     assert rows and rows[0]["limit_fallback"] is True    # 留痕：不许静默
     assert rows[0]["limit_mb"] is None                   # 同时仍是"未标定"
+
+
+def test_bot_action_event_gets_unique_provenance():
+    loop = object.__new__(AutoPlayLoop)
+    loop.consecutive_errors = 9
+    loop.card_count = 88
+    loop.serial = "emulator-5554"
+    loop.tick_index = 42
+    loop.round = type("Round", (), {"seq": 7})()
+    written = []
+    loop._write_event = lambda event: written.append(dict(event))
+
+    first = loop._event({"event": "action", "verified": True})
+    second = loop._event({"event": "action", "verified": True})
+
+    assert first["action_source"] == "bot"
+    assert first["action_id"].startswith("emulator-5554:r7:t42:")
+    assert first["action_id"] != second["action_id"]
+    assert written == [first, second]
+
+
+def test_non_action_event_does_not_claim_bot_click_provenance():
+    loop = object.__new__(AutoPlayLoop)
+    loop.consecutive_errors = 0
+    loop.card_count = None
+    loop._write_event = lambda _event: None
+
+    event = loop._event({"event": "idle", "reason": "waiting"})
+
+    assert "action_id" not in event
+    assert "action_source" not in event

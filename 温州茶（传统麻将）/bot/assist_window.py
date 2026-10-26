@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 import hashlib
 import argparse
+import ctypes
 import os
 import re
 import time
 import tkinter as tk
+from ctypes import wintypes
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
@@ -51,34 +53,35 @@ from tile_render import render_advice, render_candidates, render_hand
 from instance_profile import profile_paths, read_binding_for_serial, safe_serial
 from device_connection import DeviceConnection, verify_device
 from player_identity import PlayerIdentity, detect_player_identity
+from system_tray import (TRAY_ACTION_QUIT, TRAY_ACTION_RESTORE,
+                         WindowsTrayIcon)
+from window_restore_signal import (acknowledge_control, consume_control,
+                                   request_restore)
+from window_docking import DockFollower
 
 
 TEA_ROOT = Path(__file__).resolve().parent.parent
-ICON_PATH = Path(__file__).resolve().parent / "assets" / "温州麻将辅助器.ico"
+ICON_PATH = Path(__file__).resolve().parent / "assets" / "温州麻将精灵.ico"
+MASCOT_PATH = Path(__file__).resolve().parent / "assets" / "温州麻将精灵.png"
 LAST_ACCOUNT_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".last_account"
 WINDOW_STATE_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".window_state.json"
 BINDING_PATH = TEA_ROOT / "采集" / "assist_sessions" / ".binding.json"
 DEFAULT_SIZE = (1180, 860)
 SIZE_RANGE = {"w": (900, 1600), "h": (760, 1200)}
-FLOATING_BAR_SIZE = (132, 36)
-FLOATING_BAR_MARGIN = 8
-#: Size of the floating bar's explicit quit control (a small "×" top-right).
-#: It intentionally stays smaller than :data:`FLOATING_BAR_SIZE` so it never
-#: covers the status text or the "click anywhere to restore" area.
-FLOATING_BAR_CLOSE_SIZE = (12, 12)
+FLOATING_ORB_SIZE = (220, 92)
+FLOATING_ORB_MARGIN = 12
+FLOATING_ORB_DRAG_THRESHOLD = 4
 #: Outcome identifiers of :meth:`TeaAssistWindow.window_close_action`.
 #: The main window's close box (X) is bound to the *collapse* action only;
 #: quitting is an explicit, separately reachable action.
 CLOSE_ACTION_COLLAPSE = "collapse"
 CLOSE_ACTION_QUIT = "quit"
-#: Action ids of the floating bar's right-click menu.
-FLOATING_BAR_MENU_RESTORE = "restore"
-FLOATING_BAR_MENU_QUIT = "quit"
-#: Floating-bar context menu entries as ``(label, action id)``, in display
-#: order.  Data-driven so the menu can be verified without a Tk instance.
-FLOATING_BAR_MENU_ITEMS: tuple[tuple[str, str], ...] = (
-    ("恢复窗口", FLOATING_BAR_MENU_RESTORE),
-    ("退出程序", FLOATING_BAR_MENU_QUIT),
+#: Action ids of the mascot orb's right-click menu.
+FLOATING_ORB_MENU_RESTORE = "restore"
+FLOATING_ORB_MENU_QUIT = "quit"
+FLOATING_ORB_MENU_ITEMS: tuple[tuple[str, str], ...] = (
+    ("打开主窗口", FLOATING_ORB_MENU_RESTORE),
+    ("退出程序", FLOATING_ORB_MENU_QUIT),
 )
 #: Label of the explicit quit entry appended to the main window's 更多 menu.
 QUIT_MENU_LABEL = "退出程序"
@@ -358,14 +361,48 @@ def format_window_geometry(width: int, height: int, x: int, y: int) -> str:
 
 def calculate_bottom_right_position(
         screen_width: int, screen_height: int,
-        bar_width: int = FLOATING_BAR_SIZE[0],
-        bar_height: int = FLOATING_BAR_SIZE[1],
-        margin: int = FLOATING_BAR_MARGIN) -> tuple[int, int]:
-    """Calculate a non-negative bottom-right position for a floating bar."""
+        item_width: int = FLOATING_ORB_SIZE[0],
+        item_height: int = FLOATING_ORB_SIZE[1],
+        margin: int = FLOATING_ORB_MARGIN) -> tuple[int, int]:
+    """Calculate a non-negative bottom-right position for a floating item."""
     safe_margin = max(0, int(margin))
-    x = max(0, int(screen_width) - max(1, int(bar_width)) - safe_margin)
-    y = max(0, int(screen_height) - max(1, int(bar_height)) - safe_margin)
+    x = max(0, int(screen_width) - max(1, int(item_width)) - safe_margin)
+    y = max(0, int(screen_height) - max(1, int(item_height)) - safe_margin)
     return x, y
+
+
+def clamp_floating_position(
+        x: int, y: int, width: int, height: int,
+        screen: tuple[int, int]) -> tuple[int, int]:
+    """Keep a dragged floating companion fully inside the current screen."""
+    screen_w, screen_h = screen
+    safe_x = max(0, min(int(x), max(0, int(screen_w) - int(width))))
+    safe_y = max(0, min(int(y), max(0, int(screen_h) - int(height))))
+    return safe_x, safe_y
+
+
+def primary_work_area(screen: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Return the Windows desktop work area, excluding the taskbar."""
+    if os.name == "nt":
+        rect = wintypes.RECT()
+        try:
+            ok = ctypes.windll.user32.SystemParametersInfoW(
+                0x0030, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA
+            if ok:
+                return rect.left, rect.top, rect.right, rect.bottom
+        except (AttributeError, OSError):
+            pass
+    return 0, 0, int(screen[0]), int(screen[1])
+
+
+def clamp_floating_to_work_area(
+        x: int, y: int, width: int, height: int,
+        work_area: tuple[int, int, int, int]) -> tuple[int, int]:
+    """Clamp a floating companion to a possibly offset desktop work area."""
+    left, top, right, bottom = (int(value) for value in work_area)
+    safe_x = max(left, min(int(x), max(left, right - int(width))))
+    safe_y = max(top, min(int(y), max(top, bottom - int(height))))
+    return safe_x, safe_y
 
 
 def clamp_geometry(x: int, y: int, width: int, height: int,
@@ -465,6 +502,21 @@ class TeaAssistWindow:
         self._lobby_timer: str | None = None
         self._auto_future: Future | None = None
         self._auto_poll_timer: str | None = None
+        self._auto_start_pending = False
+        self._auto_start_event: Event | None = None
+        self._round_transition_future: Future | None = None
+        self._round_transition_future_mode: str | None = None
+        # ``start()`` may recover a process restart from a verified between-
+        # round summary.  Keep its authority separate from full auto: a
+        # follow-only click may continue observing, but must never acquire
+        # autoplay rights as a side effect.
+        self._round_transition_resume_mode: str | None = None
+        self._transition_follow_pending = False
+        self._accepted_round_observing = False
+        self._accepted_round_observe_timer: str | None = None
+        self._accepted_round_observe_generation = 0
+        self._accepted_round_future_generation: int | None = None
+        self._accepted_round_cancel_event: Event | None = None
         self._auto_events: Queue = Queue()
         self._suppress_review = False
         self._review_thread: Thread | None = None
@@ -514,6 +566,8 @@ class TeaAssistWindow:
         self.caishen = tk.StringVar()
         self.caishen_title = tk.StringVar(value="财神：—")
         self.always_on_top = tk.BooleanVar(value=bool(state.get("topmost", True)))
+        self.dock_to_emulator = tk.BooleanVar(
+            value=bool(state.get("dock_to_emulator", True)))
         self.manual_caishen = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="选择玩法、绑定雷电设备；开始跟随会自动找位、坐下、凑齐后开局，再进入持续推荐。")
         self.hand = tk.StringVar(value="手牌：—")
@@ -549,25 +603,47 @@ class TeaAssistWindow:
         self._follow_pipeline = None
         self._last_stop_reason = ""
         self.display_source: str | None = None
-        self._floating_bar: tk.Toplevel | None = None
-        #: Lazy right-click menu of the floating bar (created on first use).
+        self._floating_orb: tk.Toplevel | None = None
+        self._floating_canvas: tk.Canvas | None = None
+        self._floating_image = None
+        self._floating_status_dot: int | None = None
+        self._floating_nickname_text: int | None = None
+        self._floating_identity_text: int | None = None
         self._floating_menu: tk.Menu | None = None
-        #: The small "×" quit control inside the floating bar, when built.
-        self._floating_close_label: tk.Label | None = None
+        self._orb_drag_origin: tuple[int, int] | None = None
+        self._orb_window_origin: tuple[int, int] | None = None
+        try:
+            self._orb_position: tuple[int, int] | None = (
+                int(state["floating_x"]), int(state["floating_y"]))
+        except (KeyError, TypeError, ValueError):
+            self._orb_position = None
+        self._orb_dragged = False
+        self._last_companion_status: str | None = None
+        self._tray_actions: Queue[str] = Queue()
+        self._system_tray = WindowsTrayIcon(
+            ICON_PATH,
+            f"温州麻将辅助器 · {self._profile_paths.serial}",
+            self._tray_actions.put,
+        )
+        self._tray_started = False
         #: Guards :meth:`quit_app` against a second teardown pass.
         self._quitting = False
         self._collapsed_geometry = format_window_geometry(width, height, x, y)
         self._collapsed_topmost = bool(state.get("topmost", True))
-        self._floating_status = tk.StringVar(value="茶2 · 待命")
         self._restore_binding()
         self._build()
+        self._dock_follower = DockFollower(
+            self.root, self._profile_paths.serial,
+            on_manual_detach=self._on_manual_dock_detach)
+        self._dock_follower.set_enabled(self.dock_to_emulator.get())
+        self._tray_started = self._system_tray.start()
         self._warn_when_adb_missing()
         self._refresh_binding_views()
         self._apply_preview_layout(False)
         self.recorder_timer = root.after(500, self._poll_recorder)
         self.ticker = root.after(200, self._tick)
-        # Closing the main window hides it into the right-bottom floating bar
-        # instead of exiting: following/logging/auto-play keep running there.
+        # Closing the main window hides it into the tray + mascot orb instead
+        # of exiting: following/logging/auto-play keep running there.
         self._bind_window_close_protocol()
 
     # -- window close semantics -------------------------------------------
@@ -601,7 +677,7 @@ class TeaAssistWindow:
             str: :data:`CLOSE_ACTION_COLLAPSE`, so callers/tests can assert the
             close box never maps to :data:`CLOSE_ACTION_QUIT`.
         """
-        self.collapse_to_floating_bar()
+        self.collapse_to_floating_orb()
         return CLOSE_ACTION_COLLAPSE
 
     # -- layout ----------------------------------------------------------
@@ -803,6 +879,9 @@ class TeaAssistWindow:
         self.menu.add_command(label="房间号", command=self._edit_room)
         self.menu.add_checkbutton(label="窗口置顶", variable=self.always_on_top,
                                   command=self._set_always_on_top)
+        self.menu.add_checkbutton(label="贴靠雷电窗口",
+                                  variable=self.dock_to_emulator,
+                                  command=self._on_dock_toggle)
         self.menu.add_separator()
         # 财神组：自动识别模板缺口的逃生门，保持原 radio 结构与门控语义。
         self.menu.add_checkbutton(label="手动指定财神", variable=self.manual_caishen,
@@ -1041,12 +1120,43 @@ class TeaAssistWindow:
                 self.status.set(f"已打开下一台雷电辅助器：{serial}（PID {proc.pid}）。")
                 return
             if pid is not None:
+                request_restore(serial)
                 activate_window(pid)
                 self.status.set("所有在线雷电都已有辅助器窗口，已切换到现有窗口。")
                 return
             self.status.set("当前没有发现新的在线雷电；无需手填设备编号。")
         except Exception as exc:
             self.status.set(f"打开下一台雷电辅助器失败：{exc}")
+
+    def _persist_dock_preference(self) -> None:
+        state = load_window_state(self._geometry_file())
+        state["dock_to_emulator"] = bool(self.dock_to_emulator.get())
+        save_window_state(state, self._geometry_file())
+
+    def _on_dock_toggle(self) -> None:
+        follower = getattr(self, "_dock_follower", None)
+        enabled = bool(self.dock_to_emulator.get())
+        if follower is not None:
+            follower.set_enabled(enabled)
+        self._persist_dock_preference()
+        self.status.set(
+            "已开启贴靠：优先停靠雷电右侧，其次下方；屏幕受限时选择不遮挡的一侧。"
+            if enabled else "已关闭贴靠；辅助器窗口可独立移动。")
+
+    def _on_manual_dock_detach(self) -> None:
+        """A deliberate drag disables docking instead of pulling back."""
+        self.dock_to_emulator.set(False)
+        self._persist_dock_preference()
+        self.status.set("检测到手动拖开辅助器，已暂停贴靠；可在“更多”重新开启。")
+
+    def _poll_window_docking(self) -> None:
+        follower = getattr(self, "_dock_follower", None)
+        if follower is None:
+            return
+        try:
+            follower.tick()
+        except tk.TclError:
+            return
 
     def _edit_room(self) -> None:
         value = simpledialog.askstring("房间号（可空）", "房间号",
@@ -1536,6 +1646,7 @@ class TeaAssistWindow:
                 return
             pid = existing_window_pids(DEFAULT_SERIAL).get(serial)
             if pid is not None:
+                request_restore(serial)
                 activate_window(pid)
                 self.status.set(f"{serial} 的辅助器已经打开，已尝试切换到该窗口。")
                 return
@@ -1716,13 +1827,17 @@ class TeaAssistWindow:
             if not self._is_bound():
                 missing.append("未绑定" if getattr(self, "_binding", None) is None
                                else "绑定已失效")
-            if self._is_bound() and not self._identity_gate_ok():
+            following = bool(getattr(self, "continuous", False))
+            if (self._is_bound() and following
+                    and not self._identity_gate_ok()):
                 state = getattr(self, "_identity_state", "unchecked")
                 missing.append("玩家不一致" if state == "mismatch" else "玩家未核验")
-            if not self._mode_gate_ok():
+            if self._is_bound() and not following \
+                    and getattr(self, "_identity_state", "unchecked") == "mismatch" \
+                    and getattr(self, "_identity_key", None) == self._identity_context():
+                missing.append("玩家不一致")
+            if following and not self._mode_gate_ok():
                 missing.append("玩法未核对")
-            if not getattr(self, "continuous", False):
-                missing.append("未开始跟随")
             if not self._channel_ready():
                 missing.append("动作通道未就绪")
             if missing:
@@ -1730,7 +1845,9 @@ class TeaAssistWindow:
                 text = f"不可开启：{'、'.join(missing)}"
                 state = "disabled"
             else:
-                text, level, state = "● 可开启", "ok", "normal"
+                text, level, state = (
+                    ("● 可开启", "ok", "normal") if following else
+                    ("● 可开启：先自动找位开局", "ok", "normal"))
             if button is not None:
                 try:
                     button.configure(state=state)
@@ -1960,6 +2077,9 @@ class TeaAssistWindow:
                 "请关闭遮挡本人昵称的面板或进入牌桌后重试。")
             self._set_operational_status(
                 "身份待核验", result.detail, level="wait")
+        if pending == "full_auto" or getattr(self, "_auto_resume_pending", False):
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
         self._refresh_binding_views()
 
     def _verify_identity_and_mode(self) -> None:
@@ -2055,6 +2175,9 @@ class TeaAssistWindow:
         if mode_key != current_key:
             self._check_state = "unchecked"
             self._check_pending = None
+            if getattr(self, "_auto_resume_pending", False):
+                self._full_auto_wanted = False
+                self._auto_resume_pending = False
             return
         self._check_mode_key = mode_key
         self._check_detail = detail
@@ -2092,6 +2215,9 @@ class TeaAssistWindow:
                     "请改选玩法或换房。")
             self._set_operational_status(
                 "核对不一致", f"牌桌是{label}，与所选不一致", level="error")
+        if pending == "full_auto" or getattr(self, "_auto_resume_pending", False):
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
         self._refresh_binding_views()
 
     def _menu_entry_enabled(self, label: str) -> bool:
@@ -2232,8 +2358,8 @@ class TeaAssistWindow:
             return
         status.set(f"{ADB_RESOLVE_NOTE}：请先安装雷电/平台工具或指定 adb 路径，再连接设备。")
 
-    def _floating_status_text(self) -> str:
-        """Return compact state text for the right-bottom floating bar."""
+    def _companion_status_text(self) -> str:
+        """Return compact state text shared by the tray and mascot orb."""
         try:
             mode_name = str(self.mode.get()) if hasattr(self, "mode") else ""
         except Exception:  # noqa: BLE001 - a status label must never raise
@@ -2251,41 +2377,85 @@ class TeaAssistWindow:
             state = "待命"
         return f"{mode_short} · {state}"
 
-    def _refresh_floating_status(self) -> None:
-        """Refresh the floating text from the existing Tk tick cadence."""
-        status = getattr(self, "_floating_status", None)
-        if status is None:
-            return
-        try:
-            status.set(self._floating_status_text())
-        except tk.TclError:
-            # The bar was destroyed between ticks; the next collapse recreates
-            # it, so a stale variable must not break the main tick loop.
-            pass
+    def _companion_status_color(self) -> str:
+        if (getattr(self, "_identity_state", "unchecked") == "mismatch"
+                and getattr(self, "_identity_key", None) == self._identity_context()):
+            return "#e53935"
+        if self._identity_gate_ok(max_age_seconds=10.0):
+            return "#00c853"
+        return "#ffb300"
 
-    def _destroy_floating_bar(self) -> None:
-        """Destroy this serial window's floating bar if it exists."""
-        bar = getattr(self, "_floating_bar", None)
-        self._floating_bar = None
-        # The "×" control dies with its parent; drop the stale reference so a
-        # later collapse rebuilds it instead of resurrecting a dead widget.
-        self._floating_close_label = None
-        if bar is None:
+    def _companion_identity_text(self) -> str:
+        if (getattr(self, "_identity_state", "unchecked") == "mismatch"
+                and getattr(self, "_identity_key", None) == self._identity_context()):
+            return "身份不一致"
+        if self._identity_gate_ok(max_age_seconds=10.0):
+            return "当前画面已核验"
+        return "账号待核验"
+
+    def _companion_nickname(self) -> str:
+        account = getattr(self, "account", None)
+        name = str(account.get()).strip() if account is not None else ""
+        return (name[:9] + "…") if len(name) > 10 else (name or "未填昵称")
+
+    def _refresh_companion_status(self) -> None:
+        """Refresh tray tooltip and the orb's tiny state light on change."""
+        text = self._companion_status_text()
+        color = self._companion_status_color()
+        nickname = self._companion_nickname()
+        identity = self._companion_identity_text()
+        signature = f"{nickname}|{identity}|{text}|{color}"
+        if signature == getattr(self, "_last_companion_status", None):
+            return
+        self._last_companion_status = signature
+        tray = getattr(self, "_system_tray", None)
+        if tray is not None:
+            serial = getattr(getattr(self, "_profile_paths", None),
+                             "serial", "")
+            tray.update_tooltip(
+                f"温州麻将辅助器 · {nickname} · {serial} · {identity} · {text}".strip(" ·"))
+        canvas = getattr(self, "_floating_canvas", None)
+        dot = getattr(self, "_floating_status_dot", None)
+        if canvas is not None and dot is not None:
+            try:
+                canvas.itemconfigure(dot, fill=color)
+                nickname_text = getattr(self, "_floating_nickname_text", None)
+                identity_text = getattr(self, "_floating_identity_text", None)
+                if nickname_text is not None:
+                    canvas.itemconfigure(nickname_text, text=nickname)
+                if identity_text is not None:
+                    canvas.itemconfigure(identity_text, text=identity,
+                                         fill=color)
+            except tk.TclError:
+                pass
+
+    def _destroy_floating_orb(self) -> None:
+        """Destroy this serial window's mascot orb if it exists."""
+        orb = getattr(self, "_floating_orb", None)
+        self._floating_orb = None
+        self._floating_canvas = None
+        self._floating_image = None
+        self._floating_status_dot = None
+        self._floating_nickname_text = None
+        self._floating_identity_text = None
+        self._orb_drag_origin = None
+        self._orb_window_origin = None
+        if orb is None:
             return
         try:
-            if bar.winfo_exists():
-                bar.destroy()
+            if orb.winfo_exists():
+                orb.destroy()
         except tk.TclError:
             pass
 
     def _floating_menu_command(self, action: str):
-        """Return the callable bound to a floating-bar menu ``action``."""
-        if action == FLOATING_BAR_MENU_QUIT:
+        """Return the callable bound to a mascot-orb menu ``action``."""
+        if action == FLOATING_ORB_MENU_QUIT:
             return self.quit_app
-        return self.restore_from_floating_bar
+        return self.restore_from_floating_orb
 
     def _ensure_floating_menu(self) -> tk.Menu | None:
-        """Create (once) the floating bar's right-click menu.
+        """Create (once) the mascot orb's right-click menu.
 
         Returns:
             tk.Menu | None: the reusable menu, or ``None`` when Tk refused it
@@ -2300,7 +2470,7 @@ class TeaAssistWindow:
                 self._floating_menu = None
         try:
             menu = tk.Menu(self.root, tearoff=0)
-            for label, action in FLOATING_BAR_MENU_ITEMS:
+            for label, action in FLOATING_ORB_MENU_ITEMS:
                 menu.add_command(label=label,
                                  command=self._floating_menu_command(action))
         except tk.TclError:
@@ -2310,7 +2480,7 @@ class TeaAssistWindow:
         return menu
 
     def _popup_floating_menu(self, event=None) -> str:
-        """Show the floating bar's menu (right click).  Consumes the click."""
+        """Show the mascot orb's menu (right click).  Consumes the click."""
         menu = self._ensure_floating_menu()
         if menu is None:
             return "break"
@@ -2330,98 +2500,142 @@ class TeaAssistWindow:
                 pass
         return "break"
 
-    def _build_floating_close_control(self, bar) -> tk.Label | None:
-        """Add the tiny "×" quit control to the top-right of ``bar``.
-
-        It is a separate child widget using ``place`` (independent of the
-        packed status label) and it binds ``<Button-1>`` at *widget* level,
-        which Tk dispatches before the toplevel binding that restores the
-        window; :meth:`_on_floating_close_click` returns ``"break"`` to stop
-        that later tag, so a click on "×" can never restore the window.
-
-        Returns:
-            tk.Label | None: the control, or ``None`` when Tk refused it.
-        """
-        width, height = FLOATING_BAR_CLOSE_SIZE
-        try:
-            close = tk.Label(
-                bar, text="×", background="#263238", foreground="#90a4ae",
-                cursor="hand2", font=("Microsoft YaHei UI", 8, "bold"),
-                width=1, height=1, borderwidth=0, highlightthickness=0)
-            close.place(relx=1.0, x=-1, y=0, anchor="ne",
-                        width=width, height=height)
-            # Widget-level binding runs first and "break" short-circuits the
-            # toplevel (bar) <Button-1> restore binding.
-            close.bind("<Button-1>", self._on_floating_close_click)
-            close.bind("<Enter>",
-                       lambda _e: close.configure(foreground="#ff8a80"))
-            close.bind("<Leave>",
-                       lambda _e: close.configure(foreground="#90a4ae"))
-            close.bind("<Button-3>", self._popup_floating_menu)
-        except tk.TclError:
-            return None
-        self._floating_close_label = close
-        return close
-
-    def _on_floating_close_click(self, _event=None) -> str:
-        """Really quit from the floating bar's "×" control.
-
-        Returns:
-            str: ``"break"``, so Tk stops after the widget-level binding and
-            the bar's "click to restore" binding never fires.
-        """
-        self.quit_app()
+    def _on_orb_press(self, event) -> str:
+        orb = getattr(self, "_floating_orb", None)
+        if orb is None:
+            return "break"
+        self._orb_drag_origin = (int(event.x_root), int(event.y_root))
+        self._orb_window_origin = (int(orb.winfo_x()), int(orb.winfo_y()))
+        self._orb_dragged = False
         return "break"
 
-    def _show_floating_bar(self) -> None:
-        """Create one borderless, topmost floating bar for this window."""
-        existing = getattr(self, "_floating_bar", None)
+    def _on_orb_motion(self, event) -> str:
+        orb = getattr(self, "_floating_orb", None)
+        start = getattr(self, "_orb_drag_origin", None)
+        origin = getattr(self, "_orb_window_origin", None)
+        if orb is None or start is None or origin is None:
+            return "break"
+        dx = int(event.x_root) - start[0]
+        dy = int(event.y_root) - start[1]
+        if max(abs(dx), abs(dy)) >= FLOATING_ORB_DRAG_THRESHOLD:
+            self._orb_dragged = True
+        if not self._orb_dragged:
+            return "break"
+        width, height = FLOATING_ORB_SIZE
+        screen = (self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        x, y = clamp_floating_to_work_area(
+            origin[0] + dx, origin[1] + dy, width, height,
+            primary_work_area(screen))
+        self._orb_position = (x, y)
+        try:
+            orb.geometry(format_window_geometry(width, height, x, y))
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _remember_orb_position(self) -> None:
+        position = getattr(self, "_orb_position", None)
+        if position is None:
+            return
+        state = load_window_state(self._geometry_file())
+        state.update({"floating_x": position[0], "floating_y": position[1]})
+        save_window_state(state, self._geometry_file())
+
+    def _on_orb_release(self, _event=None) -> str:
+        dragged = bool(getattr(self, "_orb_dragged", False))
+        self._orb_drag_origin = None
+        self._orb_window_origin = None
+        self._orb_dragged = False
+        if dragged:
+            self._remember_orb_position()
+            return "break"
+        self.restore_from_floating_orb()
+        return "break"
+
+    def _show_floating_orb(self) -> None:
+        """Create one transparent, draggable, topmost mascot orb."""
+        existing = getattr(self, "_floating_orb", None)
         if existing is not None:
             try:
                 if existing.winfo_exists():
                     existing.lift()
                     return
             except tk.TclError:
-                self._floating_bar = None
+                self._floating_orb = None
 
-        width, height = FLOATING_BAR_SIZE
-        x, y = calculate_bottom_right_position(
-            self.root.winfo_screenwidth(), self.root.winfo_screenheight(),
-            width, height, FLOATING_BAR_MARGIN)
-        bar = tk.Toplevel(self.root)
-        self._floating_bar = bar
-        bar.overrideredirect(True)
-        bar.configure(background="#263238", cursor="hand2")
-        bar.geometry(format_window_geometry(width, height, x, y))
-        bar.resizable(False, False)
-        bar.attributes("-topmost", True)
-        label = tk.Label(
-            bar, textvariable=self._floating_status, background="#263238",
-            foreground="#ffffff", cursor="hand2",
-            font=("Microsoft YaHei UI", 9, "bold"), padx=8, pady=4)
-        label.pack(fill="both", expand=True)
-        for widget in (bar, label):
-            widget.bind("<Button-1>", self.restore_from_floating_bar)
-            # Right click anywhere on the bar opens the explicit menu.
+        width, height = FLOATING_ORB_SIZE
+        screen = (self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        work_area = primary_work_area(screen)
+        position = getattr(self, "_orb_position", None)
+        if position is None:
+            left, top, right, bottom = work_area
+            serial = self._identity_context()[1]
+            suffix = re.search(r"(\d+)$", serial)
+            slot = ((int(suffix.group(1)) - 5554) // 2) % 4 if suffix else 0
+            position = (right - width - FLOATING_ORB_MARGIN,
+                        bottom - height - FLOATING_ORB_MARGIN
+                        - slot * (height + FLOATING_ORB_MARGIN))
+        x, y = clamp_floating_to_work_area(
+            position[0], position[1], width, height, work_area)
+        self._orb_position = (x, y)
+
+        transparent = "#ff00ff"
+        orb = tk.Toplevel(self.root)
+        self._floating_orb = orb
+        orb.overrideredirect(True)
+        orb.configure(background=transparent, cursor="hand2")
+        orb.geometry(format_window_geometry(width, height, x, y))
+        orb.resizable(False, False)
+        orb.attributes("-topmost", True)
+        orb.attributes("-transparentcolor", transparent)
+
+        source = Image.open(MASCOT_PATH).convert("RGBA")
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        source.thumbnail((88, 88), resampling)
+        self._floating_image = ImageTk.PhotoImage(source)
+        canvas = tk.Canvas(
+            orb, width=width, height=height, background=transparent,
+            cursor="hand2", highlightthickness=0, borderwidth=0)
+        self._floating_canvas = canvas
+        canvas.pack(fill="both", expand=True)
+        canvas.create_polygon(
+            77, 24, 93, 34, 93, 72,
+            fill="#fffdf3", outline="#b78530", width=2)
+        canvas.create_rectangle(
+            87, 13, width - 4, 77,
+            fill="#fffdf3", outline="#b78530", width=2)
+        canvas.create_image(44, height // 2,
+                            image=self._floating_image, anchor="center")
+        self._floating_nickname_text = canvas.create_text(
+            99, 29, anchor="w", text=self._companion_nickname(),
+            fill="#2f3b32", font=("Microsoft YaHei UI", 10, "bold"))
+        self._floating_identity_text = canvas.create_text(
+            99, 54, anchor="w", text=self._companion_identity_text(),
+            fill=self._companion_status_color(),
+            font=("Microsoft YaHei UI", 8))
+        self._floating_status_dot = canvas.create_oval(
+            width - 24, 20, width - 12, 32,
+            fill=self._companion_status_color(), outline="#ffffff", width=2)
+        for widget in (orb, canvas):
+            widget.bind("<ButtonPress-1>", self._on_orb_press)
+            widget.bind("<B1-Motion>", self._on_orb_motion)
+            widget.bind("<ButtonRelease-1>", self._on_orb_release)
             widget.bind("<Button-3>", self._popup_floating_menu)
-        # An (invisible) window-manager close on the bar still means "restore";
-        # the real quit entry points are the "×" control and the context menu.
-        bar.protocol("WM_DELETE_WINDOW", self.restore_from_floating_bar)
-        # Built last so it sits on top of the packed status label.
-        self._build_floating_close_control(bar)
-        self._refresh_floating_status()
-        bar.lift()
+        orb.protocol("WM_DELETE_WINDOW", self.restore_from_floating_orb)
+        self._last_companion_status = None
+        self._refresh_companion_status()
+        orb.lift()
 
-    def collapse_to_floating_bar(self) -> None:
+    def collapse_to_floating_orb(self) -> None:
         """Hide the main window while keeping all follow work running."""
-        existing = getattr(self, "_floating_bar", None)
+        existing = getattr(self, "_floating_orb", None)
         if existing is not None:
             try:
                 if existing.winfo_exists():
                     existing.lift()
                     return
             except tk.TclError:
-                self._floating_bar = None
+                self._floating_orb = None
         try:
             self.root.update_idletasks()
             current_geometry = self.root.geometry()
@@ -2435,24 +2649,27 @@ class TeaAssistWindow:
             self.always_on_top.set(self._collapsed_topmost)
             self._remember_geometry()
             self.root.withdraw()
-            self._show_floating_bar()
-        except tk.TclError:
-            # A bar creation failure must not strand the application hidden.
-            self._destroy_floating_bar()
+            self._show_floating_orb()
+        except Exception as exc:  # noqa: BLE001 - never strand a hidden root
+            # A companion failure must not strand the application hidden.
+            self._destroy_floating_orb()
+            status = getattr(self, "status", None)
+            if status is not None:
+                status.set(f"悬浮球创建失败：{type(exc).__name__}: {exc}")
             try:
                 self.root.deiconify()
             except tk.TclError:
                 pass
 
-    def restore_from_floating_bar(self, _event=None) -> None:
-        """Restore geometry/topmost state and remove the floating bar."""
+    def restore_from_floating_orb(self, _event=None) -> None:
+        """Restore geometry/topmost state and remove the mascot orb."""
         try:
             screen = (self.root.winfo_screenwidth(),
                       self.root.winfo_screenheight())
             geometry = restore_window_geometry(
                 getattr(self, "_collapsed_geometry", ""), screen)
             topmost = bool(getattr(self, "_collapsed_topmost", True))
-            self._destroy_floating_bar()
+            self._destroy_floating_orb()
             if geometry is not None:
                 self.root.geometry(geometry)
                 self._collapsed_geometry = geometry
@@ -2462,7 +2679,27 @@ class TeaAssistWindow:
             self.root.lift()
             self.root.focus_force()
         except tk.TclError:
-            self._floating_bar = None
+            self._floating_orb = None
+
+    def _drain_system_tray_actions(self) -> bool:
+        """Run queued tray commands on the Tk thread.
+
+        Returns ``False`` after an explicit quit so ``_tick`` does not queue
+        another callback on a destroyed root.
+        """
+        actions = getattr(self, "_tray_actions", None)
+        if actions is None:
+            return True
+        while True:
+            try:
+                action = actions.get_nowait()
+            except Empty:
+                return True
+            if action == TRAY_ACTION_RESTORE:
+                self.restore_from_floating_orb()
+            elif action == TRAY_ACTION_QUIT:
+                self.quit_app()
+                return False
 
     def _ready(self, pending: str | None = None) -> bool:
         """Start gate: binding + visual player identity + table-mode check.
@@ -2637,8 +2874,25 @@ class TeaAssistWindow:
         """全自动因局终结算停手后：后台单次执行「下一局」，结果回 UI 线程。"""
         if getattr(self, "_round_transition_future", None) is not None:
             return
+        executor = self._ensure_round_transition_executor()
+        round_no = int(getattr(self, "round_no", 0) or 0) or None
+        self._round_transition_resume_mode = "full_auto"
+        self._transition_follow_pending = False
+        # The autoplay worker has just stopped at a verified settlement.  Keep
+        # its already-granted resume authority alive while this single guarded
+        # transition is in flight.
+        self._auto_resume_pending = True
+        self.full_auto_status.set("本局结束：正在核验局间页「下一局」按钮（单次点击）。")
+        self._round_transition_future = self.auto_executor.submit(
+            executor.attempt, round_no=round_no)
+        self._round_transition_future_mode = "full_auto"
+        self.root.after(200, self._poll_round_transition)
+
+    def _ensure_round_transition_executor(self):
+        """Return the per-serial guarded next-round executor."""
         from round_transition import RoundTransitionExecutor
         from lobby_follow import _capture_image, _tap_lobby
+
         serial = self.serial.get().strip()
         session_dir = Path(self.session_dir)
         executor = getattr(self, "_round_transition", None)
@@ -2649,11 +2903,94 @@ class TeaAssistWindow:
                 report_dir=session_dir)
             executor._serial = serial
             self._round_transition = executor
-        round_no = int(getattr(self, "round_no", 0) or 0) or None
-        self.full_auto_status.set("本局结束：正在核验局间页「下一局」按钮（单次点击）。")
+        return executor
+
+    @staticmethod
+    def _recover_startup_round_transition(executor):
+        """Read once, then either use the existing guarded executor or abstain.
+
+        This runs only after an explicit follow/full-auto/resume request.  The
+        preflight prevents a restart on a terminal result, dissolved-match
+        modal, or other settlement overlay from falling through to the lobby
+        click channel.  A positive candidate still goes through ``attempt``'s
+        own fresh-frame recheck before its single click.
+        """
+        from match_end import read_match_end
+        from round_transition import TransitionResult
+
+        try:
+            frame = executor._capture()
+            match_end = read_match_end(frame)
+        except Exception as exc:  # noqa: BLE001 - fail closed before any tap
+            return TransitionResult(
+                "startup_blocked",
+                f"重启续局预检失败，已停手且未点击：{type(exc).__name__}: {exc}")
+        if match_end.present:
+            return TransitionResult(
+                "startup_blocked",
+                "已识别本场结束页；返回大厅、分享战绩和末局续局均永久拒绝",
+                evidence={"match_end": match_end.ledger()})
+
+        try:
+            candidate, evidence = executor.probe(frame)
+        except Exception as exc:  # noqa: BLE001 - fail closed before any tap
+            return TransitionResult(
+                "startup_blocked",
+                f"局间页门禁读取失败，已停手且未点击：{type(exc).__name__}: {exc}")
+        if candidate:
+            # A restarted process cannot trust its local round counter.  The
+            # existing visual gates/fresh recheck decide; the enclosing future
+            # guarantees this attempt is submitted only once.
+            return executor.attempt(round_no=None, round_total=0)
+
+        scene = (evidence or {}).get("scene") or {}
+        if scene.get("ok"):
+            return TransitionResult(
+                "startup_blocked",
+                "当前是结算/模态画面，但没有合法「下一局」三重门；"
+                "可能为等待超时解散、末局或被遮挡页面，拒绝所有点击",
+                evidence=evidence)
+        return TransitionResult(
+            "startup_not_settlement",
+            "当前画面不是可续接的局间结算页，转入既有大厅/等候室门禁",
+            evidence=evidence)
+
+    def _begin_startup_round_transition(self, mode: str) -> None:
+        """One-shot restart recovery, entered only by an explicit request."""
+        if getattr(self, "_round_transition_future", None) is not None:
+            self.full_auto_status.set(
+                "重启续局核验已在进行；重复请求不会再次提交或点击。")
+            return
+        executor = self._ensure_round_transition_executor()
+        mode = "full_auto" if mode == "full_auto" else "follow"
+        self._round_transition_resume_mode = mode
+        self._transition_follow_pending = mode == "follow"
+        self.full_auto_status.set(
+            "正在核验当前画面是否为可安全续接的局间页；只允许一次「下一局」。")
         self._round_transition_future = self.auto_executor.submit(
-            executor.attempt, round_no=round_no)
+            self._recover_startup_round_transition, executor)
+        self._round_transition_future_mode = mode
         self.root.after(200, self._poll_round_transition)
+
+    def _active_round_transition_mode(self) -> str | None:
+        mode = getattr(self, "_round_transition_resume_mode", None)
+        if mode in ("follow", "full_auto"):
+            return mode
+        if getattr(self, "_transition_follow_pending", False):
+            return "follow"
+        if (getattr(self, "_full_auto_wanted", False)
+                or getattr(self, "_auto_resume_pending", False)):
+            return "full_auto"
+        return None
+
+    def _round_transition_authorized(self) -> bool:
+        mode = TeaAssistWindow._active_round_transition_mode(self)
+        if mode == "follow":
+            return bool(getattr(self, "_transition_follow_pending", False))
+        if mode == "full_auto":
+            return bool(getattr(self, "_full_auto_wanted", False)
+                        and getattr(self, "_auto_resume_pending", False))
+        return False
 
     def _poll_round_transition(self) -> None:
         future = getattr(self, "_round_transition_future", None)
@@ -2662,38 +2999,311 @@ class TeaAssistWindow:
         if not future.done():
             self.root.after(200, self._poll_round_transition)
             return
+        was_accepted_observer = bool(getattr(
+            self, "_accepted_round_observing", False))
+        submitted_mode = (getattr(self, "_round_transition_future_mode", None)
+                          or self._active_round_transition_mode())
+        observer_generation = getattr(
+            self, "_accepted_round_future_generation", None)
         self._round_transition_future = None
+        self._round_transition_future_mode = None
+        if was_accepted_observer:
+            self._accepted_round_observing = False
+            self._accepted_round_future_generation = None
+            self._accepted_round_cancel_event = None
         try:
             result = future.result()
         except Exception as exc:  # noqa: BLE001
-            self._full_auto_wanted = False
+            if (submitted_mode in ("follow", "full_auto")
+                    and (submitted_mode != self._active_round_transition_mode()
+                         or not self._round_transition_authorized())):
+                return
+            mode = self._active_round_transition_mode()
+            if mode == "full_auto":
+                self._full_auto_wanted = False
+                self._auto_resume_pending = False
+            self._transition_follow_pending = False
+            self._round_transition_resume_mode = None
             self.full_auto_status.set(f"下一局执行异常，已停手：{exc}")
             return
+        if (was_accepted_observer
+                and (observer_generation != getattr(
+                         self, "_accepted_round_observe_generation", 0)
+                     or not self._round_transition_authorized())):
+            return
+        if (submitted_mode in ("follow", "full_auto")
+                and (submitted_mode != self._active_round_transition_mode()
+                     or not self._round_transition_authorized())):
+            return
         self._on_round_transition_result(result)
+
+    @staticmethod
+    def _observe_accepted_round_transition(
+            capture, probe, sleep, *, max_polls: int = 120,
+            interval_s: float = 0.5,
+            cancel_event: Event | None = None):
+        """Read only after an accepted click until the new round is proven.
+
+        The round-transition executor has already registered the click for the
+        current round.  This observer deliberately receives no tap callback,
+        so waiting for a peer can never cause a second click.
+        """
+        from round_transition import TransitionResult
+
+        observations = []
+
+        def cancelled(phase: str):
+            return TransitionResult(
+                "accepted_waiting_cancelled",
+                f"局间只读观察已取消：{phase}", clicked=False,
+                evidence={"accepted_waiting_observe": observations})
+
+        for index in range(max(1, int(max_polls))):
+            if cancel_event is not None and cancel_event.is_set():
+                return cancelled("before_sleep")
+            wait_seconds = max(0.05, float(interval_s))
+            if cancel_event is not None:
+                if cancel_event.wait(wait_seconds):
+                    return cancelled("during_sleep")
+            else:
+                sleep(wait_seconds)
+            if cancel_event is not None and cancel_event.is_set():
+                return cancelled("after_sleep")
+            try:
+                if cancel_event is not None and cancel_event.is_set():
+                    return cancelled("before_capture")
+                frame = capture()
+                if cancel_event is not None and cancel_event.is_set():
+                    return cancelled("after_capture")
+                advanced, label = probe(frame)
+                if cancel_event is not None and cancel_event.is_set():
+                    return cancelled("after_probe")
+                observations.append({
+                    "poll": index + 1,
+                    "advanced": bool(advanced),
+                    "evidence": str(label),
+                })
+            except Exception as exc:  # noqa: BLE001 - keep bounded observing
+                observations.append({
+                    "poll": index + 1,
+                    "advanced": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                continue
+            if advanced:
+                return TransitionResult(
+                    "advanced_without_click",
+                    f"等待期间已确认新局：{label}", clicked=False,
+                    evidence={"accepted_waiting_observe": observations})
+        return TransitionResult(
+            "accepted_waiting_timeout",
+            "下一局点击已接受；有界观察期内尚无新局正证据，保持等待且不重复点击",
+            clicked=False,
+            evidence={"accepted_waiting_observe": observations})
+
+    def _begin_accepted_round_observation(self) -> None:
+        """Continue an accepted transition without re-entering click logic."""
+        if (not self._round_transition_authorized()
+                or getattr(self, "_accepted_round_observing", False)
+                or getattr(self, "_round_transition_future", None) is not None):
+            return
+        executor = getattr(self, "_round_transition", None)
+        if executor is None:
+            self.full_auto_status.set(
+                "下一局点击已接受；等待新局正证据（不会重复点击）。")
+            return
+        capture = getattr(executor, "_capture")
+        probe = getattr(executor, "_probe")
+        sleep = getattr(executor, "_sleep", time.sleep)
+        round_no = int(getattr(self, "round_no", 0) or 0) or None
+        generation = int(getattr(
+            self, "_accepted_round_observe_generation", 0)) + 1
+        cancel_event = Event()
+
+        def observe():
+            result = self._observe_accepted_round_transition(
+                capture, probe, sleep, cancel_event=cancel_event)
+            report = getattr(executor, "_report", None)
+            return report(result, round_no) if callable(report) else result
+
+        self.full_auto_status.set(
+            "下一局按钮已成功点下；正向过渡中，继续只读等待新局正证据。")
+        self._accepted_round_observe_generation = generation
+        self._accepted_round_future_generation = generation
+        self._accepted_round_cancel_event = cancel_event
+        self._accepted_round_observing = True
+        self._round_transition_future = self.auto_executor.submit(observe)
+        self._round_transition_future_mode = self._active_round_transition_mode()
+        self.root.after(200, self._poll_round_transition)
+
+    def _schedule_accepted_round_observation(
+            self, delay_ms: int = 1000) -> None:
+        """Queue one later observation segment; never stack timers/workers."""
+        if (getattr(self, "_quitting", False)
+                or not self._round_transition_authorized()
+                or getattr(self, "_accepted_round_observing", False)
+                or getattr(self, "_round_transition_future", None) is not None
+                or getattr(self, "_accepted_round_observe_timer", None) is not None):
+            return
+
+        def resume_observation() -> None:
+            self._accepted_round_observe_timer = None
+            if (getattr(self, "_quitting", False)
+                    or not self._round_transition_authorized()):
+                return
+            self._begin_accepted_round_observation()
+
+        self._accepted_round_observe_timer = self.root.after(
+            max(200, int(delay_ms)), resume_observation)
+
+    def _cancel_accepted_round_observation(self) -> None:
+        """Cancel a queued/running read-only segment during explicit stop."""
+        self._accepted_round_observe_generation = int(getattr(
+            self, "_accepted_round_observe_generation", 0)) + 1
+        cancel_event = getattr(self, "_accepted_round_cancel_event", None)
+        self._accepted_round_cancel_event = None
+        if cancel_event is not None:
+            cancel_event.set()
+        timer = getattr(self, "_accepted_round_observe_timer", None)
+        self._accepted_round_observe_timer = None
+        if timer is not None:
+            try:
+                self.root.after_cancel(timer)
+            except (AttributeError, tk.TclError):
+                pass
+        if getattr(self, "_accepted_round_observing", False):
+            future = getattr(self, "_round_transition_future", None)
+            if future is not None:
+                try:
+                    future.cancel()
+                except (AttributeError, RuntimeError):
+                    pass
+            self._round_transition_future = None
+            self._round_transition_future_mode = None
+            self._accepted_round_future_generation = None
+            self._accepted_round_observing = False
 
     def _on_round_transition_result(self, result) -> None:
         status = getattr(result, "status", "")
         reason = getattr(result, "reason", "")
+        mode = TeaAssistWindow._active_round_transition_mode(self)
+        # Historical callers only reached this handler from full auto and did
+        # not carry an explicit mode.  Restart recovery always sets one; keep
+        # the old in-process contract for injected callers and older tests.
+        if mode is None and not status.startswith("startup_"):
+            mode = "full_auto"
+        if status == "startup_not_settlement":
+            self._transition_follow_pending = False
+            self._round_transition_resume_mode = None
+            self.full_auto_status.set(reason)
+            self._begin_lobby_follow()
+            return
+        if status == "startup_blocked":
+            self._cancel_accepted_round_observation()
+            self._transition_follow_pending = False
+            self._round_transition_resume_mode = None
+            if mode == "full_auto":
+                self._full_auto_wanted = False
+                self._auto_resume_pending = False
+            self.full_auto_status.set(f"重启续局已停手：{reason}")
+            self.status.set(reason)
+            self._set_operational_status("已停手", reason, level="wait")
+            return
         if status in ("advanced", "advanced_without_click"):
+            cancel_observation = getattr(
+                self, "_cancel_accepted_round_observation", None)
+            if callable(cancel_observation):
+                cancel_observation()
             self.next_round()
-            self._auto_resume_pending = True
-            self.full_auto_status.set(f"{reason}；新局重读财神与手牌后自动恢复全自动。")
+            if mode == "full_auto":
+                self._auto_resume_pending = True
+            else:
+                self._transition_follow_pending = False
+            # The round-transition evidence already proves that this remains
+            # the same table.  Bypass lobby clicking and re-enter the normal
+            # identity/mode/caishen gates for the dealt round.
+            self._lobby_in_game_verified = True
+            self._round_transition_resume_mode = None
+            suffix = ("新局重读身份、玩法、财神与手牌后自动恢复全自动。"
+                      if mode == "full_auto" else
+                      "新局重读身份、玩法、财神与手牌后恢复只读跟随。")
+            self.full_auto_status.set(f"{reason}；{suffix}")
             if not self.continuous:
                 self.start()
             return
-        self._full_auto_wanted = False
-        self._auto_resume_pending = False
+        if status == "accepted_waiting":
+            if mode == "full_auto":
+                self._full_auto_wanted = True
+                self._auto_resume_pending = True
+            else:
+                self._transition_follow_pending = True
+                self._round_transition_resume_mode = "follow"
+            self.full_auto_status.set(
+                f"{reason}；保持当前授权，只读等待新局正证据，不重复点击。")
+            self._set_operational_status(
+                "局间等待", "下一局点击已接受；等待对手/发牌", level="wait")
+            self._begin_accepted_round_observation()
+            return
+        if status == "accepted_waiting_timeout":
+            if mode == "full_auto":
+                self._full_auto_wanted = True
+                self._auto_resume_pending = True
+            else:
+                self._transition_follow_pending = True
+                self._round_transition_resume_mode = "follow"
+            self.full_auto_status.set(
+                f"{reason}；未记新局、未重复点击，稍后继续只读观察。")
+            self._set_operational_status(
+                "局间等待", "本段观察结束；稍后自动继续读取", level="wait")
+            self._schedule_accepted_round_observation()
+            return
+        cancel_observation = getattr(
+            self, "_cancel_accepted_round_observation", None)
+        if callable(cancel_observation):
+            cancel_observation()
+        if mode == "full_auto":
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
+        self._transition_follow_pending = False
+        self._round_transition_resume_mode = None
         self.full_auto_status.set(f"本房 BOT 已停止：{reason}（报告见 round_transition.jsonl）")
         self._set_operational_status("已停手", reason, level="wait")
 
     def _poll_full_auto_control(self) -> None:
         from full_auto_control import consume_command
         command = consume_command(self.serial.get().strip())
-        if command == "stop" and getattr(self, "full_auto_running", False):
-            self._stop_full_auto()
+        if command == "stop" and (
+                getattr(self, "full_auto_running", False)
+                or getattr(self, "_full_auto_wanted", False)
+                or getattr(self, "_auto_resume_pending", False)
+                or getattr(self, "_auto_start_pending", False)
+                or getattr(self, "_round_transition_resume_mode", None) == "full_auto"
+                or getattr(self, "_accepted_round_observing", False)
+                or getattr(self, "_accepted_round_observe_timer", None) is not None):
+            if getattr(self, "full_auto_running", False):
+                self._stop_full_auto()
+            else:
+                self._full_auto_wanted = False
+                self._auto_resume_pending = False
+                self._cancel_pending_full_auto_start()
+                self._cancel_accepted_round_observation()
+                self._round_transition_resume_mode = None
+                self._transition_follow_pending = False
+                self.full_auto_status.set(
+                    "已停止：全自动续接授权已撤销，不会恢复点击权。")
+                self._set_operational_status(
+                    "已停止", "局间等待已取消；没有自动点击", level="wait")
+                refresh = getattr(self, "_refresh_auto_gate", None)
+                if callable(refresh):
+                    refresh(force=True)
+            return
         elif command == "resume" and not getattr(self, "full_auto_running", False):
             self._full_auto_wanted = True
             self._auto_resume_pending = True
+            if getattr(self, "_auto_start_pending", False):
+                self.full_auto_status.set(
+                    "BOT 启动已在排队；resume 已确认，不重复提交。")
+                return
             self.full_auto_status.set("收到控制文件 resume：门禁通过后恢复全自动。")
             if not self.continuous:
                 self.start()
@@ -2701,8 +3311,12 @@ class TeaAssistWindow:
                 and not getattr(self, "full_auto_running", False)
                 and self.continuous
                 and getattr(self, "continuous_caishen", None) is not None):
-            self._auto_resume_pending = False
-            self._start_full_auto()
+            started = self._start_full_auto()
+            # Production returns an explicit bool.  ``None`` remains accepted
+            # for older injected/test hand-off callables that historically
+            # represented a successful fire-and-forget start.
+            if started is not False:
+                self._auto_resume_pending = False
 
     def _maybe_autostart(self) -> None:
         """Do not auto-start: recommendation and autoplay need explicit clicks."""
@@ -2726,7 +3340,8 @@ class TeaAssistWindow:
         if getattr(self, "full_auto_running", False):
             self._stop_full_auto()
             return
-        if self.continuous or getattr(self, "_lobby_active", False):
+        if (self.continuous or getattr(self, "_lobby_active", False)
+                or self._round_transition_authorized()):
             self.stop()
         else:
             self.start()
@@ -2769,6 +3384,8 @@ class TeaAssistWindow:
             progress = future.result()
         except Exception as exc:
             self._lobby_active = False
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
             self.start_button.configure(text="开始跟随")
             self.status.set(f"自动找位失败：{exc}；已停止后续点击。")
             self._set_operational_status("自动找位失败", str(exc), level="error")
@@ -2789,10 +3406,14 @@ class TeaAssistWindow:
         # Any post-click uncertainty is terminal: never blindly retry.
         if progress.terminal:
             self._lobby_active = False
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
             self.start_button.configure(text="开始跟随")
             return
         if progress.state not in ("lobby", "waiting_room"):
             self._lobby_active = False
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
             self.start_button.configure(text="开始跟随")
             return
         self._schedule_lobby_probe(1200)
@@ -2820,7 +3441,10 @@ class TeaAssistWindow:
             if not self._is_bound():
                 self.status.set("先绑定当前账号与雷电设备，再开始跟随。")
                 return
-            self._begin_lobby_follow()
+            mode = ("full_auto" if (
+                getattr(self, "_full_auto_wanted", False)
+                and getattr(self, "_auto_resume_pending", False)) else "follow")
+            self._begin_startup_round_transition(mode)
             return
         self._pending_action = "follow"
         try:
@@ -2828,6 +3452,11 @@ class TeaAssistWindow:
         finally:
             self._pending_action = None
         if not ready:
+            if (getattr(self, "_auto_resume_pending", False)
+                    and getattr(self, "_identity_state", None) != "checking"
+                    and getattr(self, "_check_state", None) != "checking"):
+                self._full_auto_wanted = False
+                self._auto_resume_pending = False
             return
         # 清空轮次锁，重新开始本轮观察
         self.continuous_round = None
@@ -2852,6 +3481,8 @@ class TeaAssistWindow:
         except Exception as exc:
             self._follow_pipeline = None
             self.continuous = False
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
             msg = f"无法开始跟随：{exc}"
             if getattr(self, "status", None) is not None:
                 self.status.set(msg)
@@ -2934,6 +3565,19 @@ class TeaAssistWindow:
             pass
 
     def stop(self) -> None:
+        if not getattr(self, "_handoff_to_auto", False):
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
+            cancel_start = getattr(
+                self, "_cancel_pending_full_auto_start", None)
+            if callable(cancel_start):
+                cancel_start()
+            cancel_observation = getattr(
+                self, "_cancel_accepted_round_observation", None)
+            if callable(cancel_observation):
+                cancel_observation()
+            self._round_transition_resume_mode = None
+            self._transition_follow_pending = False
         if getattr(self, "_lobby_active", False):
             self._stop_lobby_follow()
         self._lobby_in_game_verified = False
@@ -3653,6 +4297,15 @@ class TeaAssistWindow:
 
     def _tick(self) -> None:
         self.ticker = None
+        process_control = getattr(self, "_process_window_control", None)
+        if callable(process_control) and not process_control():
+            return
+        drain_tray = getattr(self, "_drain_system_tray_actions", None)
+        if callable(drain_tray) and not drain_tray():
+            return
+        poll_docking = getattr(self, "_poll_window_docking", None)
+        if callable(poll_docking):
+            poll_docking()
         now = time.perf_counter()
         source = getattr(self, "display_source", None)
         if source in OFFLINE_SOURCES:
@@ -3677,11 +4330,48 @@ class TeaAssistWindow:
                     self.fresh.set("已停止跟随 · 最后一帧不作为当前依据")
         else:
             self.fresh.set(describe_age(None))
-        if getattr(self, "_floating_bar", None) is not None:
-            # Only meaningful while the collapsed bar is on screen; this also
-            # lets window test doubles that bind ``_tick`` alone skip it.
-            self._refresh_floating_status()
+        if (getattr(self, "_floating_orb", None) is not None
+                or getattr(self, "_tray_started", False)):
+            self._refresh_companion_status()
         self.ticker = self.root.after(200, self._tick)
+
+    def _process_window_control(self) -> bool:
+        """Consume one launcher command on the Tk thread and acknowledge it.
+
+        Restore is acknowledged only after the window was restored.  Quit is
+        acknowledged as accepted before teardown, because destroying the Tk
+        root also stops the polling loop that publishes the acknowledgement.
+        ``False`` tells :meth:`_tick` not to schedule another callback.
+        """
+        serial_var = getattr(self, "serial", None)
+        if serial_var is None:
+            return True
+        try:
+            request = consume_control(serial_var.get().strip())
+        except Exception:
+            # No validated request exists, so there is no safe ACK target.
+            return True
+        if request is None:
+            return True
+        try:
+            if request.command == "restore":
+                self.restore_from_floating_orb()
+                acknowledge_control(request, ok=True, detail="restored")
+                return True
+            if request.command == "quit":
+                acknowledge_control(request, ok=True, detail="accepted")
+                self.quit_app()
+                return False
+            raise ValueError(
+                f"unsupported UI control command: {request.command!r}")
+        except Exception as exc:  # noqa: BLE001 - report command failure via ACK
+            try:
+                acknowledge_control(
+                    request, ok=False,
+                    detail=f"{type(exc).__name__}: {exc}")
+            except Exception:
+                pass
+            return request.command != "quit"
 
     # -- one-shot actions ------------------------------------------------
     def capture(self) -> None:
@@ -3820,19 +4510,37 @@ class TeaAssistWindow:
     def _toggle_full_auto(self) -> None:
         if self.full_auto_running:
             self._stop_full_auto()
+        elif getattr(self, "_auto_start_pending", False):
+            self._full_auto_wanted = False
+            self._auto_resume_pending = False
+            self._cancel_pending_full_auto_start()
+            self.full_auto_status.set(
+                "已取消全自动启动排队；不会取得点击权。")
+            self._set_operational_status(
+                "已停止", "全自动启动排队已撤销", level="wait")
+            refresh = getattr(self, "_refresh_auto_gate", None)
+            if callable(refresh):
+                refresh(force=True)
         else:
             self._start_full_auto()
 
-    def _start_full_auto(self) -> None:
+    def _start_full_auto(self) -> bool:
         """Start the whole lobby-to-game flow, then hand off to the BOT."""
+        if getattr(self, "_auto_start_pending", False):
+            self.full_auto_status.set(
+                "BOT 启动已在排队；重复请求不会再次提交或扩大点击权。")
+            return False
+        if not self._is_bound():
+            self.full_auto_status.set("当前账号与设备未绑定；已拒绝接管。")
+            return False
         if not self._channel_ready():
             self.full_auto_status.set("真实动作通道未就绪；已拒绝接管。")
-            return
+            return False
         if self._mode_key() != "tea_2p":
             self.full_auto_status.set("全自动目前只开放温州茶 2 人；该玩法保持推荐模式。")
             self._set_operational_status(
                 "推荐模式", "当前玩法未完成全自动实机验收", level="wait")
-            return
+            return False
         if not self.continuous:
             self._full_auto_wanted = True
             self._auto_resume_pending = True
@@ -3842,35 +4550,35 @@ class TeaAssistWindow:
                 "自动开局", "正在启动开始跟随全流程", level="wait")
             if not getattr(self, "_lobby_active", False):
                 self.start()
-            return
+            return False
         if not self._identity_gate_ok(max_age_seconds=10.0):
             self._begin_identity_check(pending="full_auto")
             self.full_auto_status.set(
                 "全自动开启前正在重新核验当前画面本人昵称。")
             self._set_operational_status(
                 "玩家核验", "重新确认当前账号后才交出点击权", level="wait")
-            return
+            return False
         if not self._ready():
             if getattr(self, "_identity_state", None) == "checking":
                 self._identity_pending = "full_auto"
                 self.full_auto_status.set(
                     "正在核对当前画面本人昵称；一致后才会开启全自动。")
-                return
+                return False
             if getattr(self, "_check_state", None) == "checking":
                 self._check_pending = "full_auto"
                 self.full_auto_status.set(
                     "正在自动核对牌桌玩法；核对一致后自动开启全自动。")
-                return
+                return False
             self._set_operational_status(
                 "门禁拦截", self.status.get(), level="error")
-            return
+            return False
         if not self._mode_gate_ok():
             self._begin_mode_check(pending="full_auto")
             self.full_auto_status.set(
                 "正在自动核对牌桌玩法；核对一致后才会开启全自动。")
             self._set_operational_status(
                 "核对中", "全自动开启前自动核对玩法", level="wait")
-            return
+            return False
 
         account = self.account.get().strip()
         serial = self.serial.get().strip()
@@ -3883,6 +4591,8 @@ class TeaAssistWindow:
 
         # Stop the duplicate read-only ADB capture before the BOT takes over.
         # The BOT's own analyzed frames are streamed back through _auto_events.
+        self._full_auto_wanted = True
+        self._auto_resume_pending = True
         self._suppress_review = True
         self._handoff_to_auto = True
         try:
@@ -3892,7 +4602,7 @@ class TeaAssistWindow:
         from action_policy import recommended_runner_config
         from auto_play_loop import AutoPlayLoop
 
-        self._auto_loop = AutoPlayLoop(
+        auto_loop = AutoPlayLoop(
             enabled=True,
             serial=serial,
             adb_path=get_adb_path(),
@@ -3908,9 +4618,60 @@ class TeaAssistWindow:
             event_callback=lambda event, analysis: self._auto_events.put(
                 (event, analysis)),
         )
+        self._auto_loop = auto_loop
         self.session_dir = auto_session
+        started = Event()
+
+        def run_auto_loop():
+            started.set()
+            return auto_loop.run()
+
+        try:
+            future = self.auto_executor.submit(run_auto_loop)
+        except Exception as exc:  # noqa: BLE001 - preserve safe retry intent
+            self._auto_loop = None
+            self._auto_future = None
+            self._auto_start_pending = False
+            self._auto_start_event = None
+            self.full_auto_running = False
+            self._lobby_in_game_verified = True
+            starter = getattr(self, "start", None)
+            if callable(starter) and not self.continuous:
+                starter()
+            self.full_auto_status.set(
+                f"BOT 启动提交失败，尚未交出点击权：{exc}；保留自动续接等待安全重试。")
+            self._set_operational_status(
+                "启动失败", f"BOT worker 未提交：{exc}", level="error")
+            return False
+
+        self._auto_future = future
+        self._auto_start_event = started
+        self._auto_start_pending = True
+        if started.is_set():
+            return self._mark_full_auto_started()
+        self.full_auto_status.set(
+            "BOT 启动已排队：等待动作执行器空闲；尚未交出点击权。")
+        self._set_operational_status(
+            "等待接管", "BOT worker 尚未开始，继续保留启动门禁", level="wait")
+        self._auto_poll_timer = self.root.after(
+            50, self._poll_full_auto_start)
+        return False
+
+    def _mark_full_auto_started(self) -> bool:
+        """Publish running state only after the worker start handshake."""
+        if getattr(self, "full_auto_running", False):
+            return True
+        started = getattr(self, "_auto_start_event", None)
+        if (not getattr(self, "_auto_start_pending", False)
+                or started is None or not started.is_set()
+                or getattr(self, "_auto_future", None) is None
+                or not getattr(self, "_full_auto_wanted", False)
+                or not getattr(self, "_auto_resume_pending", False)):
+            return False
+        self._auto_start_pending = False
+        self._auto_start_event = None
         self.full_auto_running = True
-        self._auto_future = self.auto_executor.submit(self._auto_loop.run)
+        self._auto_resume_pending = False
         self.start_button.configure(text="停止全部")
         self.auto_button.configure(text="关闭全自动（恢复只读推荐）")
         self._style_start_button(True)
@@ -3928,17 +4689,85 @@ class TeaAssistWindow:
         for attr in ("embedded_follow_log", "follow_session_log"):
             viewer = getattr(self, attr, None)
             if viewer is not None:
-                viewer.session_dir = auto_session
+                viewer.session_dir = self.session_dir
                 viewer.path = self._auto_loop.follow_log_path
                 viewer._last_signature = None
         self._auto_poll_timer = self.root.after(150, self._poll_full_auto)
+        return True
+
+    def _poll_full_auto_start(self) -> None:
+        """Wait for a queued worker without claiming that it is running."""
+        self._auto_poll_timer = None
+        if not getattr(self, "_auto_start_pending", False):
+            return
+        if (not getattr(self, "_full_auto_wanted", False)
+                or not getattr(self, "_auto_resume_pending", False)):
+            self._cancel_pending_full_auto_start()
+            return
+        started = getattr(self, "_auto_start_event", None)
+        if started is not None and started.is_set():
+            self._mark_full_auto_started()
+            return
+        future = getattr(self, "_auto_future", None)
+        if future is None or future.done():
+            detail = "BOT worker 未报告启动"
+            if future is not None:
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001
+                    detail = f"BOT worker 启动失败：{exc}"
+            self._auto_future = None
+            self._auto_loop = None
+            self._auto_start_pending = False
+            self._auto_start_event = None
+            self.full_auto_running = False
+            self._lobby_in_game_verified = True
+            starter = getattr(self, "start", None)
+            if callable(starter) and not self.continuous:
+                starter()
+            self.full_auto_status.set(
+                f"{detail}；尚未交出点击权，保留自动续接等待安全重试。")
+            self._set_operational_status(
+                "启动失败", detail, level="error")
+            return
+        self._auto_poll_timer = self.root.after(
+            50, self._poll_full_auto_start)
+
+    def _cancel_pending_full_auto_start(self) -> None:
+        """Revoke a queued worker before it can acquire click authority."""
+        if not getattr(self, "_auto_start_pending", False):
+            return
+        loop = getattr(self, "_auto_loop", None)
+        if loop is not None:
+            loop.request_stop("全自动启动排队期间已撤销授权")
+        future = getattr(self, "_auto_future", None)
+        if future is not None:
+            try:
+                future.cancel()
+            except (AttributeError, RuntimeError):
+                pass
+        timer = getattr(self, "_auto_poll_timer", None)
+        if timer is not None:
+            try:
+                self.root.after_cancel(timer)
+            except (AttributeError, tk.TclError):
+                pass
+        self._auto_future = None
+        self._auto_loop = None
+        self._auto_poll_timer = None
+        self._auto_start_pending = False
+        self._auto_start_event = None
+        self.full_auto_running = False
 
     def _stop_full_auto(self) -> None:
+        if getattr(self, "_auto_start_pending", False):
+            self._cancel_pending_full_auto_start()
         loop = getattr(self, "_auto_loop", None)
         if loop is not None:
             loop.request_stop("用户在辅助器中关闭全自动代打")
         self._full_auto_wanted = False
         self._auto_resume_pending = False
+        self._cancel_accepted_round_observation()
         self.full_auto_status.set("正在安全停手：若有点击正在验证，会先完成验证再退出。")
         self._set_operational_status(
             "正在停手", "等待当前动作验证完成", level="wait")
@@ -4189,10 +5018,13 @@ class TeaAssistWindow:
             width, height, x, y = parsed
             topmost = (bool(getattr(self, "_collapsed_topmost", True))
                        if is_withdrawn else bool(self.always_on_top.get()))
+            dock_var = getattr(self, "dock_to_emulator", None)
+            dock_enabled = bool(dock_var.get()) if dock_var is not None else False
             state.update({
                 "geometry": format_window_geometry(width, height, x, y),
                 "x": x, "y": y, "w": width, "h": height,
                 "topmost": topmost,
+                "dock_to_emulator": dock_enabled,
             })
         except tk.TclError:
             return
@@ -4202,22 +5034,25 @@ class TeaAssistWindow:
         """Deprecated alias of :meth:`quit_app` (kept for explicit shutdown).
 
         The main window's close box (X) does **not** call this; it collapses
-        to the floating bar instead (see :meth:`on_window_close`).
+        to the system tray and mascot orb instead (see
+        :meth:`on_window_close`).
         """
         self.quit_app()
 
     def quit_app(self) -> None:
         """Really exit the assistant: stop work, flush logs, destroy the root.
 
-        Reached only through explicit entry points: the floating bar's "×"
-        control, the floating bar's context menu and the main window's
-        更多 menu.  Everything below is the former ``close()`` body, kept
-        verbatim so quitting still tears the process down cleanly.
+        Reached only through explicit entry points: the tray/orb context menu
+        and the main window's 更多 menu.
         """
         if getattr(self, "_quitting", False):
             return
         self._quitting = True
-        self._destroy_floating_bar()
+        self._cancel_accepted_round_observation()
+        self._destroy_floating_orb()
+        tray = getattr(self, "_system_tray", None)
+        if tray is not None:
+            tray.stop()
         if getattr(self, "_adb_diagnostic_timer", None) is not None:
             try:
                 self.root.after_cancel(self._adb_diagnostic_timer)
@@ -4368,7 +5203,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="温州麻将辅助器：每个serial独立窗口")
     parser.add_argument("--serial", default=None)
     args = parser.parse_args()
-    from app_entry import activate_window, choose_device, existing_window_pids
+    from app_entry import (activate_window, choose_device,
+                           choose_existing_for_restore, existing_window_pids)
     from launch_multi import connected_devices
     try:
         discovered = connected_devices(get_adb_path())
@@ -4380,8 +5216,11 @@ if __name__ == "__main__":
         report_launch_result(f"雷电设备检查失败：{exc}")
         raise SystemExit(2) from exc
     if open_pid is not None:
-        activate_window(open_pid)
-        report_launch_result(f"现有辅助器 PID {open_pid} 已打开；不重复运行。")
+        if args.serial is None:
+            chosen, open_pid = choose_existing_for_restore(discovered, occupied)
+        if chosen is not None and open_pid is not None:
+            request_restore(chosen)
+            activate_window(open_pid)
         raise SystemExit(0)
     if chosen is None:
         report_launch_result(

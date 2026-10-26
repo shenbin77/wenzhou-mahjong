@@ -116,6 +116,61 @@ def choose_device(devices: list[str], occupied: dict[str, int],
     return (None, occupied.get(devices[0])) if devices else (None, None)
 
 
+def has_visible_main_window(pid: int) -> bool:
+    """Whether a PID has a visible assistant main window, not just a tray/orb."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    found = False
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd, _unused):
+        nonlocal found
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value != pid or not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title, length + 1)
+        if title.value.startswith("温州麻将辅助器 · emulator-"):
+            found = True
+            return False
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return found
+
+
+def choose_existing_for_restore(
+    devices: list[str], occupied: dict[str, int]
+) -> tuple[str | None, int | None]:
+    """When all devices are occupied, prefer a hidden main window."""
+    for serial in devices:
+        pid = occupied.get(serial)
+        if pid is not None and not has_visible_main_window(pid):
+            return serial, pid
+    for serial in devices:
+        pid = occupied.get(serial)
+        if pid is not None:
+            return serial, pid
+    return None, None
+
+
 def activate_window(pid: int) -> bool:
     """Best-effort Win32 focus; does not interfere with other programs."""
     if os.name != "nt":

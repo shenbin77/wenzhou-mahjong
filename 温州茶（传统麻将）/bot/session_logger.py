@@ -223,6 +223,8 @@ def build_follow_record(
         "round_seq": event.get("round_seq"),
         "frame": event.get("frame"),
         "event": event.get("event"),
+        "action_id": event.get("action_id"),
+        "action_source": event.get("action_source"),
         "vision": _vision_block(event, analysis),
         "caishen": _caishen_block(event, analysis),
         "gates": _gates_block(event),

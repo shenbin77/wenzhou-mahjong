@@ -49,7 +49,8 @@ TAKEOVER = MAJIANG_ROOT / "_takeover"
 WB_LIVE = TAKEOVER / "wb_live"
 MULTI_BRIGHT_FRAME = WB_LIVE / "5558_t4.png"
 
-EVIDENCE = MAJIANG_ROOT / "capture_5556.png"
+EVIDENCE = (MAJIANG_ROOT / "_archive" / "vision-probes-20261023-24"
+            / "capture_5556.png")
 PAIR_A = (TAKEOVER / "play7_5556" / "frames"
           / "20261025_020539_153114_before_8df0c1.png")
 PAIR_B = (TAKEOVER / "play7_5556" / "frames"

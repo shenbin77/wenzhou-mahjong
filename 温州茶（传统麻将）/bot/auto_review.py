@@ -1,9 +1,9 @@
 """自动复盘与疑似问题筛查（离线、无头）。
 
 产品口径（2026-10-25 定）：自动留证据 → 自动复盘 → 自动筛出疑似
-问题 → 证据包（``auto_review.json`` / ``auto_review.md``）。本模块
-只读台账、只往会话目录写这两份复盘文件；不训练、不改代码、不触发
-任何执行/部署动作，也不接外部 LLM/API。
+问题 → 复盘报告（``auto_review.json`` / ``auto_review.md``）以及脱敏、
+原子写入的 incident 包。本模块只读台账并写派生报告；不训练、不改代码、
+不触发任何游戏执行/部署动作，也不接外部 LLM/API。
 
 与既有模块的分工：
 
@@ -28,7 +28,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from session_watch import StallPolicy, _abstain_key, _is_header
+from human_input_monitor import associate_human_click, load_human_clicks
+from incident_inbox import create_incident, read_repo_version
+from session_watch import (StallPolicy, _abstain_key, _is_header,
+                           derive_progress_suspicions)
 
 __all__ = ["review_session", "review_root", "find_session_dirs",
            "render_review_md"]
@@ -36,6 +39,7 @@ __all__ = ["review_session", "review_root", "find_session_dirs",
 ACTIONS_FILE = "actions.jsonl"
 FOLLOW_FILE = "follow_session.jsonl"
 FLAGS_FILE = "user_flags.jsonl"
+HUMAN_INPUT_FILE = "human_input.jsonl"
 REPORT_JSON = "auto_review.json"
 REPORT_MD = "auto_review.md"
 
@@ -291,7 +295,53 @@ def _screen_abstain_runs(rows, source: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 规则 5：财神未知段（unknown_caishen_ticks 连续段）
+# 规则 5：旁路卡住 / 外部推进疑似事件
+# ---------------------------------------------------------------------------
+
+def _screen_progress_suspicions(rows, source: str, *, clicks=(),
+                                serial=None) -> list[dict]:
+    """把 session_watch 的纯派生事件映射回原 JSONL 行号。"""
+    if not rows:
+        return []
+    items = [item for _line_no, item in rows]
+    issues: list[dict] = []
+    for event in derive_progress_suspicions(items):
+        index = event.get("event_index")
+        if not isinstance(index, int) or not (0 <= index < len(rows)):
+            continue
+        line_no, item = rows[index]
+        excerpt = {key: value for key, value in event.items()
+                   if key not in ("event_index", "start_index", "end_index")}
+        if event.get("type") == "external_advance_suspected":
+            human = associate_human_click(event.get("ts"), clicks, serial)
+            if human is not None:
+                event = dict(event)
+                event["type"] = "human_action_likely"
+                event["base_type"] = "external_advance_suspected"
+                event["human_click"] = human
+                event["reason"] = (
+                    "可信本家牌河推进前后存在同 serial、已核验雷电窗口内的"
+                    "鼠标按下，且中间无 BOT action；高度疑似人工手点，但仍不"
+                    "把单次鼠标观察当作游戏动作真值")
+                excerpt = {key: value for key, value in event.items()
+                           if key not in ("event_index", "start_index", "end_index")}
+        if event.get("type") == "stuck_suspected":
+            start_index = event.get("start_index")
+            end_index = event.get("end_index")
+            if isinstance(start_index, int) and 0 <= start_index < len(rows):
+                excerpt["line_start"] = rows[start_index][0]
+            if isinstance(end_index, int) and 0 <= end_index < len(rows):
+                excerpt["line_end"] = rows[end_index][0]
+        issue = _issue(str(event.get("type")), DECISION, source,
+                       line_no, item, excerpt)
+        if "line_end" in excerpt:
+            issue["line_end"] = excerpt["line_end"]
+        issues.append(issue)
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# 规则 6：财神未知段（unknown_caishen_ticks 连续段）
 # ---------------------------------------------------------------------------
 
 def _screen_caishen(rows, source: str) -> list[dict]:
@@ -337,7 +387,7 @@ def _screen_caishen(rows, source: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 规则 6：人工标记（user_flags.jsonl 全量列入）
+# 规则 7：人工标记（user_flags.jsonl 全量列入）
 # ---------------------------------------------------------------------------
 
 def _trim(value: Any, limit: int = 300) -> Any:
@@ -362,12 +412,15 @@ def _screen_user_flags(rows, source: str) -> list[dict]:
 # 主入口
 # ---------------------------------------------------------------------------
 
-def review_session(session_dir) -> dict:
+def review_session(session_dir, *, incident_root=None, human_input_path=None) -> dict:
     """筛查一个会话目录，写 auto_review.json/.md，返回摘要 dict。"""
     session_dir = Path(session_dir)
     actions_rows, actions_corrupt = _load_rows(session_dir / ACTIONS_FILE)
     follow_rows, follow_corrupt = _load_rows(session_dir / FOLLOW_FILE)
     flag_rows, flag_corrupt = _load_rows(session_dir / FLAGS_FILE)
+    human_source = (Path(human_input_path) if human_input_path is not None
+                    else session_dir / HUMAN_INPUT_FILE)
+    human_clicks = load_human_clicks(human_source)
 
     header = _find_header(actions_rows) or _find_header(follow_rows) or {}
     mode = header.get("mode")
@@ -385,11 +438,13 @@ def review_session(session_dir) -> dict:
         issues += _screen_settle(primary_rows, primary_name)
         issues += _screen_panel_recovery(primary_rows, primary_name)
         issues += _screen_abstain_runs(primary_rows, primary_name)
+        issues += _screen_progress_suspicions(
+            primary_rows, primary_name, clicks=human_clicks, serial=serial)
         issues += _screen_caishen(primary_rows, primary_name)
     issues += _screen_user_flags(flag_rows, FLAGS_FILE)
     issues.sort(key=lambda i: (i["source"], i["line"]))
 
-    # Rule 7: an action event without a confirmed post-click transition is
+    # Rule 8: an action event without a confirmed post-click transition is
     # never a success, even when the loop did not emit a terminal stop.
     for line_no, item in primary_rows:
         if item.get("event") == "action" and item.get("verified") is not True:
@@ -400,6 +455,8 @@ def review_session(session_dir) -> dict:
                     "before_count": item.get("before_count"),
                     "after_count": item.get("after_count"),
                     "reason": item.get("reason"),
+                    "action_id": item.get("action_id"),
+                    "action_source": item.get("action_source") or item.get("source"),
                 }))
     issues.sort(key=lambda i: (i["source"], i["line"]))
 
@@ -456,12 +513,56 @@ def review_session(session_dir) -> dict:
                           "corrupt_lines": follow_corrupt},
             FLAGS_FILE: {"rows": len(flag_rows),
                          "corrupt_lines": flag_corrupt},
+            HUMAN_INPUT_FILE: {"rows": len(human_clicks),
+                               "corrupt_lines": 0},
         },
         "primary_ledger": primary_name if primary_rows else None,
         "report_json": str(session_dir / REPORT_JSON),
         "report_md": str(session_dir / REPORT_MD),
         "generator": "auto_review/v1",
     }
+    incident_categories = {
+        "stop", "action_unverified", "stuck_suspected",
+        "external_advance_suspected", "human_action_likely",
+    }
+    actionable_failures = [
+        issue for issue in issues
+        if issue.get("category") in incident_categories]
+    root = (Path(incident_root) if incident_root is not None
+            else session_dir / "incidents")
+    repo_root = Path(__file__).resolve().parents[2]
+    repo_version = read_repo_version(repo_root)
+    incident_summaries: list[dict] = []
+    for failure in actionable_failures:
+        failure_line = int(failure.get("line", 1))
+        row_index = next(
+            (index for index, (line, _item) in enumerate(primary_rows)
+             if line == failure_line),
+            max(0, failure_line - 1))
+        recent = [item for _line, item in primary_rows[
+            max(0, row_index - 15):row_index + 15]]
+        try:
+            incident = create_incident(
+                failure, session_dir, recent, incident_root=root,
+                serial=serial, repo_version=repo_version,
+                process_info=header)
+            incident_summaries.append({
+                "incident_id": incident.get("incident_id"),
+                "status": incident.get("status"),
+                "category": failure.get("category"),
+                "line": failure.get("line"),
+                "path": str(root / str(incident.get("incident_id"))),
+            })
+        except OSError as exc:
+            incident_summaries.append({
+                "status": "write_failed", "reason": type(exc).__name__,
+                "category": failure.get("category"),
+                "line": failure.get("line"),
+            })
+    summary["incidents"] = incident_summaries
+    summary["incident"] = next(
+        (item for item in incident_summaries if item.get("status") == "open"),
+        incident_summaries[0] if incident_summaries else None)
     try:
         (session_dir / REPORT_JSON).write_text(
             json.dumps(summary, ensure_ascii=False, indent=2),
@@ -503,6 +604,10 @@ _CATEGORY_TITLES = {
     "caishen_unknown_run": "财神未知段",
     "panel_recovery": "面板恢复尝试",
     "user_flag": "人工标记",
+    "stuck_suspected": "卡壳疑似",
+    "external_advance_suspected": "外部推进疑似",
+    "human_action_likely": "高度疑似人工手点",
+    "action_unverified": "BOT 动作未验证",
 }
 
 _FOLLOWUP_TEXT = {
@@ -520,6 +625,14 @@ _FOLLOWUP_TEXT = {
                       "口径是否过严（弃权过多）或过松。",
     "user_flag": "人工标记：按标记原文逐条归因，确认属识别类还是决策类"
                  "后再决定后续。",
+    "stuck_suspected": "按 stall_class 与 threshold_s 定位首个长期不变状态；"
+                       "先修第一原因，再重新实机回归。",
+    "external_advance_suspected": "可信本家牌河已推进但附近没有 BOT action；"
+                                  "只能认定外部推进，不能猜具体操作者。",
+    "human_action_likely": "同 serial 雷电窗口内鼠标按下与可信推进时间相邻；"
+                           "高度疑似人工手点，仍需结合帧证据确认。",
+    "action_unverified": "BOT 发出动作但点后迁移未验证；按动作 ID 回看前后帧，"
+                         "结案前不得视为成功。",
 }
 
 

@@ -21,6 +21,14 @@ REAL_INGAME = (BOT.parent / "采集" / "dev_auto_play" / "ui_20261025_165115_emu
 REAL_NEXT_ROUND = (BOT.parent / "采集" / "dev_auto_play"
                    / "ui_20261025_165932_emulator5558_拾则" / "frames"
                    / "20261025_170009_431341_before_5b9e69.png")
+REAL_POST_CLICK_WAIT_5556 = (
+    BOT.parent / "采集" / "dev_auto_play"
+    / "ui_20261026_170909_emulator5556_烘熊瞎" / "frames"
+    / "20261026_171328_801775_before_fdd1f3.png")
+REAL_POST_CLICK_WAIT_5554 = (
+    BOT.parent / "采集" / "dev_auto_play"
+    / "ui_20261026_172351_emulator5554_玉姐" / "frames"
+    / "20261026_172838_951780_before_a86493.png")
 BOX = (1250, 760, 1490, 850)
 
 
@@ -44,6 +52,11 @@ def _new_round_frame():
     img = np.full((900, 1600, 3), 60, np.uint8)
     img[760:900, :] = (225, 230, 235)                     # 亮手牌带
     return img
+
+
+def _waiting_peer_frame():
+    """本端已点“下一局”，但还在等对手：无旧按钮、无结算遮罩、手牌未发。"""
+    return np.full((900, 1600, 3), (40, 85, 55), np.uint8)
 
 
 class Seq:
@@ -80,10 +93,11 @@ def test_template_missing_never_clicks(tmp_path):
     assert exe.attempt(round_no=1).status == "no_click" and not taps
 
 
-def test_no_button_is_terminal_no_click():
+def test_no_button_is_transient_no_click():
     taps = []
     r = _exe([_settle_frame(with_button=False)], taps).attempt(round_no=2)
-    assert r.status == "terminal" and not taps
+    assert r.status == "no_click" and not taps
+    assert "等待重拍" in r.reason
 
 
 def test_button_without_scene_rejected():
@@ -91,13 +105,41 @@ def test_button_without_scene_rejected():
     img[BOX[1]:BOX[3], BOX[0]:BOX[2]] = _button()
     taps = []
     r = _exe([img], taps).attempt(round_no=2)
-    assert r.status == "terminal" and not taps
+    # 已回到明亮手牌带，default_new_round_probe 可确认牌桌已发牌；无需再点。
+    assert r.status == "advanced_without_click" and not taps
 
 
 def test_recheck_moved_or_gone_no_click():
     taps = []
     r = _exe([_settle_frame(), _settle_frame(with_button=False)], taps).attempt(round_no=2)
     assert r.status == "no_click" and not taps
+
+
+def test_outer_match_then_fresh_score_drop_is_not_terminal(monkeypatch):
+    """复现 17:06:39：外层 0.9755 命中，fresh 帧瞬降 0.683。
+
+    这只能等待下一帧重拍，绝不能被解释成比赛结束。
+    """
+    taps = []
+    exe = _exe([_settle_frame()], taps)
+    probes = iter([
+        (False, {
+            "button": {"ok": False, "score": 0.6831,
+                       "reason": "template_score_low:0.683"},
+            "scene": {"ok": True, "waiting_room": False,
+                      "reason": "round_summary_scene"},
+        }),
+    ])
+    monkeypatch.setattr(exe, "_gates", lambda _image: next(probes))
+    monkeypatch.setattr(exe, "_probe",
+                        lambda _image: (False, "still_settled_or_unknown"))
+
+    result = exe.attempt(round_no=1)
+
+    assert result.status == "no_click"
+    assert result.clicked is False
+    assert "0.683" in result.reason
+    assert not taps
 
 
 def test_round_16_terminal():
@@ -112,6 +154,61 @@ def test_post_verify_uncertain_halts_forever():
     r = exe.attempt(round_no=4)
     assert r.status == "post_verify_uncertain" and exe.halted and len(taps) == 1
     assert exe.attempt(round_no=5).status == "halted" and len(taps) == 1
+
+
+def test_button_and_old_summary_gone_means_accepted_waiting_not_halted():
+    """复现 17:13 / 17:28：对手未就绪时可长时间留在绿桌过场。
+
+    旧按钮与旧结算页连续多帧消失，已足以确认本端点击被接受；
+    但没有发牌正证据，所以不调 on_advanced，也不把执行器锁死。
+    """
+    taps, advanced = [], []
+    wait = _waiting_peer_frame()
+    exe = _exe([_settle_frame(), _settle_frame(), wait, wait, wait], taps,
+               on_advanced=advanced.append)
+
+    result = exe.attempt(round_no=4)
+
+    assert result.status == "accepted_waiting"
+    assert result.clicked is True
+    assert exe.halted is False
+    assert len(taps) == 1
+    assert advanced == []
+    assert result.evidence["post"][-1]["departed_streak"] == 3
+    # 同一局仍不许因为未发牌而补第二击。
+    assert exe.attempt(round_no=4).status == "no_click"
+    assert len(taps) == 1
+
+
+def test_button_gone_but_old_summary_remains_is_still_uncertain():
+    """只丢按钮不够：旧结算页仍在时必须 fail-closed。"""
+    taps = []
+    old_summary = _settle_frame(with_button=False)
+    exe = _exe([_settle_frame(), _settle_frame(), old_summary], taps)
+
+    result = exe.attempt(round_no=5)
+
+    assert result.status == "post_verify_uncertain"
+    assert exe.halted is True
+    assert len(taps) == 1
+
+
+@pytest.mark.parametrize("frame_path", [
+    REAL_POST_CLICK_WAIT_5556,
+    REAL_POST_CLICK_WAIT_5554,
+])
+def test_real_post_click_wait_frames_are_positive_table_transitions(frame_path):
+    """17:13 请财神与 17:28 骰子前绿桌帧是本端已就绪的正证据。"""
+    if not frame_path.is_file():
+        pytest.skip(f"real frame missing: {frame_path}")
+    image = cv2.imdecode(
+        np.fromfile(str(frame_path), np.uint8), cv2.IMREAD_COLOR)
+
+    evidence = rt.post_click_transition_scene(image)
+
+    assert evidence["ok"] is True
+    assert evidence["reason"] == "post_click_table_transition"
+    assert evidence["green_ratio"] >= rt.POST_TABLE_GREEN_MIN_RATIO
 
 
 def test_low_score_and_size_gates():

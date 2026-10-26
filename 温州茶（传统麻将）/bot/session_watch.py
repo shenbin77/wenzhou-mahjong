@@ -48,6 +48,8 @@ __all__ = [
     "StallPolicy",
     "extract_stall_occurrences",
     "analyze_stalls",
+    "ProgressSuspicionPolicy",
+    "derive_progress_suspicions",
     "build_match_report",
     "build_match_report_root",
     "render_match_report_md",
@@ -711,6 +713,352 @@ def analyze_stalls(
         "relaunches": max(0, process_runs - 1),
         "fuse_alerts": fuse_alerts,
     }
+
+
+# ---------------------------------------------------------------------------
+# 卡住 / 外部推进疑似事件（离线派生，不回写执行层）
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ProgressSuspicionPolicy:
+    """旁路疑似事件阈值。
+
+    ``min_frames`` 只数路径不同的已落盘帧；``min_duration_s`` 按台账时间戳
+    计算。两项必须同时满足。这里产出的始终是 ``*_suspected``，不能作为
+    谁点击了游戏的真值。
+    """
+
+    min_frames: int = 3
+    # 我方已有可执行证据却没有动作：5 秒就是故障候选。
+    min_duration_s: float = 5.0
+    # 普通识别/门禁异常必须更久，避免一两次动画抖动误报。
+    abnormal_duration_s: float = 15.0
+    # “下一局”已经被客户端接收后，给发牌/请财神动画更长窗口。
+    round_transition_duration_s: float = 20.0
+
+
+def _event_seconds(item: Mapping[str, Any]) -> Optional[float]:
+    raw = item.get("ts") or item.get("at")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    try:
+        # actions.jsonl 当前用 ``YYYY/MM/DD HH:MM:SS``；同时兼容 ISO 台账。
+        return datetime.strptime(text, "%Y/%m/%d %H:%M:%S").timestamp()
+    except ValueError:
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
+
+def _frame_id(item: Mapping[str, Any]) -> Optional[str]:
+    value = item.get("frame")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _json_list(value: Any) -> Optional[list]:
+    if not isinstance(value, (list, tuple)):
+        return None
+    result: list = []
+    for part in value:
+        if isinstance(part, (str, int, float, bool)) or part is None:
+            result.append(part)
+        elif isinstance(part, Mapping):
+            # 副露/按钮只保留台账已有的稳定标识，不读取坐标猜语义。
+            result.append({
+                key: part.get(key)
+                for key in ("type", "tile_id", "label", "name")
+                if key in part
+            })
+        else:
+            return None
+    return result
+
+
+def _candidate_action_state(item: Mapping[str, Any]) -> Optional[dict]:
+    """返回可比较的「疑似可行动」状态；证据不足返回 None。
+
+    一般建议态只接受 ``frame_facts.turn_actionable is True``。针对实机已见
+    的 ``bright_subset_unconfirmed``，还要求多亮裁决已连续确认、物理框数
+    与期望暗手一致。两条路都必须有完整 ``frame_facts.concealed``，因此
+    ``wait``、发牌、结算过渡和单纯的 BOT 文本猜测不会进入候选。
+    """
+    if item.get("event") != "idle":
+        return None
+    facts = item.get("frame_facts")
+    if not isinstance(facts, Mapping):
+        return None
+    concealed = _json_list(facts.get("concealed"))
+    if concealed is None or not concealed:
+        return None
+
+    source: Optional[str] = None
+    gate = item.get("gate")
+    if facts.get("turn_actionable") is True and item.get("status") == "advise":
+        source = "frame_facts.turn_actionable"
+    elif gate == "bright_subset_unconfirmed":
+        cut = item.get("bright_subset_cut")
+        evidence = cut.get("evidence") if isinstance(cut, Mapping) else None
+        physical = evidence.get("physical_boxes") if isinstance(evidence, Mapping) else None
+        expected = evidence.get("expected_concealed") if isinstance(evidence, Mapping) else None
+        if not (
+            isinstance(cut, Mapping)
+            and cut.get("hit") is True
+            and cut.get("confirmed") is True
+            and isinstance(physical, int)
+            and physical > 0
+            and physical == expected
+        ):
+            return None
+        source = "confirmed_bright_subset_candidate"
+    else:
+        return None
+
+    cut = item.get("bright_subset_cut")
+    whitelist = cut.get("whitelist") if isinstance(cut, Mapping) else None
+    bright_tiles = None
+    if isinstance(whitelist, list):
+        bright_tiles = [
+            part.get("tile_id")
+            for part in whitelist
+            if isinstance(part, Mapping) and isinstance(part.get("tile_id"), int)
+        ]
+
+    return {
+        "stall_class": "actionable",
+        "threshold_s": 5.0,
+        "candidate_source": source,
+        "gate": gate,
+        "round_seq": item.get("round_seq", facts.get("round_seq")),
+        "caishen": facts.get("caishen"),
+        "concealed": concealed,
+        "melds": _json_list(facts.get("melds")) or [],
+        "river_own": _json_list(facts.get("river_own")),
+        "river_opp": _json_list(facts.get("river_opp")),
+        "claim_buttons": _json_list(facts.get("claim_buttons")) or [],
+        "bright_tiles": bright_tiles,
+    }
+
+
+_EXPECTED_WAIT_TOKENS = (
+    "等待对方", "等待摸牌", "等待发牌", "发牌中", "正在发牌",
+    "等候室", "等待玩家", "等待好友", "好友还在等你", "尚未开局", "计数冻结",
+)
+
+
+def _candidate_stall_state(
+    item: Mapping[str, Any],
+    policy: ProgressSuspicionPolicy,
+) -> Optional[dict]:
+    """按场景给出可比较的停滞签名与阈值；正常等待明确排除。"""
+    actionable = _candidate_action_state(item)
+    if actionable is not None:
+        actionable["threshold_s"] = float(policy.min_duration_s)
+        return actionable
+
+    transition = item.get("round_transition")
+    transition_status = (
+        transition.get("status") if isinstance(transition, Mapping) else None)
+    if transition_status in {"accepted_waiting", "accepted_waiting_timeout"}:
+        return {
+            "stall_class": "round_transition",
+            "threshold_s": float(policy.round_transition_duration_s),
+            "round_seq": item.get("round_seq"),
+            "transition_status": "accepted_waiting",
+            "clicked": bool(transition.get("clicked")),
+        }
+
+    if item.get("event") != "idle" or item.get("status") not in {
+            "abstain", "guard"}:
+        return None
+    reason = str(item.get("reason") or "")
+    if any(token in reason for token in _EXPECTED_WAIT_TOKENS):
+        return None
+    gate = item.get("gate")
+    if not isinstance(gate, str) or gate.strip().lower() in {
+            "", "-", "none", "wait"}:
+        return None
+    facts = item.get("frame_facts")
+    facts = facts if isinstance(facts, Mapping) else {}
+    table = item.get("table_state")
+    table = table if isinstance(table, Mapping) else {}
+    return {
+        "stall_class": "abnormal_stable",
+        "threshold_s": float(policy.abnormal_duration_s),
+        "gate": gate,
+        "round_seq": item.get("round_seq", facts.get("round_seq")),
+        "caishen": facts.get("caishen", table.get("caishen")),
+        "concealed": _json_list(facts.get("concealed")),
+        "river_own": _json_list(facts.get("river_own")),
+        "river_opp": _json_list(facts.get("river_opp")),
+    }
+
+
+def _own_river_progress(item: Mapping[str, Any], baseline: Mapping[str, Any]) -> Optional[dict]:
+    """只认可信的本家牌河严格追加；对手推进和识别抖动都不算。"""
+    if item.get("event") in ("round_transition", "round_reset"):
+        return None
+    facts = item.get("frame_facts")
+    table = item.get("table_state")
+    if not isinstance(facts, Mapping) or not isinstance(table, Mapping):
+        return None
+    if table.get("discards_trusted") is not True:
+        return None
+    before = baseline.get("river_own")
+    after = _json_list(facts.get("river_own"))
+    if before is None or after is None or len(after) <= len(before):
+        return None
+    if after[:len(before)] != before:
+        return None
+    baseline_round = baseline.get("round_seq")
+    current_round = item.get("round_seq", facts.get("round_seq"))
+    if baseline_round is not None and current_round != baseline_round:
+        return None
+    return {
+        "kind": "trusted_own_river_append",
+        "before": before,
+        "after": after,
+        "appended": after[len(before):],
+    }
+
+
+def derive_progress_suspicions(
+    events: Sequence[Mapping[str, Any]],
+    policy: ProgressSuspicionPolicy | None = None,
+) -> list[dict]:
+    """从现有台账旁路派生 ``stuck`` / ``external advance`` 疑似事件。
+
+    该函数不把识别器或 BOT 决策当真值：卡住只在同一证据签名的至少三张
+    新帧持续约五秒后报告；外部推进只认随后可信本家牌河严格追加，且中间
+    没有任何 ``event=action``。会话头、用户 stop、换局与过渡均切断关联。
+    """
+    policy = policy or ProgressSuspicionPolicy()
+    derived: list[dict] = []
+    run_state: Optional[dict] = None
+    run_frames: list[str] = []
+    run_start_index: Optional[int] = None
+    run_start_seconds: Optional[float] = None
+    run_occurrence: Optional[dict] = None
+    pending_stuck: Optional[dict] = None
+
+    def clear_run() -> None:
+        nonlocal run_state, run_frames, run_start_index
+        nonlocal run_start_seconds, run_occurrence
+        run_state = None
+        run_frames = []
+        run_start_index = None
+        run_start_seconds = None
+        run_occurrence = None
+
+    for index, item in enumerate(events):
+        if _is_header(item):
+            clear_run()
+            pending_stuck = None
+            continue
+
+        event = item.get("event")
+        if event == "action":
+            # actions.jsonl 的 action 是 BOT 执行层事件；无论验证结果如何，
+            # 都不能再把后续推进归因为「无 BOT 点击」。
+            clear_run()
+            pending_stuck = None
+            continue
+        if event in ("stop", "error"):
+            # user_stop 明确是人工结束；其它 stop/error 也可能发生在一次
+            # 未完整落 action 的执行尝试后，均不跨边界推断外部推进。
+            clear_run()
+            pending_stuck = None
+            continue
+        if event in ("round_transition", "round_reset"):
+            transition = item.get("round_transition")
+            transition_status = (
+                transition.get("status") if isinstance(transition, Mapping) else None)
+            if not (event == "round_transition" and transition_status in {
+                    "accepted_waiting", "accepted_waiting_timeout"}):
+                clear_run()
+                pending_stuck = None
+                continue
+
+        if pending_stuck is not None:
+            progress = _own_river_progress(item, pending_stuck["state_signature"])
+            if progress is not None:
+                external = {
+                    "type": "external_advance_suspected",
+                    "event_index": index,
+                    "ts": item.get("ts") or item.get("at"),
+                    "frame": _frame_id(item),
+                    "stuck_event_index": pending_stuck["event_index"],
+                    "bot_action_between": False,
+                    "progress_evidence": progress,
+                    "reason": (
+                        "卡住疑似段后，本家可信牌河严格追加，且台账中间无 "
+                        "event=action；仅标记外部推进疑似，不判定操作者"
+                    ),
+                }
+                derived.append(external)
+                pending_stuck = None
+                clear_run()
+                continue
+
+        state = _candidate_stall_state(item, policy)
+        frame = _frame_id(item)
+        seconds = _event_seconds(item)
+        if state is None or frame is None or seconds is None:
+            clear_run()
+            continue
+        if state != run_state:
+            run_state = state
+            run_frames = [frame]
+            run_start_index = index
+            run_start_seconds = seconds
+            run_occurrence = None
+            continue
+        if frame in run_frames:
+            continue
+        if run_start_seconds is None or seconds < run_start_seconds:
+            clear_run()
+            continue
+        run_frames.append(frame)
+        duration = seconds - run_start_seconds
+        threshold_s = float(state.get("threshold_s", policy.min_duration_s))
+        if len(run_frames) < policy.min_frames or duration < threshold_s:
+            continue
+        if run_occurrence is None:
+            run_occurrence = {
+                "type": "stuck_suspected",
+                "event_index": index,
+                "start_index": run_start_index,
+                "end_index": index,
+                "ts_start": events[run_start_index].get("ts") if run_start_index is not None else None,
+                "ts_end": item.get("ts") or item.get("at"),
+                "frame": frame,
+                "frame_count": len(run_frames),
+                "duration_s": round(duration, 3),
+                "threshold_s": threshold_s,
+                "stall_class": state.get("stall_class"),
+                "state_signature": state,
+                "reason": (
+                    "同一疑似可行动证据签名持续至少 "
+                    f"{policy.min_frames} 张新帧 / {threshold_s:g} 秒；"
+                    "仅为旁路疑似，不把 BOT 判断当真值"
+                ),
+            }
+            derived.append(run_occurrence)
+            pending_stuck = run_occurrence
+        else:
+            run_occurrence["event_index"] = index
+            run_occurrence["end_index"] = index
+            run_occurrence["ts_end"] = item.get("ts") or item.get("at")
+            run_occurrence["frame"] = frame
+            run_occurrence["frame_count"] = len(run_frames)
+            run_occurrence["duration_s"] = round(duration, 3)
+
+    return derived
 
 
 # ---------------------------------------------------------------------------

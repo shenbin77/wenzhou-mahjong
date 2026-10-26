@@ -1,43 +1,33 @@
 # -*- coding: utf-8 -*-
-"""Close-box semantics of the assist window: X collapses, only quit exits.
-
-The product decision is that the main window's close box (X) must *not* end
-the process: pressing it collapses the window into the right-bottom floating
-bar while the follow loop, the log tailers, the full-auto thread and the
-200 ms ``_tick`` cadence keep running.  Really exiting is an explicit act
-(floating-bar "×" control, floating-bar context menu, 更多 menu).
-
-These tests stay offline: they either use ``TeaAssistWindow.__new__`` with
-recording doubles for the widgets they touch, or they verify the data-driven
-menu/labels that the Tk widgets are built from.
-"""
+"""Close-box, mascot-orb and notification-area lifecycle tests."""
 from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
+from queue import Queue
+from types import SimpleNamespace
 
 BOT = Path(__file__).resolve().parent.parent
 if str(BOT) not in sys.path:
     sys.path.insert(0, str(BOT))
 
+import assist_window as assist_module  # noqa: E402
 from assist_window import (  # noqa: E402
     CLOSE_ACTION_COLLAPSE,
     CLOSE_ACTION_QUIT,
-    FLOATING_BAR_CLOSE_SIZE,
-    FLOATING_BAR_MENU_ITEMS,
-    FLOATING_BAR_MENU_QUIT,
-    FLOATING_BAR_MENU_RESTORE,
-    FLOATING_BAR_SIZE,
+    FLOATING_ORB_MENU_ITEMS,
+    FLOATING_ORB_MENU_QUIT,
+    FLOATING_ORB_MENU_RESTORE,
     QUIT_MENU_LABEL,
+    TRAY_ACTION_QUIT,
+    TRAY_ACTION_RESTORE,
     TeaAssistWindow,
 )
 
 
-# -- doubles -------------------------------------------------------------
 class _ProtocolRoot:
-    """Records ``protocol()`` registrations instead of creating a WM handler."""
-
     def __init__(self) -> None:
         self.calls = []
 
@@ -46,16 +36,12 @@ class _ProtocolRoot:
 
 
 class _NoTouchRoot:
-    """Fails loudly if an already-collapsed window touches its root."""
-
     def __getattr__(self, name):
         raise AssertionError(
-            f"root.{name} must not be used when the window is already collapsed")
+            f"root.{name} must not be used when already collapsed")
 
 
-class _ExistingBar:
-    """A floating bar that already exists (second X press path)."""
-
+class _ExistingOrb:
     def __init__(self) -> None:
         self.lifted = 0
         self.destroyed = 0
@@ -71,8 +57,6 @@ class _ExistingBar:
 
 
 class _Value:
-    """Minimal ``tk.StringVar`` stand-in."""
-
     def __init__(self, value: str = "") -> None:
         self._value = value
 
@@ -84,8 +68,6 @@ class _Value:
 
 
 class _TickRefresh:
-    """``_tick`` only reads ``last_frame_at`` when no frame has arrived."""
-
     last_frame_at = None
 
 
@@ -130,9 +112,15 @@ class _Closable:
         self.closed += 1
 
 
-class _RecordingMenu:
-    """Records the rows a menu double would display."""
+class _Tray:
+    def __init__(self) -> None:
+        self.stopped = 0
 
+    def stop(self):
+        self.stopped += 1
+
+
+class _RecordingMenu:
     def __init__(self) -> None:
         self.rows = []
 
@@ -144,155 +132,181 @@ class _RecordingMenu:
 
 
 def _bare_window() -> TeaAssistWindow:
-    """An AssistWindow with no Tk widgets, as the older unit tests build it."""
     window = TeaAssistWindow.__new__(TeaAssistWindow)
     window._quitting = False
-    window._floating_bar = None
+    window._floating_orb = None
     return window
 
 
-# -- close box -> collapse ----------------------------------------------
 def test_window_close_action_is_collapse_never_quit():
     window = _bare_window()
     assert window.window_close_action() == CLOSE_ACTION_COLLAPSE
     assert window.window_close_action() != CLOSE_ACTION_QUIT
 
 
-def test_close_box_collapses_once_and_never_quits(monkeypatch):
-    """X must collapse exactly once and must not run any quit path."""
+def test_close_box_collapses_to_orb_and_never_quits(monkeypatch):
     window = _bare_window()
     calls = []
-    monkeypatch.setattr(TeaAssistWindow, "collapse_to_floating_bar",
+    monkeypatch.setattr(TeaAssistWindow, "collapse_to_floating_orb",
                         lambda self: calls.append("collapse"))
     monkeypatch.setattr(TeaAssistWindow, "quit_app",
                         lambda self: calls.append("quit"))
 
     assert window.on_window_close() == CLOSE_ACTION_COLLAPSE
-    assert calls == ["collapse"], (
-        f"close box must collapse only, got {calls!r}")
-    assert calls.count("quit") == 0
+    assert calls == ["collapse"]
 
 
 def test_main_window_protocol_targets_the_collapse_handler():
     window = _bare_window()
     window.root = _ProtocolRoot()
-
     window._bind_window_close_protocol()
-
-    assert len(window.root.calls) == 1, (
-        "the close box must be bound exactly once")
+    assert len(window.root.calls) == 1
     name, handler = window.root.calls[0]
     assert name == "WM_DELETE_WINDOW"
     assert handler == window.on_window_close
-    target = getattr(handler, "__func__", None)
-    assert target is TeaAssistWindow.on_window_close
-    assert target is not TeaAssistWindow.quit_app
-    assert target is not TeaAssistWindow.close
+    assert getattr(handler, "__func__", None) is TeaAssistWindow.on_window_close
 
 
-def test_second_close_box_press_reuses_the_existing_bar():
-    """Pressing X twice must not withdraw/destroy anything a second time."""
+def test_second_close_box_press_reuses_existing_orb():
     window = _bare_window()
-    bar = _ExistingBar()
-    window._floating_bar = bar
+    orb = _ExistingOrb()
+    window._floating_orb = orb
     window.root = _NoTouchRoot()
 
-    window.collapse_to_floating_bar()
+    window.collapse_to_floating_orb()
 
-    assert bar.lifted == 1
-    assert bar.destroyed == 0
-
-
-# -- floating bar: "×" control and context menu -------------------------
-def test_floating_close_control_stays_smaller_than_the_bar():
-    assert FLOATING_BAR_CLOSE_SIZE[0] < FLOATING_BAR_SIZE[0]
-    assert FLOATING_BAR_CLOSE_SIZE[1] < FLOATING_BAR_SIZE[1]
+    assert orb.lifted == 1
+    assert orb.destroyed == 0
 
 
-def test_floating_close_control_quits_and_breaks_propagation(monkeypatch):
-    """Clicking "×" quits and returns "break" so restore never fires."""
+def test_floating_orb_menu_lists_open_then_quit():
+    labels = [label for label, _action in FLOATING_ORB_MENU_ITEMS]
+    assert labels == ["打开主窗口", "退出程序"]
+
+
+def test_floating_orb_menu_commands_are_explicit():
     window = _bare_window()
-    calls = []
-    monkeypatch.setattr(TeaAssistWindow, "quit_app",
-                        lambda self: calls.append("quit"))
-    monkeypatch.setattr(TeaAssistWindow, "restore_from_floating_bar",
-                        lambda self, _event=None: calls.append("restore"))
-
-    result = window._on_floating_close_click(None)
-
-    assert result == "break"
-    assert calls == ["quit"]
-
-
-def test_break_result_stops_the_toplevel_restore_binding(monkeypatch):
-    """Emulate Tk bindtag order: widget binding -> toplevel binding.
-
-    ``close.bind("<Button-1>", ...)`` is a *widget* binding; the bar's
-    "click anywhere to restore" is a *toplevel* binding that Tk dispatches
-    afterwards.  Returning ``"break"`` from the widget binding stops that
-    later tag, which is exactly why a click on "×" cannot restore the window.
-    """
-    window = _bare_window()
-    log = []
-    monkeypatch.setattr(TeaAssistWindow, "quit_app",
-                        lambda self: log.append("quit"))
-
-    def toplevel_binding(_event):
-        log.append("restore")
-
-    for handler in (window._on_floating_close_click, toplevel_binding):
-        if handler(None) == "break":
-            break
-
-    assert log == ["quit"], "the toplevel restore binding must not run"
-    assert "restore" not in log
-
-
-def test_floating_menu_lists_restore_then_quit():
-    labels = [label for label, _action in FLOATING_BAR_MENU_ITEMS]
-    assert labels == ["恢复窗口", "退出程序"]
-
-
-def test_floating_menu_quit_command_is_quit_app():
-    window = _bare_window()
-    quit_command = window._floating_menu_command(FLOATING_BAR_MENU_QUIT)
-    restore_command = window._floating_menu_command(FLOATING_BAR_MENU_RESTORE)
+    quit_command = window._floating_menu_command(FLOATING_ORB_MENU_QUIT)
+    restore_command = window._floating_menu_command(
+        FLOATING_ORB_MENU_RESTORE)
     assert getattr(quit_command, "__func__", None) is TeaAssistWindow.quit_app
     assert (getattr(restore_command, "__func__", None)
-            is TeaAssistWindow.restore_from_floating_bar)
+            is TeaAssistWindow.restore_from_floating_orb)
 
 
-def test_destroy_floating_bar_drops_stale_close_control():
+def test_destroy_floating_orb_drops_image_and_widget_references():
     window = _bare_window()
-    bar = _ExistingBar()
-    window._floating_bar = bar
-    window._floating_close_label = object()
+    orb = _ExistingOrb()
+    window._floating_orb = orb
+    window._floating_canvas = object()
+    window._floating_image = object()
+    window._floating_status_dot = 1
 
-    window._destroy_floating_bar()
+    window._destroy_floating_orb()
 
-    assert bar.destroyed == 1
-    assert window._floating_bar is None
-    assert window._floating_close_label is None, (
-        "a stale × reference would be reused by the next collapse")
+    assert orb.destroyed == 1
+    assert window._floating_orb is None
+    assert window._floating_canvas is None
+    assert window._floating_image is None
+    assert window._floating_status_dot is None
 
 
-# -- 更多 menu ----------------------------------------------------------
 def test_more_menu_appends_an_explicit_quit_entry():
     window = _bare_window()
     menu = _RecordingMenu()
-
     window._append_quit_menu_entry(menu)
-
     assert menu.rows[0][0] == "separator"
     label, command = menu.rows[1]
     assert label == QUIT_MENU_LABEL == "退出程序"
     assert getattr(command, "__func__", None) is TeaAssistWindow.quit_app
 
 
-# -- explicit quit keeps the full teardown ------------------------------
+def test_tray_restore_runs_only_when_tk_thread_drains_queue(monkeypatch):
+    window = _bare_window()
+    window._tray_actions = Queue()
+    calls = []
+    monkeypatch.setattr(TeaAssistWindow, "restore_from_floating_orb",
+                        lambda self: calls.append("restore"))
+    window._tray_actions.put(TRAY_ACTION_RESTORE)
+    assert calls == []
+    assert window._drain_system_tray_actions() is True
+    assert calls == ["restore"]
+
+
+def test_tray_quit_stops_tick_after_tk_thread_drains_queue(monkeypatch):
+    window = _bare_window()
+    window._tray_actions = Queue()
+    calls = []
+    monkeypatch.setattr(TeaAssistWindow, "quit_app",
+                        lambda self: calls.append("quit"))
+    window._tray_actions.put(TRAY_ACTION_QUIT)
+    assert window._drain_system_tray_actions() is False
+    assert calls == ["quit"]
+
+
+def test_structured_restore_acknowledges_after_window_is_restored(monkeypatch):
+    window = _bare_window()
+    window.serial = _Value("emulator-5556")
+    request = SimpleNamespace(command="restore")
+    events = []
+    monkeypatch.setattr(
+        assist_module, "consume_control", lambda serial: request)
+    monkeypatch.setattr(
+        assist_module, "acknowledge_control",
+        lambda received, *, ok, detail="": events.append(
+            ("ack", received, ok, detail)))
+    window.restore_from_floating_orb = lambda: events.append(("restore",))
+
+    assert window._process_window_control() is True
+    assert events[0] == ("restore",)
+    assert events[1][0:3] == ("ack", request, True)
+
+
+def test_structured_quit_acknowledges_acceptance_before_teardown(monkeypatch):
+    window = _bare_window()
+    window.serial = _Value("emulator-5556")
+    request = SimpleNamespace(command="quit")
+    events = []
+    monkeypatch.setattr(
+        assist_module, "consume_control", lambda serial: request)
+    monkeypatch.setattr(
+        assist_module, "acknowledge_control",
+        lambda received, *, ok, detail="": events.append(
+            ("ack", received, ok, detail)))
+    window.quit_app = lambda: events.append(("quit",))
+
+    assert window._process_window_control() is False
+    assert events[0][0:3] == ("ack", request, True)
+    assert events[1] == ("quit",)
+
+
+def test_structured_control_exception_is_acknowledged_as_failure(monkeypatch):
+    window = _bare_window()
+    window.serial = _Value("emulator-5556")
+    request = SimpleNamespace(command="restore")
+    acknowledgements = []
+    monkeypatch.setattr(
+        assist_module, "consume_control", lambda serial: request)
+    monkeypatch.setattr(
+        assist_module, "acknowledge_control",
+        lambda received, *, ok, detail="": acknowledgements.append(
+            (received, ok, detail)))
+
+    def fail_restore():
+        raise RuntimeError("restore failed")
+
+    window.restore_from_floating_orb = fail_restore
+
+    assert window._process_window_control() is True
+    assert acknowledgements[0][0] is request
+    assert acknowledgements[0][1] is False
+    assert "restore failed" in acknowledgements[0][2]
+
+
 def _quit_ready_window(tmp_path) -> TeaAssistWindow:
     window = _bare_window()
     window.root = _TearDownRoot()
+    window._system_tray = _Tray()
     window._adb_diagnostic_timer = "adb"
     window._auto_poll_timer = "auto"
     window._check_poll_timer = "check"
@@ -325,14 +339,13 @@ def _quit_ready_window(tmp_path) -> TeaAssistWindow:
     return window
 
 
-def test_quit_app_keeps_the_full_teardown(tmp_path):
+def test_quit_app_keeps_full_teardown_and_removes_tray(tmp_path):
     window = _quit_ready_window(tmp_path)
-
     window.quit_app()
-
     assert window.stopped == 1
     assert window.video_stopped == 1
     assert window.remembered == 1
+    assert window._system_tray.stopped == 1
     assert window._suppress_review is True
     assert window.embedded_follow_log.stopped == 1
     assert window.follow_session_log.closed == 1
@@ -351,25 +364,20 @@ def test_quit_app_keeps_the_full_teardown(tmp_path):
 
 def test_quit_app_is_idempotent(tmp_path):
     window = _quit_ready_window(tmp_path)
-
     window.quit_app()
     window.quit_app()
-
     assert window.stopped == 1
+    assert window._system_tray.stopped == 1
     assert window.root.destroyed == 1
 
 
 def test_close_alias_still_quits(tmp_path):
-    """Existing callers/tests use ``close()``; it must stay an explicit quit."""
     window = _quit_ready_window(tmp_path)
-
     window.close()
-
     assert window.root.destroyed == 1
 
 
-# -- regression: no new work inside _tick() -----------------------------
-def test_tick_without_floating_bar_skips_floating_refresh():
+def test_tick_without_companion_skips_status_refresh():
     window = TeaAssistWindow.__new__(TeaAssistWindow)
     window.display_source = None
     window.refresh = _TickRefresh()
@@ -378,17 +386,13 @@ def test_tick_without_floating_bar_skips_floating_refresh():
     window.root = _TickRoot()
     window.ticker = None
     refreshes = []
-    window._refresh_floating_status = lambda: refreshes.append("refresh")
-
+    window._refresh_companion_status = lambda: refreshes.append("refresh")
     window._tick()
-
-    assert refreshes == [], (
-        "window test doubles bind _tick alone; the floating refresh must stay "
-        "guarded by an existing bar")
+    assert refreshes == []
     assert window.ticker == "tick-token"
 
 
-def test_tick_refreshes_floating_text_only_while_collapsed():
+def test_tick_refreshes_status_while_orb_is_visible():
     window = TeaAssistWindow.__new__(TeaAssistWindow)
     window.display_source = None
     window.refresh = _TickRefresh()
@@ -396,10 +400,24 @@ def test_tick_refreshes_floating_text_only_while_collapsed():
     window.period = _Value("周期 200 ms")
     window.root = _TickRoot()
     window.ticker = None
+    window._floating_orb = object()
     refreshes = []
-    window._refresh_floating_status = lambda: refreshes.append("refresh")
-
-    window._floating_bar = object()
+    window._refresh_companion_status = lambda: refreshes.append("refresh")
     window._tick()
-
     assert refreshes == ["refresh"]
+
+
+def test_companion_signal_requires_fresh_current_account_match():
+    window = _bare_window()
+    window.account = _Value("玉姐")
+    window.serial = _Value("emulator-5556")
+    assert window._companion_nickname() == "玉姐"
+    assert window._companion_identity_text() == "账号待核验"
+    window._identity_state = "match"
+    window._identity_key = ("玉姐", "emulator-5556")
+    window._identity_verified_at = time.perf_counter()
+    assert window._companion_identity_text() == "当前画面已核验"
+    assert window._companion_status_color() == "#00c853"
+    window.account.set("另一个玩家")
+    assert window._companion_identity_text() == "账号待核验"
+    assert window._companion_status_color() == "#ffb300"

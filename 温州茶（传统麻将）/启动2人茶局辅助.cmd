@@ -6,4 +6,4 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-start "" pythonw "%~dp0bot\assist_window.py"
+start "" pythonw "%~dp0bot\launcher_window.py"

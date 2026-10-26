@@ -43,6 +43,7 @@ from session_watch import (  # noqa: E402
     classify_watch,
     detect_waiting_room,
     detect_login_screen,
+    derive_progress_suspicions,
     extract_stall_occurrences,
     load_ledger_events,
     read_room_cards,
@@ -104,6 +105,28 @@ def _header() -> dict:
     return {"serial": "emulator-9999", "session": "synthetic", "mode": "tea_2p",
             "dry_run": False, "enabled": True,
             "started_at": "2026-10-25T04:00:00+08:00"}
+
+
+def _action_candidate(ts: str, frame: str, *, own=None, opp=None,
+                      event="idle", gate="bright_subset_unconfirmed") -> dict:
+    own = [] if own is None else own
+    opp = [] if opp is None else opp
+    return {
+        "ts": ts, "frame": frame, "event": event, "status": "abstain",
+        "gate": gate, "round_seq": 1,
+        "frame_facts": {
+            "round_seq": 1, "turn_actionable": False,
+            "concealed": [1, 2, 3], "melds": [],
+            "river_own": own, "river_opp": opp, "claim_buttons": [],
+            "caishen": "w1",
+        },
+        "table_state": {"discards_trusted": True},
+        "bright_subset_cut": {
+            "hit": True, "confirmed": True,
+            "whitelist": [{"tile_id": 61}, {"tile_id": 63}],
+            "evidence": {"physical_boxes": 17, "expected_concealed": 17},
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +410,146 @@ def test_stalls_relaunch_count_from_headers() -> None:
     report = analyze_stalls(events)
     assert report["process_runs"] == 2
     assert report["relaunches"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 卡住 / 外部推进疑似事件（纯旁路，不把 BOT 判断当真值）
+# ---------------------------------------------------------------------------
+
+def test_progress_suspicion_needs_three_new_frames_and_five_seconds() -> None:
+    events = [_header(),
+              _action_candidate("2026/10/26 17:37:00", "f1.png"),
+              _action_candidate("2026/10/26 17:37:02", "f2.png"),
+              _action_candidate("2026/10/26 17:37:05", "f3.png")]
+    derived = derive_progress_suspicions(events)
+    assert [item["type"] for item in derived] == ["stuck_suspected"]
+    assert derived[0]["frame_count"] == 3
+    assert derived[0]["duration_s"] == 5.0
+    assert derived[0]["state_signature"]["candidate_source"] == (
+        "confirmed_bright_subset_candidate")
+
+
+def test_progress_suspicion_duplicate_frame_and_short_duration_do_not_count() -> None:
+    duplicate = [_header(),
+                 _action_candidate("2026/10/26 17:37:00", "same.png"),
+                 _action_candidate("2026/10/26 17:37:03", "same.png"),
+                 _action_candidate("2026/10/26 17:37:06", "f2.png")]
+    short = [_header(),
+             _action_candidate("2026/10/26 17:37:00", "f1.png"),
+             _action_candidate("2026/10/26 17:37:01", "f2.png"),
+             _action_candidate("2026/10/26 17:37:04", "f3.png")]
+    assert derive_progress_suspicions(duplicate) == []
+    assert derive_progress_suspicions(short) == []
+
+
+@pytest.mark.parametrize("breaker", [
+    _tick("2026/10/26 17:37:06", "wait", "wait_opponent", frame="wait.png"),
+    _tick("2026/10/26 17:37:06", "wait", "dealing", frame="deal.png"),
+    {"ts": "2026/10/26 17:37:06", "event": "round_transition",
+     "frame": "transition.png"},
+    _stop("2026/10/26 17:37:06", "user_stop", frame="stop.png"),
+])
+def test_progress_suspicion_excludes_wait_deal_transition_and_user_stop(breaker) -> None:
+    events = [_header(),
+              _action_candidate("2026/10/26 17:37:00", "f1.png"),
+              _action_candidate("2026/10/26 17:37:02", "f2.png"),
+              breaker,
+              _action_candidate("2026/10/26 17:37:08", "f3.png")]
+    assert derive_progress_suspicions(events) == []
+
+
+def test_external_advance_requires_trusted_own_river_append_without_bot_action() -> None:
+    events = [_header(),
+              _action_candidate("2026/10/26 17:37:00", "f1.png", own=[9]),
+              _action_candidate("2026/10/26 17:37:02", "f2.png", own=[9]),
+              _action_candidate("2026/10/26 17:37:05", "f3.png", own=[9]),
+              _tick("2026/10/26 17:37:07", "wait", frame="f4.png",
+                    frame_facts={"round_seq": 1, "river_own": [9, 11]},
+                    table_state={"discards_trusted": True}, round_seq=1)]
+    derived = derive_progress_suspicions(events)
+    assert [item["type"] for item in derived] == [
+        "stuck_suspected", "external_advance_suspected"]
+    assert derived[1]["bot_action_between"] is False
+    assert derived[1]["progress_evidence"]["appended"] == [11]
+
+
+def test_external_advance_not_emitted_after_bot_action_or_opponent_only_progress() -> None:
+    prefix = [_header(),
+              _action_candidate("2026/10/26 17:37:00", "f1.png", own=[9]),
+              _action_candidate("2026/10/26 17:37:02", "f2.png", own=[9]),
+              _action_candidate("2026/10/26 17:37:05", "f3.png", own=[9])]
+    bot_action = dict(_action_candidate("2026/10/26 17:37:06", "tap.png", own=[9]),
+                      event="action", verified=False)
+    after_bot = _tick(
+        "2026/10/26 17:37:08", "wait", frame="f4.png",
+        frame_facts={"round_seq": 1, "river_own": [9, 11]},
+        table_state={"discards_trusted": True}, round_seq=1)
+    opponent = _tick(
+        "2026/10/26 17:37:08", "wait", frame="f4.png",
+        frame_facts={"round_seq": 1, "river_own": [9], "river_opp": [22]},
+        table_state={"discards_trusted": True}, round_seq=1)
+    assert [item["type"] for item in derive_progress_suspicions(
+        prefix + [bot_action, after_bot])] == ["stuck_suspected"]
+    assert [item["type"] for item in derive_progress_suspicions(
+        prefix + [opponent])] == ["stuck_suspected"]
+
+
+def _abnormal(ts: str, frame: str, *, reason="识牌不完整，停止决策") -> dict:
+    return {
+        "ts": ts, "event": "idle", "status": "abstain",
+        "gate": "recognition_incomplete", "reason": reason,
+        "frame": frame, "round_seq": 1,
+        "frame_facts": {"round_seq": 1, "concealed": [1, 2],
+                        "river_own": [9], "river_opp": []},
+        "table_state": {"caishen": "w1"},
+    }
+
+
+def test_abnormal_stable_uses_fifteen_seconds_not_five() -> None:
+    short = [_header(),
+             _abnormal("2026/10/26 17:37:00", "a1.png"),
+             _abnormal("2026/10/26 17:37:06", "a2.png"),
+             _abnormal("2026/10/26 17:37:14", "a3.png")]
+    assert derive_progress_suspicions(short) == []
+    hit = derive_progress_suspicions(
+        short + [_abnormal("2026/10/26 17:37:15", "a4.png")])
+    assert len(hit) == 1
+    assert hit[0]["stall_class"] == "abnormal_stable"
+    assert hit[0]["threshold_s"] == 15.0
+
+
+def _accepted(ts: str, frame: str) -> dict:
+    return {
+        "ts": ts, "event": "round_transition", "frame": frame,
+        "round_seq": 4,
+        "round_transition": {"status": "accepted_waiting", "clicked": True},
+    }
+
+
+def test_round_transition_accepted_waiting_uses_twenty_seconds() -> None:
+    prefix = [_header(),
+              _accepted("2026/10/26 17:37:00", "r1.png"),
+              _accepted("2026/10/26 17:37:10", "r2.png"),
+              _accepted("2026/10/26 17:37:19", "r3.png")]
+    assert derive_progress_suspicions(prefix) == []
+    hit = derive_progress_suspicions(
+        prefix + [_accepted("2026/10/26 17:37:20", "r4.png")])
+    assert len(hit) == 1
+    assert hit[0]["stall_class"] == "round_transition"
+    assert hit[0]["threshold_s"] == 20.0
+
+
+@pytest.mark.parametrize("reason", [
+    "等待对方出牌", "等待摸牌", "正在发牌", "等候室等待好友",
+    "好友还在等你，等待开始",
+])
+def test_expected_waits_never_become_fifteen_second_incidents(reason) -> None:
+    events = [_header()] + [
+        _abnormal(f"2026/10/26 17:37:{second:02d}", f"w{second}.png",
+                  reason=reason)
+        for second in (0, 10, 20, 30)
+    ]
+    assert derive_progress_suspicions(events) == []
 
 
 def test_stalls_stop_line_with_abstain_status_counts_as_stop() -> None:

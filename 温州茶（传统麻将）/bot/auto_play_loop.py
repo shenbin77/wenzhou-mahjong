@@ -612,6 +612,9 @@ class AutoPlayLoop:
         # 多亮白名单（亮簇 1..N 张）：只在 bright_count >= 2 时才接管，单亮
         # 一律走上面那条已实机验证的路径，行为逐字不变。
         self._bright_subset = BrightSubsetCutTracker()
+        # 压暗态补读只供多亮白名单使用；完整手牌须由两张独立原生帧复核。
+        self._dim_gain_snapshot: tuple | None = None
+        self._dim_gain_evidence: dict | None = None
         # 同局手牌账本：压暗/遮挡帧不重读全手，用上一帧可信读数 + 本帧
         # 亮牌白名单决策（见 hand_ledger 模块头部的实机证据）。
         self._hand_ledger = HandLedger()
@@ -1119,15 +1122,25 @@ class AutoPlayLoop:
                 **base, "event": "idle",
                 "reason": "dry_run 已确认局间下一局按钮；只记录不点击",
             })
+        # ``round.seq`` 是本次进程观察到的换局序号，不是画面上的
+        # 实际 ``13/16``。进程中途接管或跨场时两者必然不对齐；
+        # 只用它做“同一观测局不重复点”的 key，不把它冒充末局证据。
+        # 真正的 16/16 由独立 match-end 场景门处理。
         outcome = self._round_transition.attempt(
-            round_no=self.round.seq, round_total=16)
+            round_no=self.round.seq, round_total=0)
         ledger = outcome.ledger()
         base["round_transition"] = ledger
         if outcome.status == "terminal":
             return self._stop("match_complete", outcome.reason, base)
-        # advanced / post_verify_uncertain / halted 都不杀循环：双号场景下，
-        # 先点的一方会等另一方；下一 tick 继续观察即可。执行器自身保证同
-        # 一局绝不二击。真正不确定的普通出牌/行动点击仍按原门禁停手。
+        # 点后状态不确定时执行器已经永久 halted；若这里只记事件继续循环，
+        # 后续每 tick 只会反复得到 halted，形成“程序活着但永远不再动作”的
+        # 假运行。显式 stop 才能让日志和 UI 准确暴露首个停手原因。
+        if outcome.status in {"post_verify_uncertain", "halted"}:
+            return self._stop(
+                "round_transition_uncertain", outcome.reason, base)
+        # advanced / advanced_without_click / accepted_waiting / no_click 均
+        # 继续观察。双号场景下另一端可能先推进；accepted_waiting
+        # 表示本端已就绪，no_click 则等下一张 fresh 帧重新过三重门。
         return self._event({
             **base, "event": "round_transition",
             "reason": outcome.reason,
@@ -1325,6 +1338,8 @@ class AutoPlayLoop:
             self.turn_history.clear()
             self._single_bright.reset()
             self._bright_subset.reset()
+            self._dim_gain_snapshot = None
+            self._dim_gain_evidence = None
             self._hand_ledger.reset()
             return self._event({
                 "ts": datetime.now().astimezone().isoformat(),
@@ -1346,6 +1361,8 @@ class AutoPlayLoop:
             self._forget_discards()
             self._single_bright.reset()
             self._bright_subset.reset()
+            self._dim_gain_snapshot = None
+            self._dim_gain_evidence = None
             # 换局：手牌账本必须清空——上局的完整手牌与新局毫无关系，
             # 张数碰巧相同就会把上局手牌当成新局事实（这是最危险的一类
             # 跨局污染），所以只清不留。
@@ -1507,6 +1524,12 @@ class AutoPlayLoop:
         subset = self._bright_subset.feed(
             image, result, caishen_label=caishen, mode=self.mode)
         base["bright_subset_cut"] = subset.ledger()
+        dim_gain_advice = None if changed_round else self._dim_gain_whitelist_advice(
+            image, subset, result, frame=str(frame_path))
+        if self._dim_gain_evidence is not None:
+            base["dim_gain_read"] = dict(self._dim_gain_evidence)
+        if dim_gain_advice is not None:
+            base["dim_gain_advice"] = dim_gain_advice
         # 压暗帧兜底建议：本帧 analyze 读残（abstain）时，用账本手牌 + 本帧
         # 亮牌白名单算"该打白名单里的哪一张"。换局帧不参与（账本已清空）。
         ledger_advice = None if changed_round else self._ledger_advice(
@@ -1516,8 +1539,8 @@ class AutoPlayLoop:
             base["ledger_advice"] = ledger_advice
         base["bright_subset_advice"] = self._track_bright_subset_advice(
             subset, result,
-            advice_id=(ledger_advice or {}).get("tile_id"),
-            override=bool((ledger_advice or {}).get("tile_id")))
+            advice_id=(dim_gain_advice or ledger_advice or {}).get("tile_id"),
+            override=bool((dim_gain_advice or ledger_advice or {}).get("tile_id")))
         # 胡提示面板：维护兜底所需状态（换局帧一律作废，面板帧绝不进快照）。
         if changed_round:
             self._last_advise_read = None
@@ -1878,6 +1901,8 @@ class AutoPlayLoop:
         self._single_bright.reset()
         self._bright_subset.reset()
         self._bright_subset_advice = None
+        self._dim_gain_snapshot = None
+        self._dim_gain_evidence = None
         self._hand_ledger.reset()
         panel_recovery.clear_state(self._panel_recovery_path)
         return self._event({
@@ -2076,6 +2101,129 @@ class AutoPlayLoop:
         top = sorted(rejects.items(), key=lambda item: -item[1])[:2]
         return "、".join(f"{code}×{count}" for code, count in top)
 
+    def _dim_gain_whitelist_advice(self, image: np.ndarray, subset,
+                                   result: dict, *, frame: str) -> dict | None:
+        """在已确认的茶 2 多亮压暗态，从原生帧补读全手后限定白名单算牌。
+
+        不改变通用识牌、回合亮度门禁或原生点击图；任何一项证据不足就
+        清掉跨帧读数，继续走既有账本/弃权路径。
+        """
+        self._dim_gain_evidence = None
+
+        def reject(reason: str, **detail):
+            self._dim_gain_snapshot = None
+            self._dim_gain_evidence = {
+                "attempted": True,
+                "outcome": "no_advice",
+                "reason": reason,
+                "frame": frame,
+                **detail,
+            }
+            return None
+
+        if (not frame or self.mode != "tea_2p"
+                or result.get("mode") != "tea_2p"
+                or result.get("status") != "abstain"
+                or result.get("reason") != "识牌不完整，停止决策"
+                or result.get("caishen_source") != "image"
+                or not getattr(subset, "hit", False)
+                or not getattr(subset, "multi_candidate", False)
+                or getattr(subset, "unresolved", True)):
+            # 非 dim-gain 适用场景是正常分流，不在每帧刷失败证据。
+            self._dim_gain_snapshot = None
+            return None
+        evidence = getattr(subset, "evidence", None) or {}
+        whitelist = [int(candidate.tile_id) for candidate in subset.candidates
+                     if candidate.tile_id is not None]
+        if len(whitelist) != len(subset.candidates) or len(whitelist) < 2:
+            return reject("whitelist_identity_incomplete")
+        caishen = result.get("caishen")
+        if not caishen or (self.round.caishen and self.round.caishen != caishen):
+            return reject("caishen_missing_or_conflicting")
+        try:
+            from assist_tea import _complete_visible_meld_groups
+            from brain_v0.engine.tea.shanten import (
+                best_discard_by_efficiency, expected_concealed_count,
+                validate_tiles,
+            )
+            from tea_bot import _TEMPLATE_DIR, engine_to_vision, vision_to_engine
+            from tile_vision import TILE_IDS, TileVision
+
+            vision = TileVision(template_dir=_TEMPLATE_DIR)
+            vision.dim_gain_all = True  # 仅此帧的局部实例，不设置进程环境变量
+            hand = [int(tile[0]) for tile in
+                    vision.recognize_hand(image, caishen_label=caishen)]
+            melds = (_complete_visible_meld_groups(vision)
+                     if vision.last_meld_boxes else [])
+            expected = int(evidence["expected_concealed"])
+            if (not vision.last_complete or len(hand) != expected
+                    or len(vision.diagnostics) != expected
+                    or (vision.last_meld_boxes and not melds)
+                    or expected != expected_concealed_count(
+                        melds=melds, drawn=True)):
+                return reject(
+                    "enhanced_read_incomplete",
+                    expected=expected,
+                    hand_count=len(hand),
+                    diagnostic_count=len(vision.diagnostics),
+                    last_complete=bool(vision.last_complete),
+                    meld_boxes=len(vision.last_meld_boxes),
+                    meld_groups=len(melds),
+                )
+            counts = Counter(hand)
+            if any(counts[tile] < count for tile, count
+                   in Counter(whitelist).items()):
+                return reject("whitelist_not_in_enhanced_hand",
+                              whitelist=sorted(whitelist))
+            caishen_id = TILE_IDS[caishen]
+            engine_hand = [vision_to_engine(tile) for tile in hand]
+            engine_melds = [[vision_to_engine(tile) for tile in group]
+                            for group in melds]
+            engine_caishen = vision_to_engine(caishen_id)
+            validate_tiles(engine_hand, caishen_id=engine_caishen,
+                           melds=engine_melds)
+            candidates = best_discard_by_efficiency(
+                engine_hand, caishen_id=engine_caishen, melds=engine_melds)
+            allowed = set(whitelist)
+            choice = next(((float(score), int(engine_to_vision(int(tile))))
+                           for score, tile in candidates
+                           if int(engine_to_vision(int(tile))) in allowed), None)
+            if choice is None:
+                return reject("engine_has_no_whitelisted_candidate",
+                              whitelist=sorted(allowed))
+        except (KeyError, TypeError, ValueError, RuntimeError,
+                OSError, cv2.error) as exc:
+            # 增益补读是可选的只读证据；文件/图像读取异常不能把
+            # 整个代打循环变成 anomaly，更不能降级为猜牌。
+            return reject("enhanced_read_exception",
+                          error_type=type(exc).__name__)
+
+        signature = (self.round.seq, caishen, tuple(hand),
+                     tuple(tuple(group) for group in melds),
+                     tuple(sorted(whitelist)), choice[1])
+        previous = self._dim_gain_snapshot
+        streak = (previous[1] + 1 if previous and previous[0] == signature
+                  and previous[2] != frame
+                  else 1)
+        self._dim_gain_snapshot = (signature, streak, frame)
+        self._dim_gain_evidence = {
+            "attempted": True,
+            "outcome": ("advice" if streak >= 2 else
+                        "independent_frame_pending"),
+            "reason": ("independent_frames_confirmed" if streak >= 2 else
+                       "need_another_independent_frame"),
+            "frame": frame,
+            "streak": streak,
+            "whitelist": sorted(allowed),
+            "choice": choice[1],
+        }
+        if streak < 2:
+            return None
+        return {"tile_id": choice[1], "score": choice[0], "hand": hand,
+                "melds": melds, "whitelist": sorted(allowed),
+                "candidate_count": len(candidates), "streak": streak,
+                "source": "dim_gain_independent_frames"}
+
     def _ledger_advice(self, subset, result: dict, *,
                        frame: str = "") -> dict | None:
         """压暗帧兜底建议：用账本手牌 + 本帧亮牌白名单算出该打哪一张。
@@ -2220,19 +2368,21 @@ class AutoPlayLoop:
             # 不足以决定打哪张。这里先让手牌账本接手——同局同张数 + 白名单
             # 是手牌子集时，账本里的完整手牌就是本帧手牌（实测 22:13 那次
             # 卡死 6 分钟正是缺这一层）。账本也给不出读数才维持弃权。
-            ledger_advice = base.get("ledger_advice") or {}
-            ledger_tile = ledger_advice.get("tile_id")
-            if ledger_tile is None:
+            scoped_advice = (base.get("dim_gain_advice")
+                             or base.get("ledger_advice") or {})
+            scoped_tile = scoped_advice.get("tile_id")
+            if scoped_tile is None:
                 return self._bright_subset_abstain(
                     base,
                     f"本帧没有可核对的算牌建议（status={result.get('status')!r}，"
-                    f"reason={result.get('reason')!r}），手牌账本也无可信读数"
+                    f"reason={result.get('reason')!r}），压暗补读及手牌账本无可信读数"
                     f"（{self._ledger_reject_reason()}）；白名单不自行选牌",
                     marker, "no_advice")
-            suggestion_id = int(ledger_tile)
-            marker["advice_source"] = "ledger"
-            marker["ledger_advice"] = ledger_advice
-            hand_tiles = [int(v) for v in (ledger_advice.get("hand") or [])]
+            suggestion_id = int(scoped_tile)
+            marker["advice_source"] = ("dim_gain" if base.get("dim_gain_advice")
+                                       else "ledger")
+            marker["scoped_advice"] = scoped_advice
+            hand_tiles = [int(v) for v in (scoped_advice.get("hand") or [])]
             if hand_tiles:
                 # 后续 pending_context / 台账沿用账本手牌，而不是本帧的残读。
                 result = {**result, "hand_ids": hand_tiles,
@@ -2347,6 +2497,8 @@ class AutoPlayLoop:
         self._hand_ledger.forget_tile(expected_tile)
         self._bright_subset.reset()
         self._bright_subset_advice = None
+        self._dim_gain_snapshot = None
+        self._dim_gain_evidence = None
         marker["outcome"] = "verified"
         return self._event({
             **base, "event": "action", "tap": outcome.get("tap"),
@@ -3226,6 +3378,18 @@ class AutoPlayLoop:
         否则偶发失败会累积成误停机。
         """
         self.consecutive_errors = 0
+        # Every BOT-originated gameplay action gets an immutable provenance
+        # marker before either ledger sees it.  Review code must never infer a
+        # human click merely because an older row omitted these fields.
+        if event.get("event") == "action":
+            serial = str(getattr(self, "serial", "unknown") or "unknown")
+            round_seq = getattr(getattr(self, "round", None), "seq", "unknown")
+            tick = getattr(self, "tick_index", "unknown")
+            event.setdefault("action_source", "bot")
+            event.setdefault(
+                "action_id",
+                f"{serial}:r{round_seq}:t{tick}:{uuid.uuid4().hex[:12]}",
+            )
         event.setdefault("card_count", self.card_count)
         event["consecutive_errors"] = self.consecutive_errors
         self._write_event(event)

@@ -15,8 +15,9 @@
 
 点击前 100–250ms 再取一帧复核（同区域、尺寸相近、分数过门），否则不点。
 点后有界轮询：按钮消失 **且** 观察到新局证据（等候室 / 结算遮罩消失且
-手牌带变亮 / 调用方注入的探针），否则 ``post_verify_uncertain`` 并永久
-停手（同一执行器不会再点）。
+手牌带变亮 / 调用方注入的探针）则确认新局。若按钮与旧结算场景连续多帧
+一起消失，则只确认本端的点击已被接受，继续等对手就绪，不提前记新局。
+两类证据都没有才 ``post_verify_uncertain`` 并永久停手。
 """
 from __future__ import annotations
 
@@ -45,6 +46,8 @@ RECHECK_MAX_SHIFT_PX = 8
 GONE_MAX_SCORE = 0.60           # 点后按钮“消失”的上限分
 POST_POLLS = 10
 POST_INTERVAL_S = 0.5
+POST_DEPARTED_MIN_FRAMES = 3  # 按钮和旧结算页同时消失的独立帧数
+POST_TABLE_GREEN_MIN_RATIO = 0.80  # 17:13 请财神 / 17:28 骰子过场的桌面正证据
 MATCH_ROUND_TOTAL = 16
 
 # 2026-10-25 真实“下一局”总结页并不满足旧 turn_gate 的双 settlement 信号；
@@ -174,6 +177,36 @@ def default_new_round_probe(image) -> tuple[bool, str]:
     return False, "still_settled_or_unknown"
 
 
+def post_click_transition_scene(image) -> dict:
+    """点“下一局”后的桌内过场正证据。
+
+    这个判据只能用在已通过两帧按钮门并已单击之后：旧结算场景
+    已消失，且原生帧的麻将桌绿色覆盖率足够高。17:13 的“请财神/
+    互动道具催好友”和 17:28 的骰子/发牌前过场都命中；单纯的
+    ``probe=unknown`` 或按钮一帧消失不命中。
+    """
+    evidence: dict[str, Any] = {"ok": False, "green_ratio": 0.0,
+                                "reason": "invalid_frame"}
+    if not _valid(image):
+        return evidence
+    scene = round_end_scene(image)
+    evidence["round_end_scene"] = scene.get("reason")
+    if scene["ok"]:
+        evidence["reason"] = "old_round_summary_still_visible"
+        return evidence
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    green = ((hsv[..., 0] >= 35) & (hsv[..., 0] <= 95)
+             & (hsv[..., 1] >= 45) & (hsv[..., 2] >= 40))
+    ratio = float(green.mean())
+    evidence["green_ratio"] = round(ratio, 4)
+    if ratio < POST_TABLE_GREEN_MIN_RATIO:
+        evidence["reason"] = f"table_green_ratio_low:{ratio:.3f}"
+        return evidence
+    evidence["ok"] = True
+    evidence["reason"] = "post_click_table_transition"
+    return evidence
+
+
 def room_card_policy(value: Optional[int], status: str = "") -> dict:
     """房卡门：>0 允许、0 禁止开新局、偏少警告、读不出允许但记 room_cards_unknown。
 
@@ -193,7 +226,7 @@ def room_card_policy(value: Optional[int], status: str = "") -> dict:
 
 @dataclass
 class TransitionResult:
-    status: str             # advanced / terminal / no_click / post_verify_uncertain / halted
+    status: str             # advanced / accepted_waiting / terminal / no_click / uncertain / halted
     reason: str
     clicked: bool = False
     evidence: dict | None = None
@@ -279,12 +312,20 @@ class RoundTransitionExecutor:
         ok, ev1 = self._gates(first)
         if not ok:
             scene = ev1["scene"]
-            if scene.get("waiting_room"):
+            advanced, label = self._probe(first)
+            if scene.get("waiting_room") or advanced:
+                info = {"round_no": round_no, "evidence": label}
+                if self._on_advanced is not None:
+                    self._on_advanced(info)
                 return self._report(TransitionResult(
-                    "advanced_without_click", "已在等候室，无需点击", evidence=ev1), round_no)
-            status = "terminal" if ev1["button"]["reason"] != "template_missing" else "no_click"
+                    "advanced_without_click",
+                    f"局间画面已自行推进：{label}", evidence=ev1), round_no)
+            # 外层上一帧已经通过三重门，进 attempt 后重新截图却可能正好撞上
+            # 按钮动画/亮度变化。一次 fresh 帧分数下降不能证明比赛结束，更
+            # 不能借 ``terminal`` 让主循环报 match_complete。只有明确的末局
+            # 编号（上面的 round_no >= round_total）才能返回 terminal。
             return self._report(TransitionResult(
-                status, "未见合格的下一局按钮/局间场景："
+                "no_click", "fresh 帧未再次确认下一局按钮/局间场景，等待重拍："
                 f"{ev1['button']['reason']} / {scene['reason']}", evidence=ev1), round_no)
         self._sleep(self._recheck_delay_s)
         second = self._capture()
@@ -295,6 +336,15 @@ class RoundTransitionExecutor:
                 <= RECHECK_MAX_SHIFT_PX)
         evidence = {"first": ev1, "recheck": ev2}
         if not same:
+            advanced, label = self._probe(second)
+            if advanced:
+                info = {"round_no": round_no, "evidence": label}
+                if self._on_advanced is not None:
+                    self._on_advanced(info)
+                return self._report(TransitionResult(
+                    "advanced_without_click",
+                    f"复核期间局间画面已自行推进：{label}",
+                    evidence=evidence), round_no)
             return self._report(TransitionResult(
                 "no_click", "复核帧未再次确认同一按钮，不点击", evidence=evidence), round_no)
         cx, cy = b2["center"]
@@ -310,17 +360,25 @@ class RoundTransitionExecutor:
                 "post_verify_uncertain", f"点击异常，结果未知：{exc}", clicked=True,
                 evidence=evidence), round_no)
         polls = []
+        departed_streak = 0
         for i in range(max(1, self._post_polls)):
             self._sleep(self._post_interval_s)
             try:
                 frame = self._capture()
             except Exception as exc:  # noqa: BLE001
                 polls.append({"error": str(exc)})
+                departed_streak = 0
                 continue
             button = find_next_round_button(frame, self._template)
             gone = button["score"] < GONE_MAX_SCORE or not _valid(frame)
             new_ok, label = self._probe(frame) if gone else (False, "button_still_visible")
-            polls.append({"score": button["score"], "gone": gone, "probe": label})
+            transition = post_click_transition_scene(frame)
+            departed = bool(gone and transition["ok"])
+            departed_streak = departed_streak + 1 if departed else 0
+            polls.append({"score": button["score"], "gone": gone, "probe": label,
+                          "transition": transition,
+                          "departed": departed,
+                          "departed_streak": departed_streak})
             if gone and new_ok:
                 evidence["post"] = polls
                 info = {"round_no": round_no, "evidence": label}
@@ -330,6 +388,15 @@ class RoundTransitionExecutor:
                     "advanced", f"下一局已确认：{label}", clicked=True,
                     evidence=evidence), round_no)
         evidence["post"] = polls
+        # 17:13 / 17:28 实机：点击后 10 张原生帧里旧按钮与
+        # 结算遮罩都已消失，但对手未就绪时停在绿桌/骰子过场，
+        # 尚无“手牌带变亮”。这能证明本端下一局点击已被游戏接受，
+        # 却不能提前证明新局已开始，因此不调 on_advanced。
+        if departed_streak >= POST_DEPARTED_MIN_FRAMES:
+            return self._report(TransitionResult(
+                "accepted_waiting",
+                "下一局按钮与旧结算页已持续消失；本端已就绪，等待新局正证据",
+                clicked=True, evidence=evidence), round_no)
         self.halted = True
         return self._report(TransitionResult(
             "post_verify_uncertain", "点下一局后未观察到新局证据，停手不再点击",
