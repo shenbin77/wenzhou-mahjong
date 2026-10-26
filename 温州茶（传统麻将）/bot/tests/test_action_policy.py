@@ -340,6 +340,36 @@ def test_hu_button_without_engine_confirmation_is_blocked() -> None:
     assert decision.action == ""
 
 
+def test_live_auto_unverifiable_hu_uses_independently_verified_pass(
+        monkeypatch) -> None:
+    """胡/吃证据不足时不猜；已验过的“过”必须让牌局继续。"""
+    cfg = ap.recommended_runner_config(auto_click_enabled=True, include_chi=True)
+    monkeypatch.setattr(
+        ap, "_l1_evidence",
+        lambda _state, _image, _cfg: (
+            {"geometry_ok": True, "template_status": ap.TEMPLATE_STATUS_MATCHED},
+            {0: {"box": list(GOLD_BOX), "status": ap.TEMPLATE_STATUS_MATCHED},
+             1: {"box": list(GOLD_BOX_B), "status": ap.TEMPLATE_STATUS_MATCHED},
+             2: {"box": list(PASS_BOX), "status": ap.TEMPLATE_STATUS_MATCHED}},
+        ))
+    hand = HandState(
+        concealed=(5, 5, 1, 3, 8, 9, 22, 22, 26, 28),
+        melds=((27, 28, 29), (6, 7, 8)), incoming_tile=None,
+        incoming_source="opponent", player_count=2, source="live_regression")
+
+    decision = decide_action(
+        state(hu_button(), ClaimButton(kind="gold", box=GOLD_BOX_B,
+                                      center=GOLD_CENTER_B), pass_button()),
+        hand, cfg)
+
+    assert decision is not None
+    assert decision.action == ACTION_PASS
+    assert decision.executable
+    assert decision.needs_human_confirm is False
+    assert decision.tap_point == PASS_CENTER
+    assert "胡未获完整证据" in decision.l2_reason
+
+
 def test_hu_with_melds_is_not_verifiable() -> None:
     """副露局面的胡牌判定未验收 → 即使有胡盘也不认。"""
     hand = HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 41),

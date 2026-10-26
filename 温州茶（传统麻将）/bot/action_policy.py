@@ -1923,6 +1923,19 @@ def decide_action(
                 ACTION_HU, hu_button, hand.incoming_tile, cfg,
                 evidence, override, report,
                 l2=override["why"], template_status=hu_status)
+        # A visible 胡 disc must never be guessed when L2 cannot prove it.
+        # But leaving a verified 过 disc untouched stalls the table forever.
+        # In live auto mode the conservative action is to decline the whole
+        # claim row, exactly as for an unprovable 吃/碰/杠 below.  This does not
+        # weaken the Hu gate: Hu remains rejected and Pass must independently
+        # satisfy its own template and action whitelist.
+        if (cfg.auto_click_enabled and pass_button is not None
+                and (not cfg.require_template_match
+                     or pass_status == TEMPLATE_STATUS_MATCHED)):
+            return _accept(
+                ACTION_PASS, pass_button, None, cfg, evidence, {}, report,
+                l2=f"胡未获完整证据（{info['why']}）；安全选择过",
+                template_status=pass_status)
         return _blocked(claim_state, image, cfg,
                         f"L2 否决：画面出现胡盘，但{info['why']}",
                         l2_reason=info["why"], engine=report)

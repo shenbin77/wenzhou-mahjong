@@ -60,6 +60,13 @@ def _waiting_peer_frame():
     return np.full((900, 1600, 3), (40, 85, 55), np.uint8)
 
 
+def _waiting_peer_low_green_frame():
+    """真实请神过场近似：旧总结已走，但动画把桌面绿色覆盖压到约75%。"""
+    image = _waiting_peer_frame()
+    image[:, :400] = (70, 70, 70)
+    return image
+
+
 class Seq:
     def __init__(self, frames):
         self.frames = list(frames)
@@ -234,6 +241,25 @@ def test_button_gone_but_old_summary_remains_is_still_uncertain():
     assert result.status == "post_verify_uncertain"
     assert exe.halted is True
     assert len(taps) == 1
+
+
+def test_low_green_peer_wait_is_accepted_without_claiming_new_round():
+    """按钮/旧总结连续消失即进入只读等待，不用0.80绿色魔数猜新局。"""
+    taps, advanced = [], []
+    waiting = _waiting_peer_low_green_frame()
+    assert rt.post_click_transition_scene(waiting)["green_ratio"] \
+        < rt.POST_TABLE_GREEN_MIN_RATIO
+    exe = _exe([_settle_frame(), _settle_frame(),
+                waiting, waiting, waiting], taps, on_advanced=advanced.append)
+
+    result = exe.attempt(round_no=5)
+
+    assert result.status == "accepted_waiting"
+    assert result.clicked is True
+    assert len(taps) == 1
+    assert advanced == []
+    assert result.evidence["post"][-1]["departed_streak"] == 3
+    assert all(item["old_summary_gone"] for item in result.evidence["post"])
 
 
 @pytest.mark.parametrize("frame_path", [

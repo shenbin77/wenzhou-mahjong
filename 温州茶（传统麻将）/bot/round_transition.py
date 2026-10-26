@@ -425,10 +425,22 @@ class RoundTransitionExecutor:
             gone = button["score"] < GONE_MAX_SCORE or not _valid(frame)
             new_ok, label = self._probe(frame) if gone else (False, "button_still_visible")
             transition = post_click_transition_scene(frame)
-            departed = bool(gone and transition["ok"])
+            # "Click accepted" is deliberately weaker than "new round
+            # started".  After a verified one-shot click, three fresh frames
+            # with both the button and the old summary gone are enough to move
+            # into the existing read-only waiting observer.  Requiring an
+            # arbitrary amount of green here mixed those two states: the real
+            # 请神/peer-wait animation is only ~75% green and caused a hard
+            # stop even though the old settlement had already disappeared.
+            # The observer still needs waiting_room/table_dealt proof before it
+            # advances or restores any gameplay authority.
+            old_summary_gone = (
+                transition.get("round_end_scene") == "no_round_end_scene")
+            departed = bool(gone and old_summary_gone)
             departed_streak = departed_streak + 1 if departed else 0
             polls.append({"score": button["score"], "gone": gone, "probe": label,
                           "transition": transition,
+                          "old_summary_gone": old_summary_gone,
                           "departed": departed,
                           "departed_streak": departed_streak})
             if gone and new_ok:
