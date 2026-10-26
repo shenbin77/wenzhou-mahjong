@@ -1081,6 +1081,9 @@ class ActionPolicyConfig:
         allow_pass_without_claim: 只有"过"而没有金/红盘时是否出手；
             默认 ``False``（与已验证口径"过从不单独出现"不符，弃权）。
         require_improvement: 吃碰杠必须不劣化向听才出手；默认 ``True``。
+        trust_server_hu_button: 全自动时，是否允许用“胡盘+过盘均为已验收
+            模板、来牌明确来自对手”作为服务端合法胡正证据，救回副露胡或
+            行动画面导致的暗手少读。默认 ``False``；runner 显式开启。
     """
 
     auto_click_enabled: bool = False
@@ -1095,6 +1098,7 @@ class ActionPolicyConfig:
     chi_player_counts: frozenset[int] = frozenset({2, 4})
     allow_pass_without_claim: bool = False
     require_improvement: bool = True
+    trust_server_hu_button: bool = False
     # 归属无法确认时的仲裁开关（详见 :func:`resolve_incoming`）：
     # * use_sparkle_arbitration：False 时完全不读闪光标，归属未确认就维持弃权；
     # * sparkle_recover_tile：仲裁判为 "opponent" 但两帧差分没给出牌时，是否
@@ -1155,6 +1159,7 @@ def recommended_runner_config(*, auto_click_enabled: bool = False,
         confirmed_actions=(RECOMMENDED_CONFIRMED_ACTIONS_WITH_CHI
                            if include_chi else RECOMMENDED_CONFIRMED_ACTIONS),
         chi_enabled=bool(include_chi),
+        trust_server_hu_button=True,
         require_template_match=True,
         template_provider=verified_claim_templates,
     )
@@ -1894,6 +1899,30 @@ def decide_action(
             return _accept(ACTION_HU, hu_button, hand.incoming_tile, cfg,
                            evidence, info, report,
                            l2=info["why"], template_status=_status_for(per_button, hu_button))
+        hu_status = _status_for(per_button, hu_button)
+        pass_status = _status_for(per_button, pass_button)
+        server_hu_proof = (
+            cfg.trust_server_hu_button
+            and hu_status == TEMPLATE_STATUS_MATCHED
+            and pass_button is not None
+            and pass_status == TEMPLATE_STATUS_MATCHED
+            and hand.incoming_source == INCOMING_SOURCE_OPPONENT
+            and hand.incoming_tile is not None
+            and (not hand.is_valid or bool(hand.melds))
+        )
+        if server_hu_proof:
+            override = dict(info)
+            override.update({
+                "feasible": True,
+                "why": (
+                    "服务端合法胡正证据：胡盘与过盘模板均过闸、来牌来自对手；"
+                    f"引擎未确认原因仅记录为 {info['why']}"),
+                "server_button_override": True,
+            })
+            return _accept(
+                ACTION_HU, hu_button, hand.incoming_tile, cfg,
+                evidence, override, report,
+                l2=override["why"], template_status=hu_status)
         return _blocked(claim_state, image, cfg,
                         f"L2 否决：画面出现胡盘，但{info['why']}",
                         l2_reason=info["why"], engine=report)

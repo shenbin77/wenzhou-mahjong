@@ -9,23 +9,98 @@ from pathlib import Path
 
 from instance_profile import safe_serial
 
+ASSIST_SCRIPT_NAME = "assist_window.py"
+
+
+def _runs_assist_window(argv: object) -> bool:
+    """Whether one command line really launches this assist app."""
+    try:
+        args = list(argv or ())[1:]
+    except TypeError:
+        return False
+    return any(Path(str(arg)).name.lower() == ASSIST_SCRIPT_NAME for arg in args)
+
+
+def _is_python_interpreter(name: str) -> bool:
+    """Only an interpreter runs this app; shells merely carry its name.
+
+    A ``cmd.exe``/``bash``/``env`` wrapper keeps the whole launch command
+    (``… python.exe -u assist_window.py --serial emulator-5556``) in its own
+    command line, so matching on the command line alone reports a window that
+    was never opened and blocks every later launch with "已打开".  The window
+    itself is ``python.exe`` or ``pythonw.exe`` — never judged by name alone,
+    only as the interpreter that is executing the script.
+    """
+    return Path(str(name or "").strip().strip('"')).name.lower().startswith("python")
+
+
+def verified_window_argv(pid: object) -> list[str] | None:
+    """Return ``pid``'s command line, but only for a live assist window.
+
+    A recorded PID is a hint, never proof.  Windows recycles PIDs, and an
+    exited process stays listed as long as some handle is still open, so a
+    stale record would otherwise keep reporting "已打开" forever and block
+    every new window.  ``os.kill(pid, 0)`` is deliberately not used: its
+    Windows semantics do not mean "this process is alive".
+    """
+    import psutil
+    try:
+        candidate = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if candidate <= 0 or not psutil.pid_exists(candidate):
+        return None
+    try:
+        proc = psutil.Process(candidate)
+        with proc.oneshot():
+            # An exited process with an open handle is not an operator window.
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                return None
+            name = proc.name()
+            argv = [str(arg) for arg in (proc.cmdline() or ())]
+    except (psutil.Error, OSError, ValueError):
+        # Gone between the two calls, or not ours to inspect: treat as absent.
+        return None
+    if not _is_python_interpreter(name):
+        return None
+    return argv if _runs_assist_window(argv) else None
+
+
+def pid_owns_assist_window(pid: object) -> bool:
+    """True only when ``pid`` is alive *and* runs this app right now."""
+    return verified_window_argv(pid) is not None
+
+
+def _argv_serial(argv: list[str], default_serial: str) -> str:
+    if "--serial" in argv and argv.index("--serial") + 1 < len(argv):
+        return safe_serial(argv[argv.index("--serial") + 1])
+    return safe_serial(default_serial)
+
 
 def existing_window_pids(default_serial: str, *, exclude_pid: int | None = None) -> dict[str, int]:
+    """Map each serial to one *verified* live assist window's PID.
+
+    The process table only supplies raw PID candidates; every candidate is
+    re-opened and re-read before it is trusted, so dead PIDs and unrelated
+    processes that merely mention this script are dropped instead of blocking
+    a new window.
+    """
     import psutil
+    self_pid = os.getpid()
     owned: dict[str, int] = {}
-    for proc in psutil.process_iter(["pid", "cmdline"]):
+    for proc in psutil.process_iter(["pid"]):
         try:
-            if int(proc.pid) == (exclude_pid or os.getpid()):
-                continue
-            argv = proc.info.get("cmdline") or []
-            if not any(Path(str(a)).name.lower() == "assist_window.py" for a in argv[1:]):
-                continue
-            if "--serial" in argv and argv.index("--serial") + 1 < len(argv):
-                serial = safe_serial(argv[argv.index("--serial") + 1])
-            else:
-                serial = default_serial
-            owned[serial] = int(proc.pid)
-        except (ValueError, IndexError, OSError, psutil.Error):
+            pid = int(proc.info.get("pid"))
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0 or pid == self_pid or pid == exclude_pid:
+            continue
+        argv = verified_window_argv(pid)
+        if argv is None:
+            continue
+        try:
+            owned[_argv_serial(argv, default_serial)] = pid
+        except (ValueError, IndexError):
             continue
     return owned
 

@@ -77,9 +77,20 @@ from action_policy import (
 )
 from claim_vision import KIND_CANCEL, read_claims
 from chi_panel_vision import read_chi_panel
+from hand_ledger import HandLedger
 from invite_dialog import read_invitation
+from lobby_autostart import plan_start, read_lobby_room
+from match_end import read_match_end
+from promo_popup import read_promo_popup
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE
-from single_bright_cut import SingleBrightCutTracker, detect_single_bright_cut
+from round_transition import RoundTransitionExecutor
+from single_bright_cut import (
+    BRIGHT_SUBSET_GATE,
+    BrightSubsetCutTracker,
+    SingleBrightCutTracker,
+    detect_bright_subset_cut,
+    detect_single_bright_cut,
+)
 from tap_executor import (
     TapAborted,
     TapRejected,
@@ -125,6 +136,9 @@ FOCUS_PATTERNS = (
 
 # 胡提示面板兜底：面板连续命中至少这么多帧才允许尝试摸切（防一闪误触）。
 HINT_PANEL_MIN_TICKS = 3
+# 多亮白名单：算牌建议必须连续这么多帧指向同一张才许点击（与白名单自身的
+# 连续帧计数同源；实测多亮帧的 analyze 单帧读数不稳，两帧一致才可信）。
+BRIGHT_ADVICE_MIN_TICKS = 2
 # 兜底尝试节奏：达到门槛后每隔这么多帧再试一次（执行器在面板未消失前
 # 会在点击前中止，反复尝试只会刷证据文件）。
 HINT_PANEL_RETRY_EVERY = 10
@@ -148,6 +162,22 @@ CHI_DIMMED_BRIGHT_RATIO_MAX = 0.15
 # 一致（落定）或 ATTEMPTS 耗尽（fail-closed）。
 CLAIM_SETTLE_ATTEMPTS = 8
 CLAIM_SETTLE_INTERVAL_S = 0.4
+# 同屏促销弹窗的关闭预算：连续这么多次关闭之后弹窗仍在，说明点的不是它
+# （或弹窗会立刻重弹），停手留证，绝不无限重试。计数在换局/离桌时清零。
+PROMO_CLOSE_BUDGET = 3
+# ---- 开新场（比赛场房间 → 点空座入座）门禁预算 ------------------------------
+# 这条链路是「打满 16 局返回大厅之后自动开下一场」的最后一段，误点代价是
+# **在别人的真局里建桌并扣房卡**，所以默认只算计划、绝不点。
+# G7 授权门：真点必须显式打开 ``AutoPlayLoop(lobby_open_enabled=True)``。
+LOBBY_OPEN_ENABLED_DEFAULT = False
+# G5 预算门：同一屏最多点这么多次。房间画面点了没反应时绝不允许"再补一下"
+# ——实测点空座后 1 秒画面仍长得像房间（lobby_probe/011 是 units=2 / seats=3）。
+LOBBY_OPEN_BUDGET = 2
+# G5：两次入座点击之间至少隔这么多帧。
+LOBBY_OPEN_MIN_GAP_FRAMES = 2
+# G6 兜底：连续这么多帧「不是房间 / 房间但给不出计划」且期间零动作，才报一次
+# lobby_open_blocked: unrecognised —— 降级方向是停机等人工，不是无限静等。
+LOBBY_OPEN_UNRECOGNISED_FRAMES = 15
 
 
 def locate_drawn_tile(result: dict, good_hand_ids) -> dict | None:
@@ -352,6 +382,7 @@ class AutoPlayLoop:
         discard_key: str | None = None,
         discard_fn: Callable[[np.ndarray], Any] | None = None,
         event_callback: Callable[[dict, dict | None], None] | None = None,
+        lobby_open_enabled: bool = LOBBY_OPEN_ENABLED_DEFAULT,
     ) -> None:
         if not isinstance(enabled, bool):
             raise TypeError("enabled 必须是显式 bool；True 才允许真实点击")
@@ -407,6 +438,12 @@ class AutoPlayLoop:
             self._tap.session_dir = self.session_dir
         # 目录延迟到第一次真正落盘时才创建：门禁不放行时不留空会话目录。
         self._dirs_ready = False
+        self._round_transition = RoundTransitionExecutor(
+            capture=self._capture_transition_frame,
+            tap=self._tap_round_transition,
+            sleep=self._sleep,
+            report_dir=self.session_dir,
+        )
 
         # 行动（吃/碰/杠/胡/过）决策闸门。默认只落证据；显式打开后仍须
         # CLAIM_TAP_CHANNEL_READY + 模板/L2/L3 全部通过。行动圆盘使用独立
@@ -455,6 +492,32 @@ class AutoPlayLoop:
         # 执行器落盘、循环在面板帧上判定恢复（panel_recovery）。
         self._panel_recovery_path = panel_recovery.state_path_for(self.serial)
         self._single_bright = SingleBrightCutTracker()
+        # 多亮白名单（亮簇 1..N 张）：只在 bright_count >= 2 时才接管，单亮
+        # 一律走上面那条已实机验证的路径，行为逐字不变。
+        self._bright_subset = BrightSubsetCutTracker()
+        # 同局手牌账本：压暗/遮挡帧不重读全手，用上一帧可信读数 + 本帧
+        # 亮牌白名单决策（见 hand_ledger 模块头部的实机证据）。
+        self._hand_ledger = HandLedger()
+        # 牌局结束已返回大厅：本场结束，等人工/找桌链路开新局。
+        self._left_table = False
+        # 同屏促销弹窗已关闭次数（换局/离桌清零）：用于 PROMO_CLOSE_BUDGET
+        # 的“关了还弹就停手”预算，不是异常计数。
+        self._promo_close_count = 0
+        # ---- 开新场通道的状态（G5 预算 / G6 告警节流，离桌与换局都清零）----
+        # G7 授权门：默认关。关着时只把「该点哪个空座」算出来记进台账，零点击。
+        self.lobby_open_enabled = bool(lobby_open_enabled)
+        # 本屏已真实点击过几次入座（G5 预算）。
+        self._lobby_open_taps = 0
+        # 上一次入座点击的帧号（G5 间隔）。
+        self._lobby_open_last_tick: int | None = None
+        # 连续「不是房间 / 房间但给不出计划」的帧数（G6 unrecognised 节流）。
+        self._lobby_open_blank_frames = 0
+        # 本屏已经报过的开新场事件键：blocked:<reason> / plan:<action>@<point>。
+        # 房间画面会一动不动停很多帧，台账按"一屏一次"记，别每帧刷。
+        self._lobby_open_seen: set[str] = set()
+        # 多亮白名单的「建议牌连续帧」记录：(局序号, 建议牌 id, 连续帧数)。
+        # 与白名单自身的连续帧计数同源：换局/不命中/建议变了都清零。
+        self._bright_subset_advice: tuple[int, object, int] | None = None
         # 吃链在本行动窗弃权过的标记（局序+来牌+闭手），防重复点吃。
         self._chi_abstain_key: tuple | None = None
         self._round_candidate: tuple[bytes | None, str | None] | None = None
@@ -558,6 +621,29 @@ class AutoPlayLoop:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self._dirs_ready = True
 
+    @staticmethod
+    def _append_line(path: Path, text: str, *, attempts: int = 4) -> None:
+        """追加一行台账，遇到瞬时占用就重试几次。
+
+        实机教训（2026-10-25 22:40）：杀毒/索引服务会短暂独占正在长大的
+        jsonl，一次 ``PermissionError`` 就把整场代打打断（两台机同时
+        ``[FAIL] 循环异常终止：[Errno 13]``）。台账是纯追加的审计数据，
+        重试几次既不会重复也不会错序，比重启安全得多。
+        """
+        delay = 0.05
+        for attempt in range(1, attempts + 1):
+            try:
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(text)
+                return
+            except PermissionError:
+                # 只有"被短暂占用"才值得重试；最后仍失败必须抛出，
+                # 绝不吞掉——台账写不进去等于证据链断了。
+                if attempt >= attempts:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 3, 0.5)
+
     def _write_event(self, event: dict) -> None:
         """Append one dev-tagged ledger line; header line marks the corpus."""
         self._ensure_dirs()
@@ -578,8 +664,8 @@ class AutoPlayLoop:
                 "started_at": datetime.now().astimezone().isoformat(),
                 "claim_tap_channel_ready": CLAIM_TAP_CHANNEL_READY,
             }
-            with self.ledger_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(header, ensure_ascii=False) + "\n")
+            self._append_line(self.ledger_path,
+                              json.dumps(header, ensure_ascii=False) + "\n")
             self._follow_log.write_header({
                 "serial": self.serial, "mode": self.mode,
                 "enabled": self.enabled, "dry_run": self.dry_run,
@@ -587,8 +673,8 @@ class AutoPlayLoop:
                 "dev": True,
             })
             self._ledger_started = True
-        with self.ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        self._append_line(self.ledger_path,
+                          json.dumps(event, ensure_ascii=False) + "\n")
         # Structured follow-session row for post-hoc debug (no taps).
         analysis = self._last_result if isinstance(self._last_result, dict) else None
         self._follow_log.append(event, tick=self.tick_index, analysis=analysis)
@@ -616,6 +702,54 @@ class AutoPlayLoop:
         with path.open("xb") as handle:
             handle.write(raw)
         return path
+
+    def _capture_transition_frame(self) -> np.ndarray:
+        raw = self._shot()
+        image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        if image is None or image.shape[:2] != FRAME_SIZE:
+            raise TapAborted("下一局复核帧不是1600×900原生画面")
+        return image
+
+    def _tap_round_transition(self, x: int, y: int) -> None:
+        """Use the already-authorised ADB channel after round-transition gates."""
+        tap = getattr(self._tap, "_tap", None)
+        if not callable(tap):
+            raise TapAborted("点击执行器不提供受控下一局通道")
+        tap(int(x), int(y))
+
+    def _round_transition_event(
+        self,
+        image: np.ndarray,
+        frame_path: Path,
+    ) -> dict | None:
+        """Handle a reviewed end-of-round screen before round-identity gates."""
+        matched, probe = self._round_transition.probe(image)
+        if not matched:
+            return None
+        base = {
+            "ts": datetime.now().astimezone().isoformat(),
+            "round_seq": self.round.seq,
+            "frame": str(frame_path),
+            "round_transition_probe": probe,
+        }
+        if self.dry_run:
+            return self._event({
+                **base, "event": "idle",
+                "reason": "dry_run 已确认局间下一局按钮；只记录不点击",
+            })
+        outcome = self._round_transition.attempt(
+            round_no=self.round.seq, round_total=16)
+        ledger = outcome.ledger()
+        base["round_transition"] = ledger
+        if outcome.status == "terminal":
+            return self._stop("match_complete", outcome.reason, base)
+        # advanced / post_verify_uncertain / halted 都不杀循环：双号场景下，
+        # 先点的一方会等另一方；下一 tick 继续观察即可。执行器自身保证同
+        # 一局绝不二击。真正不确定的普通出牌/行动点击仍按原门禁停手。
+        return self._event({
+            **base, "event": "round_transition",
+            "reason": outcome.reason,
+        })
 
     # ------------------------------------------------------------------
     # 单帧一周期
@@ -677,6 +811,9 @@ class AutoPlayLoop:
             invitation_event["event"] = "invitation_declined"
             invitation_event["reason"] = "已点矩形取消并验证邀请文案消失"
             return self._event(invitation_event)
+        transition_event = self._round_transition_event(image, frame_path)
+        if transition_event is not None:
+            return transition_event
         # 换局判定必须在读牌河**之前**：牌河基线一旦跨局，差分出来的"来牌"
         # 会是上一局的牌。guard 早退分支（行动行可见）在正式的换局判定之前
         # 就会用到 _discard_state，所以这里先判一次。本帧结果存下来复用，
@@ -740,12 +877,38 @@ class AutoPlayLoop:
             return self._anomaly("analyze_failed", f"{exc}", started)
         # 行动行出现时要用它构造 L2 的局面快照（可能拿不到完整手牌）。
         self._last_result = result if isinstance(result, dict) else None
+        # 手牌账本：只有"可信读数"（advise/hu 且手牌读全）才写账；压暗帧
+        # 的残读（abstain）一律不进账本，避免把读残的手牌当成事实复用。
+        self._hand_ledger.remember(
+            result if isinstance(result, dict) else None,
+            round_seq=self.round.seq,
+            caishen=self.round.caishen or (result.get("caishen")
+                                           if isinstance(result, dict) else None),
+            frame=str(frame_path),
+        )
         # 门禁二：换局（HUD 指纹 / 财神 label）。指纹在本帧开头已经算过一次
         # （读牌河之前要先作废跨局基线），这里直接复用，不重复调用。
         caishen = key_caishen or result.get("caishen")
         round_signal = self._debounce_round_signal(
             hud_key, key_caishen, caishen)
         if round_signal["state"] == "identity_unknown":
+            # 不在牌桌（大厅 / 赛后房间 / 结算）：没有 HUD 房号、没有财神、也没有
+            # 任何手牌读数。这时根本点不了牌，也**绝不该**把"读不到房号"当成
+            # 故障停机——否则「返回大厅」之后进程立刻自杀，新一场永远开不起来
+            # （2026-10-25 23:07 实测：两端刚回大厅就 `gate_round_identity` 退出）。
+            seated = bool(key_caishen or (result.get("hand_ids") or ()))
+            if hud_key is None and not seated:
+                base = {
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "event": "idle", "round_seq": self.round.seq,
+                    "frame": str(frame_path), "round_signal": round_signal,
+                }
+                base["hand_ledger"] = self._hand_ledger.ledger()
+                return self._event({
+                    **base,
+                    "reason": ("不在牌桌（无房号/无财神/无手牌）：不做任何决策，"
+                               "等待开新局；本帧零点击"),
+                })
             if self.enabled and round_signal["ticks"] >= ROUND_IDENTITY_UNKNOWN_BUDGET:
                 return self._stop(
                     "gate_round_identity",
@@ -774,6 +937,8 @@ class AutoPlayLoop:
         if round_signal["state"] == "round_suspect":
             self.turn_history.clear()
             self._single_bright.reset()
+            self._bright_subset.reset()
+            self._hand_ledger.reset()
             return self._event({
                 "ts": datetime.now().astimezone().isoformat(),
                 "event": "idle", "round_seq": self.round.seq,
@@ -793,7 +958,15 @@ class AutoPlayLoop:
             # 不会误报，但没必要）。
             self._forget_discards()
             self._single_bright.reset()
-            # 换局确认：上局若有待二击状态一并作废，防跨局误用。
+            self._bright_subset.reset()
+            # 换局：手牌账本必须清空——上局的完整手牌与新局毫无关系，
+            # 张数碰巧相同就会把上局手牌当成新局事实（这是最危险的一类
+            # 跨局污染），所以只清不留。
+            self._hand_ledger.reset()
+            self._left_table = False
+            self._promo_close_count = 0
+            # 换局 = 新的一局已经开始，开新场通道的整屏预算随之作废。
+            self._reset_lobby_open_budget()
             panel_recovery.clear_state(self._panel_recovery_path)
             self._write_event({
                 "ts": datetime.now().astimezone().isoformat(),
@@ -901,11 +1074,40 @@ class AutoPlayLoop:
                 ),
             })
         self._unknown_caishen_ticks = 0
+        # 促销弹窗（「限时优惠」）盖住整屏：必须比回合门禁、牌局结束更早判。
+        # 弹窗在，下面所有读数（回合所有权、财神、牌河）都是弹窗上的像素。
+        # 不只是"读了也没用"——门禁在弹窗帧上求值会有两个真后果：
+        #   1. verdict.state == "blocked" 时 self.turn_history.clear()，
+        #      连续帧历史白丢一次，弹窗关掉后要从零重新攒稳定帧；
+        #   2. blocked 分支直接 self._stop("gate_turn")，等于一遇到弹窗就把
+        #      整场打停，比"等弹窗关掉"糟得多。
+        # 所以只要弹窗在屏（含"命中但落点不可信"），本帧都不进回合门禁。
+        promo_event = self._promo_dismiss_event(
+            image, frame_path, base, started)
+        if promo_event is not None:
+            return promo_event
         # 门禁三：回合所有权。dry_run 与真点都必须先过这一关，台账逐帧留证。
         verdict = self._evaluate_turn_gate(
             result, image, record=not changed_round)
         base["turn_gate"] = verdict.ledger()
+        # 牌局结束（局数打满 16/16）：先尝试「返回大厅」，而不是直接停机等人工。
+        # 必须放在 gate_turn 之前，否则永远走不到这条通道。
+        match_end_event = self._match_end_event(
+            image, frame_path, base, started)
+        if match_end_event is not None:
+            return match_end_event
+        # 开新场（比赛场房间 → 点空座入座）：只在已离桌之后才可能触发，
+        # 挂在 blocked 判断之前是为了不依赖 gate_turn 对「房间画面」的归类。
+        lobby_event = self._lobby_open_event(image, frame_path, base, started)
+        if lobby_event is not None:
+            return lobby_event
         if verdict.state == "blocked":
+            if self._left_table:
+                return self._event({
+                    **base, "event": "idle",
+                    "reason": ("已返回大厅/房间：本场已结束，等待开新局"
+                               "（自动找桌→入座→开局为下一步开发项）"),
+                })
             # 证据自相矛盾，或结算/模态弹窗画面 → fail closed：不重试、不补点。
             # 台账统一记 gate="gate_turn"；具体归类在 turn_gate.code
             # （如 "gate_settled"），同一行即可看出"其实是牌局结束了"。
@@ -913,6 +1115,22 @@ class AutoPlayLoop:
         bright = self._single_bright.feed(
             image, result, caishen_label=caishen, mode=self.mode)
         base["single_bright_cut"] = bright.ledger()
+        # 多亮白名单（亮簇 1..N 张）：单亮帧在这里同样会命中，但只有
+        # bright_count >= 2 时才由它接管，单亮行为逐字不变。
+        subset = self._bright_subset.feed(
+            image, result, caishen_label=caishen, mode=self.mode)
+        base["bright_subset_cut"] = subset.ledger()
+        # 压暗帧兜底建议：本帧 analyze 读残（abstain）时，用账本手牌 + 本帧
+        # 亮牌白名单算"该打白名单里的哪一张"。换局帧不参与（账本已清空）。
+        ledger_advice = None if changed_round else self._ledger_advice(
+            subset, result)
+        base["hand_ledger"] = self._hand_ledger.ledger()
+        if ledger_advice is not None:
+            base["ledger_advice"] = ledger_advice
+        base["bright_subset_advice"] = self._track_bright_subset_advice(
+            subset, result,
+            advice_id=(ledger_advice or {}).get("tile_id"),
+            override=bool((ledger_advice or {}).get("tile_id")))
         # 胡提示面板：维护兜底所需状态（换局帧一律作废，面板帧绝不进快照）。
         if changed_round:
             self._last_advise_read = None
@@ -944,6 +1162,13 @@ class AutoPlayLoop:
                 result, bright, base, started)
             if bright_event is not None:
                 return bright_event
+        # 多亮（>=2 张亮牌）：单亮路径表达不了，改由白名单接管——建议牌必
+        # 须落在白名单内，否则本帧弃权（gate=bright_subset_unconfirmed）。
+        if subset.confirmed and subset.multi_candidate:
+            subset_event = self._bright_subset_fallback(
+                result, subset, base, started)
+            if subset_event is not None:
+                return subset_event
         if result.get("status") != "advise" or not result.get("suggested_boxes"):
             return self._event({**base, "event": "idle",
                                 "reason": result.get("reason") or "无可执行建议"})
@@ -979,6 +1204,13 @@ class AutoPlayLoop:
         try:
             outcome = self._tap.execute(
                 result, post_select_validator=validate_post_select)
+        except TapPrecheckRetryExhausted as exc:
+            # 三张 fresh 帧都没有给出可执行建议，但异常明确发生在任何
+            # input tap 之前。它通常是副露/动画的短暂视觉波动；作为有界
+            # 异常继续主循环，由“连续 3 次异常”门禁兜底，不能直接杀死
+            # 整场。点后不确定仍由 TapUnverified/普通 TapAborted 停机。
+            return self._anomaly(
+                "discard_precheck_retry_exhausted", str(exc), started, base)
         except TapAborted as exc:
             return self._stop("tap_aborted", f"点击或点后验证未通过：{exc}", base)
         except Exception as exc:  # noqa: BLE001 - 未预期异常同样停手
@@ -1095,7 +1327,621 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001
             return self._stop("tap_failed", f"单亮摸切结果未知：{exc}", base)
         self.actions_done += 1
+        self._hand_ledger.forget_tile(expected_tile)
         self._single_bright.reset()
+        marker["outcome"] = "verified"
+        return self._event({
+            **base, "event": "action", "tap": outcome.get("tap"),
+            "box": outcome.get("box"),
+            "before_count": outcome.get("before_count"),
+            "after_count": outcome.get("after_count"),
+            "verified": bool(outcome.get("executed") and
+                             outcome.get("after_count") ==
+                             (outcome.get("before_count") or 0) - 1),
+            "elapsed_ms": round((self._clock() - started) * 1000, 1),
+        })
+
+    def _promo_dismiss_event(self, image: np.ndarray, frame_path: Path,
+                             base: dict, started: float) -> dict | None:
+        """促销弹窗（「限时优惠」）→ 关掉右上角菱形 ❌。
+
+        调用点刻意放在牌局结束、**回合门禁求值之前**：弹窗一旦在屏，它下面
+        的一切读数（回合所有权、财神、牌河）都不可信，先关再判。门禁若在这
+        种帧上求值，判 ``blocked`` 会既清 ``turn_history`` 又直接停手，所以
+        只要弹窗在屏，本帧一律不进门禁；台账行里写
+        ``turn_gate_skipped`` 留证"门禁没看过这一帧"。
+
+        三条出口：
+
+        * 未命中弹窗 → ``None``，完全不影响现有流程（含本帧计数清零）；
+        * 命中但没有落点（模板分过线、结构校验不过）→ ``promo_popup_abstain``，
+          **零点击**，消费本帧（弹窗在屏，门禁不许看这帧）；
+        * 命中且有落点 → 走 ``execute_close_popup``（它自己要求点后连续两帧
+          不再命中弹窗），成功即记 ``popup_dismiss`` 并消费本帧（下一帧重新
+          判定）；关了 :data:`PROMO_CLOSE_BUDGET` 次弹窗仍在则停手留证。
+        """
+        try:
+            state = read_promo_popup(image)
+        except Exception as exc:  # noqa: BLE001 - 识别异常计入异常预算
+            return self._anomaly("promo_popup_detect_failed", str(exc),
+                                 started, base)
+        if not state.present:
+            # 弹窗确实没了：同屏预算随之作废，下一张新弹窗重新起算。
+            self._promo_close_count = 0
+            return None
+        base["promo_popup"] = state.ledger()
+        # 弹窗在屏 ⇒ 本帧不进回合门禁：blocked 会清 turn_history 并直接停手，
+        # 而这两种后果都是拿弹窗像素做的判定。留证写在每一行里。
+        base["turn_gate_skipped"] = "promo_popup_on_screen"
+        if state.close_center is None:
+            # 有弹窗但没有可信落点：不猜、不点，记一条弃权台账并消费本帧。
+            return self._event({
+                **base,
+                "event": "promo_popup_abstain", "status": "abstain",
+                "suggestion": None, "suggestion_id": None,
+                "reason": (f"促销弹窗命中但落点不可信（{state.reason}）："
+                           "本帧零点击，且不进回合门禁"),
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+        if self._promo_close_count >= PROMO_CLOSE_BUDGET:
+            return self._stop(
+                "promo_popup_stuck",
+                (f"促销弹窗已连续关闭 {self._promo_close_count} 次仍在屏上："
+                 "停手留证，不无限重试"),
+                base,
+            )
+        if self.dry_run:
+            try:
+                plan = self._tap.execute_close_popup(
+                    tuple(int(v) for v in state.close_center), image=image)
+            except TapAborted as exc:
+                return self._stop("promo_popup_aborted", str(exc), base)
+            return self._event({
+                **base, "event": "popup_dismiss", "dry_run": True,
+                "tap": plan.get("tap"), "box": plan.get("box"),
+                "verified": None,
+                "reason": "dry_run 已识别促销弹窗；只记录关闭计划，不点击",
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+        try:
+            outcome = self._tap.execute_close_popup(
+                tuple(int(v) for v in state.close_center),
+                session_dir=self.session_dir)
+        except TapUnverified as exc:
+            return self._stop(
+                "promo_popup_unverified",
+                f"点关闭 ❌ 后无法证明弹窗消失，停手不补点：{exc}", base)
+        except TapAborted as exc:
+            return self._stop("promo_popup_aborted",
+                              f"关闭促销弹窗被拒绝：{exc}", base)
+        except Exception as exc:  # noqa: BLE001 - 结果未知一律停手
+            return self._stop("promo_popup_failed",
+                              f"关闭促销弹窗结果未知：{exc}", base)
+        self._promo_close_count += 1
+        return self._event({
+            **base, "event": "popup_dismiss", "dry_run": False,
+            "tap": outcome.get("tap"), "box": outcome.get("box"),
+            "verified": bool(outcome.get("verified")),
+            "promo_close_count": self._promo_close_count,
+            "promo_close_budget": PROMO_CLOSE_BUDGET,
+            "reason": ("促销弹窗已点关闭 ❌ 并验证连续两帧不再命中；"
+                       "本帧结束，下一帧重新判定"),
+            "elapsed_ms": round((self._clock() - started) * 1000, 1),
+        })
+
+    def _match_end_event(self, image: np.ndarray, frame_path: Path,
+                         base: dict, started: float) -> dict | None:
+        """牌局结束 → 返回大厅（独立通道，与出牌/行动行互不借道）。
+
+        实机（20261025 22:58，房间 604624 局数 16/16）：局数打满后是
+        「牌局结束」+ 冠军横幅 + 底部三按钮。旧行为被 gate_turn 判 blocked
+        直接停机，整场会话结束、必须人工点「返回大厅」。这里补上这条出口：
+        只在固定版式三按钮同时成立时点最左那个，点后要求版式连续两帧消失。
+        """
+        if self._left_table:
+            return None
+        try:
+            state = read_match_end(image)
+        except Exception as exc:  # noqa: BLE001 - 识别异常计入异常预算
+            return self._anomaly("match_end_detect_failed", str(exc), started, base)
+        if not state.present:
+            return None
+        base["match_end"] = state.ledger()
+        if self.dry_run:
+            try:
+                plan = self._tap.execute_leave_table(image=image)
+            except TapAborted as exc:
+                return self._stop("leave_table_aborted", str(exc), base)
+            return self._event({
+                **base, "event": "dry_run_plan", "tap": plan.get("tap"),
+                "box": plan.get("box"), "verified": None,
+                "reason": "dry_run 已识别牌局结束画面；只记录返回大厅计划，不点击",
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+        try:
+            outcome = self._tap.execute_leave_table(
+                image=image, session_dir=self.session_dir)
+        except TapUnverified as exc:
+            return self._stop(
+                "leave_table_unverified",
+                f"点返回大厅后无法证明版式消失，停手不补点：{exc}", base)
+        except TapAborted as exc:
+            return self._stop("leave_table_aborted", f"返回大厅被拒绝：{exc}", base)
+        except Exception as exc:  # noqa: BLE001 - 结果未知一律停手
+            return self._stop("leave_table_failed", f"返回大厅结果未知：{exc}", base)
+        self._left_table = True
+        # 已离桌：本局所有跨帧状态全部作废，绝不允许带进下一场。
+        self._promo_close_count = 0
+        # 离桌 = 进入「房间」这一屏，开新场通道的预算从头起算。
+        self._reset_lobby_open_budget()
+        self.turn_history.clear()
+        self._forget_discards()
+        self._single_bright.reset()
+        self._bright_subset.reset()
+        self._bright_subset_advice = None
+        self._hand_ledger.reset()
+        panel_recovery.clear_state(self._panel_recovery_path)
+        return self._event({
+            **base, "event": "left_table", "leave_table": outcome,
+            "reason": ("牌局结束：已点「返回大厅」并验证版式连续两帧消失；"
+                       "本局状态已全部作废"),
+            "elapsed_ms": round((self._clock() - started) * 1000, 1),
+        })
+
+    # ------------------------------------------------------------------
+    # 开新场（比赛场房间 → 点空座入座）
+    # ------------------------------------------------------------------
+    def _reset_lobby_open_budget(self) -> None:
+        """开新场通道的整屏状态清零：换局 / 离桌 / 关闭开关时都要调一次。
+
+        ``_lobby_open_taps`` 是「同一屏最多点几次」的预算，换了一屏（换局、
+        重新离桌）就必须重来；已经报过的台账键也要忘掉，否则房间画面从
+        「需新建桌」变成「有空桌可并」时会被旧的记录挡住。
+        """
+        self._lobby_open_taps = 0
+        self._lobby_open_last_tick = None
+        self._lobby_open_blank_frames = 0
+        self._lobby_open_seen.clear()
+
+    def _lobby_open_once(self, key: str) -> bool:
+        """同一屏只报一次：房间画面一动不动停几十帧，台账不能每帧刷。"""
+        if key in self._lobby_open_seen:
+            return False
+        self._lobby_open_seen.add(key)
+        return True
+
+    def _lobby_open_blocked(self, reason: str, detail: str,
+                            base: dict) -> None:
+        """``lobby_open_blocked``：写一条弃权台账，**本帧零点击**。
+
+        ``reason`` 取值固定四选一（接线说明 §3）：
+        ``cards_unreadable`` / ``low_room_cards`` / ``budget_exhausted`` /
+        ``unrecognised``。同一屏同一个 reason 只记一次。
+        """
+        if not self._lobby_open_once(f"blocked:{reason}"):
+            return
+        self._write_event({
+            **base,
+            "ts": datetime.now().astimezone().isoformat(),
+            "event": "lobby_open_blocked",
+            "round_seq": self.round.seq,
+            "reason": reason,
+            "detail": detail,
+            "lobby_open_enabled": self.lobby_open_enabled,
+            "lobby_open_taps": self._lobby_open_taps,
+            "lobby_open_budget": LOBBY_OPEN_BUDGET,
+        })
+
+    def _lobby_open_event(self, image: np.ndarray, frame_path: Path,
+                          base: dict, started: float) -> dict | None:
+        """离桌后停在比赛场房间 → 算「下一步点哪个空座」（阶段一只记不点）。
+
+        插点刻意放在 ``_match_end_event`` 之后、``verdict.state == "blocked"``
+        之前：房间画面没有手牌，``gate_turn`` 对它的归类不定（可能 blocked 也
+        可能别的 code），挂进 blocked 分支会因为归类变化整条通道失联。
+
+        门禁（缺一条就不点；完整定义见 ``_takeover/lobby_autostart_wiring.md``）：
+
+        * **G1** ``self._left_table`` —— 没离过桌绝不碰开新场（局内误判全挡死）；
+        * **G2** ``read_lobby_room(image).present`` —— 红橙横幅 / 右下绿色功能
+          圆盘 / 桌位菱形栅格三锚点必须同时成立；
+        * **G3** 落点：``unit==0`` + 在自己空座卡框内 + 框在桌位带内 +
+          不在五个禁区（功能圆盘 / 右侧竖排 / 充值 / 闭赛分享 / 大海钓场）；
+          ``lobby_autostart`` 内建一遍，``TapExecutor.execute_open_table`` 再校一遍；
+        * **G4** 点后要求**连续两帧**不再是「房间且有空座」，否则
+          ``TapUnverified`` 停手，**绝不补点第二下**；
+        * **G5** 同屏最多 ``LOBBY_OPEN_BUDGET`` 次，两次至少隔
+          ``LOBBY_OPEN_MIN_GAP_FRAMES`` 帧；
+        * **G6** 房卡门：房卡余额**一个数都读不出来**
+          （``session_watch`` → ``digit_templates_incomplete``），所以只在
+          ``join_existing=True``（并入已有空座、不扣卡）时放行；需要新建桌
+          一律记 ``lobby_open_blocked: cards_unreadable`` 并弃权，**绝不点**；
+        * **G7** 授权：``lobby_open_enabled`` 默认关，关着时只记计划不点；
+        * **G8** 通道：走 ``TapExecutor.execute_open_table`` 这条独立白名单，
+          与出牌 / 行动行 / 离桌 / 促销弹窗 / 吃面板五条通道互不借道。
+        """
+        if not self._left_table:            # G1
+            return None
+        try:
+            state = read_lobby_room(image)
+            plan = plan_start(image) if state.present else None
+        except Exception as exc:  # noqa: BLE001 - 识别异常计入异常预算
+            return self._anomaly("lobby_open_detect_failed", str(exc),
+                                 started, base)
+        if not state.present or plan is None or plan.action != "join_table":
+            # 不是房间（G2 不成立）/ 房间但没空座 / 等候室（交给 lobby_start）。
+            # 静默等，攒够帧数才报一次 unrecognised，别无限静等也别每帧刷。
+            self._lobby_open_blank_frames += 1
+            if self._lobby_open_blank_frames < LOBBY_OPEN_UNRECOGNISED_FRAMES:
+                return None
+            self._lobby_open_blocked(
+                "unrecognised",
+                (f"离桌后连续 {self._lobby_open_blank_frames} 帧没能算出入座计划"
+                 f"（{state.reason}）：停机等人工，不乱点"),
+                base,
+            )
+            return None
+        self._lobby_open_blank_frames = 0
+        base["lobby_room"] = state.ledger()
+        base["lobby_plan"] = plan.ledger()
+        join_existing = bool(plan.evidence.get("join_existing", False))
+        # ---- G6 房卡门：读不出余额就只并桌、绝不建桌 -------------------------
+        # 建桌要扣房卡，而 session_watch.classify_watch() 对房间帧返回
+        # room_cards=None / status="digit_templates_incomplete"——一个数都没有。
+        # 在看不见余额时点「+」建桌，等于把房卡悄悄打光。这条写死，不设开关。
+        if not join_existing:
+            self._lobby_open_blocked(
+                "cards_unreadable",
+                ("这一下是新建桌（会扣房卡），而房卡余额读不出来"
+                 "(session_watch: digit_templates_incomplete)；阶段一只并入已有"
+                 "空座，本帧弃权、零点击"),
+                base,
+            )
+            return None
+        # ---- G5 预算门 -----------------------------------------------------
+        if self._lobby_open_taps >= LOBBY_OPEN_BUDGET:
+            self._lobby_open_blocked(
+                "budget_exhausted",
+                (f"同一屏已点过 {self._lobby_open_taps} 次入座（预算 "
+                 f"{LOBBY_OPEN_BUDGET}），画面仍有空座：停手留证，绝不补点"),
+                base,
+            )
+            return None
+        if (self._lobby_open_last_tick is not None
+                and self.tick_index - self._lobby_open_last_tick
+                < LOBBY_OPEN_MIN_GAP_FRAMES):
+            return None     # 间隔未到，静默等下一帧
+        # ---- G7 授权门 -----------------------------------------------------
+        if self.dry_run:
+            try:
+                plan_out = self._tap.execute_open_table(
+                    tuple(int(v) for v in plan.point), image=image)
+            except TapAborted as exc:
+                self._lobby_open_blocked(
+                    "unrecognised",
+                    f"执行器复核落点未通过：{exc}", base)
+                return None
+            return self._event({
+                **base, "event": "lobby_open_plan", "dry_run": True,
+                "tap": plan_out.get("tap"), "box": plan_out.get("box"),
+                "verified": None,
+                "reason": "dry_run 已识别比赛场房间并入座落点；只记录计划，不点击",
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+        if not self.lobby_open_enabled:
+            if not self._lobby_open_once(
+                    f"plan:{plan.action}@{tuple(plan.point)}"):
+                return None
+            return self._event({
+                **base, "event": "lobby_open_plan", "dry_run": False,
+                "authorized": False, "tap": list(plan.point),
+                "box": list(plan.box) if plan.box else None, "verified": None,
+                "reason": ("开新场开关未授权（lobby_open_enabled=False）："
+                           "已算出该点哪个空座，只记台账，零点击"),
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+        # ---- G8 独立通道：房间入座专用白名单，不借道任何既有通道 ------------
+        try:
+            outcome = self._tap.execute_open_table(
+                tuple(int(v) for v in plan.point),
+                session_dir=self.session_dir)
+        except TapUnverified as exc:
+            return self._stop(
+                "lobby_open_unverified",
+                f"点房间空座后无法证明已离开房间，停手不补点：{exc}", base)
+        except TapAborted as exc:
+            return self._stop("lobby_open_aborted",
+                              f"入座点击被拒绝：{exc}", base)
+        except Exception as exc:  # noqa: BLE001 - 结果未知一律停手
+            return self._stop("lobby_open_failed",
+                              f"入座点击结果未知：{exc}", base)
+        self._lobby_open_taps += 1
+        self._lobby_open_last_tick = self.tick_index
+        return self._event({
+            **base, "event": "lobby_open", "dry_run": False,
+            "authorized": True,
+            "tap": outcome.get("tap"), "box": outcome.get("box"),
+            "verified": bool(outcome.get("verified")),
+            "lobby_open_taps": self._lobby_open_taps,
+            "lobby_open_budget": LOBBY_OPEN_BUDGET,
+            "reason": ("已点房间空座并入座，且点后连续两帧不再是"
+                       "「房间且有空座」"),
+            "elapsed_ms": round((self._clock() - started) * 1000, 1),
+        })
+
+    def _ledger_reject_reason(self) -> str:
+        """账本给不出读数的首要原因，进台账便于区分"没账本"和"账本不可信"。"""
+        rejects = (self._hand_ledger.ledger().get("rejects") or {})
+        if not rejects:
+            return "无读数"
+        top = sorted(rejects.items(), key=lambda item: -item[1])[:2]
+        return "、".join(f"{code}×{count}" for code, count in top)
+
+    def _ledger_advice(self, subset, result: dict) -> dict | None:
+        """压暗帧兜底建议：用账本手牌 + 本帧亮牌白名单算出该打哪一张。
+
+        只在本帧 ``analyze`` 已经读残（没有可用建议）时介入。白名单只是
+        **可打范围**，这里也不越界：先让算牌器给出完整候选序列，再取
+        「第一个落在白名单内」的牌——顺序沿用引擎自己的优劣排序，不另设
+        评分口径。三条件（同局同财神 / 张数相等 / 白名单是手牌子集）任一
+        不成立就返回 ``None``，调用方保持原有弃权语义。
+        """
+        if not getattr(subset, "hit", False):
+            return None
+        if getattr(subset, "unresolved", False):
+            return None
+        evidence = getattr(subset, "evidence", None) or {}
+        try:
+            expected = int(evidence.get("expected_concealed"))
+        except (TypeError, ValueError):
+            return None
+        whitelist = [int(c.tile_id) for c in subset.candidates
+                     if c.tile_id is not None]
+        if not whitelist or len(whitelist) != len(subset.candidates):
+            return None
+        # 本帧建议本身就在白名单内：交给正常出牌通道，兜底不介入。
+        # 反过来，建议落在白名单外（典型：听牌压暗后引擎只看到部分手牌，
+        # 建议了一张游戏不允许打的牌）时，白名单才是真正的可打范围，必须
+        # 继续往下走、由引擎自己的候选序列里挑第一张合法牌——否则整桌会
+        # 一直卡在这一家，直到超时。
+        if (result.get("status") == "advise"
+                and result.get("suggestion_id") is not None
+                and int(result["suggestion_id"]) in set(whitelist)):
+            return None
+        memory = self._hand_ledger.recall(
+            round_seq=self.round.seq,
+            caishen=self.round.caishen or result.get("caishen"),
+            count=expected, whitelist=whitelist)
+        if memory is None or memory.caishen_id is None:
+            return None
+        try:
+            from brain_v0.engine.tea.shanten import best_discard_by_efficiency
+            from tea_bot import engine_to_vision, vision_to_engine
+
+            candidates = best_discard_by_efficiency(
+                [vision_to_engine(tile) for tile in memory.tiles],
+                caishen_id=vision_to_engine(int(memory.caishen_id)),
+                melds=[[vision_to_engine(tile) for tile in group]
+                       for group in memory.melds],
+            )
+        except Exception as exc:  # noqa: BLE001 - 兜底建议算不出来就弃权
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        allowed = set(whitelist)
+        for score, tile in candidates:
+            vision_id = int(engine_to_vision(int(tile)))
+            if vision_id in allowed:
+                return {
+                    "tile_id": vision_id,
+                    "score": float(score),
+                    "hand": list(memory.tiles),
+                    "whitelist": sorted(allowed),
+                    "candidate_count": len(candidates),
+                    "memory_frame": memory.frame,
+                }
+        return None
+
+    def _track_bright_subset_advice(self, subset, result: dict, *,
+                                    advice_id: int | None = None,
+                                    override: bool = False) -> dict:
+        """维护多亮白名单的「建议牌连续帧」计数（返回值直接进台账）。
+
+        规格要求「建议牌落在白名单内 **且连续 2 帧一致**」才点，所以这里按
+        ``(局序号, 建议牌 id)`` 记账：白名单命中且本帧有建议才 +1；换局、
+        白名单不命中、建议缺失或建议变了都清零。
+
+        ``override=True`` 时用 ``advice_id``（压暗帧由手牌账本算出的建议）
+        取代 ``result["suggestion_id"]``：两种来源走同一把"连续 2 帧"尺子，
+        不因为来源不同而放宽要求。
+        """
+        advice = advice_id if override else result.get("suggestion_id")
+        if not getattr(subset, "hit", False) or advice is None:
+            self._bright_subset_advice = None
+            return {"advice_id": None, "streak": 0,
+                    "required": BRIGHT_ADVICE_MIN_TICKS,
+                    "source": "ledger" if override else "analyze"}
+        key = (self.round.seq, advice)
+        previous = self._bright_subset_advice
+        streak = (previous[2] + 1
+                  if previous is not None and (previous[0], previous[1]) == key
+                  else 1)
+        self._bright_subset_advice = (key[0], key[1], streak)
+        return {"advice_id": advice, "streak": streak,
+                "required": BRIGHT_ADVICE_MIN_TICKS,
+                "source": "ledger" if override else "analyze"}
+
+    def _bright_subset_abstain(self, base: dict, reason: str,
+                               marker: dict | None = None,
+                               outcome: str | None = None) -> dict:
+        """多亮白名单未确认 → 本帧弃权（零点击），台账记 gate 名与证据。"""
+        if marker is not None and outcome is not None:
+            marker["outcome"] = outcome
+        return self._event({
+            **base,
+            "event": "idle",
+            "status": "abstain",
+            "suggestion": None,
+            "suggestion_id": None,
+            "gate": BRIGHT_SUBSET_GATE,
+            "reason": f"多亮白名单未确认（{BRIGHT_SUBSET_GATE}）：{reason}",
+        })
+
+    def _bright_subset_fallback(self, result: dict, subset, base: dict,
+                                started: float) -> dict | None:
+        """多亮白名单摸切：只打「白名单 ∩ 算牌建议」那一张，否则弃权。
+
+        白名单（亮簇剔除财神位）只是**可打范围**，从不自己决定打哪张：
+
+        * 任一亮牌牌面读不出 → 弃权（不猜牌）；
+        * 本帧没有可执行建议（``status != advise``）→ 弃权；
+        * 建议牌没连续 :data:`BRIGHT_ADVICE_MIN_TICKS` 帧一致 → 弃权；
+        * 建议牌不落在白名单内 → 弃权；
+        * 白名单已连续 2 帧一致（由 :class:`BrightSubsetCutTracker` 保证）。
+
+        执行沿用 ``TapExecutor`` 四道闸 + fresh 帧独立复核（白名单仍一致、
+        目标牌位置未漂移），点后按「手牌相对变化」验证，不用固定绝对张数。
+        """
+        marker = base.setdefault("bright_subset_cut", subset.ledger())
+        whitelist = [c for c in subset.candidates if c.tile_id is not None]
+        if subset.unresolved or len(whitelist) != len(subset.candidates):
+            return self._bright_subset_abstain(
+                base, "亮牌白名单里有牌面读不出", marker,
+                "tile_identity_unknown")
+        if not whitelist:
+            return self._bright_subset_abstain(
+                base, "亮牌白名单为空", marker, "whitelist_empty")
+        suggestion_id = result.get("suggestion_id")
+        if result.get("status") != "advise" or suggestion_id is None:
+            # 压暗态下 analyze 通常直接 abstain（"识牌不完整"）：单看白名单
+            # 不足以决定打哪张。这里先让手牌账本接手——同局同张数 + 白名单
+            # 是手牌子集时，账本里的完整手牌就是本帧手牌（实测 22:13 那次
+            # 卡死 6 分钟正是缺这一层）。账本也给不出读数才维持弃权。
+            ledger_advice = base.get("ledger_advice") or {}
+            ledger_tile = ledger_advice.get("tile_id")
+            if ledger_tile is None:
+                return self._bright_subset_abstain(
+                    base,
+                    f"本帧没有可核对的算牌建议（status={result.get('status')!r}，"
+                    f"reason={result.get('reason')!r}），手牌账本也无可信读数"
+                    f"（{self._ledger_reject_reason()}）；白名单不自行选牌",
+                    marker, "no_advice")
+            suggestion_id = int(ledger_tile)
+            marker["advice_source"] = "ledger"
+            marker["ledger_advice"] = ledger_advice
+            hand_tiles = [int(v) for v in (ledger_advice.get("hand") or [])]
+            if hand_tiles:
+                # 后续 pending_context / 台账沿用账本手牌，而不是本帧的残读。
+                result = {**result, "hand_ids": hand_tiles,
+                          "hand_ledger_source": True}
+        else:
+            marker["advice_source"] = "analyze"
+        try:
+            suggested = int(suggestion_id)
+        except (TypeError, ValueError):
+            return self._bright_subset_abstain(
+                base, f"建议牌 id {suggestion_id!r} 不可解析", marker,
+                "advice_unreadable")
+        advice_streak = (self._bright_subset_advice[2]
+                         if self._bright_subset_advice is not None else 0)
+        if advice_streak < BRIGHT_ADVICE_MIN_TICKS:
+            return self._bright_subset_abstain(
+                base,
+                f"建议牌 {suggested} 只连续 {advice_streak}/"
+                f"{BRIGHT_ADVICE_MIN_TICKS} 帧，还需再等一帧确认",
+                marker, "advice_unstable")
+        matching = [c for c in whitelist if int(c.tile_id) == suggested]
+        if not matching:
+            # 建议落在白名单外：游戏根本不允许打那张。此时白名单才是真正的
+            # 可打范围，用账本/引擎候选里第一张合法牌接管（_bright_subset_advice
+            # 已用连续帧确认）。否则这一家会永远打不出去、整桌卡到超时。
+            fallback_id = (self._bright_subset_advice[1]
+                           if self._bright_subset_advice is not None else None)
+            matching = [c for c in whitelist
+                        if fallback_id is not None
+                        and int(c.tile_id) == int(fallback_id)]
+            if matching:
+                marker["advice_overridden"] = suggested
+                marker["advice_source"] = "whitelist_fallback"
+                suggested = int(matching[0].tile_id)
+        if not matching:
+            marker["advice_outside_whitelist"] = suggested
+            return self._bright_subset_abstain(
+                base,
+                f"算牌建议 {suggested} 不在亮牌白名单 "
+                f"{list(subset.whitelist_ids())} 内", marker,
+                "advice_outside_whitelist")
+        chosen = matching[0]
+        marker["chosen"] = {"tile_id": chosen.tile_id,
+                            "tile_label": chosen.tile_label,
+                            "box": list(chosen.box),
+                            "tap_point": list(chosen.tap_point)}
+        synthetic = self._synthetic_discard(
+            result, int(chosen.tile_id), chosen.box,
+            before_count=(subset.evidence or {}).get("expected_concealed"))
+        if self.actions_done >= self.max_actions:
+            return self._stop("max_actions",
+                              f"达到 --max-actions={self.max_actions}", base)
+        if self.dry_run:
+            try:
+                plan = self._tap.plan(synthetic)
+            except TapAborted as exc:
+                marker["outcome"] = "plan_aborted"
+                marker["reason"] = str(exc)
+                return self._bright_subset_abstain(
+                    base, f"白名单目标牌计划被拒绝（{exc}）", marker,
+                    "plan_aborted")
+            self.actions_done += 1
+            marker["outcome"] = "dry_run_plan"
+            return self._event({
+                **base, "event": "dry_run_plan", "tap": [plan.x, plan.y],
+                "box": list(plan.box), "verified": None,
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+
+        expected_tile = int(chosen.tile_id)
+        expected_point = (int(chosen.tap_point[0]), int(chosen.tap_point[1]))
+        expected_ids = sorted(int(v) for v in subset.whitelist_ids())
+
+        def validate_fresh(fresh_image: np.ndarray, _original: dict) -> dict:
+            fresh_result = self._analyze_fresh_image(fresh_image,
+                                                     "preclick_bright_subset")
+            fresh = detect_bright_subset_cut(
+                fresh_image, fresh_result,
+                caishen_label=self.round.caishen or result.get("caishen"),
+                mode=self.mode)
+            if not fresh.hit or not fresh.candidates:
+                raise TapAborted("fresh 帧不再命中多亮白名单")
+            if sorted(int(v) for v in fresh.whitelist_ids()) != expected_ids:
+                raise TapAborted("fresh 帧亮牌白名单已变化，拒绝点击")
+            targets = [c for c in fresh.candidates
+                       if c.tile_id is not None and int(c.tile_id) == expected_tile]
+            if not targets:
+                raise TapAborted("fresh 帧白名单不再包含目标牌")
+            target = targets[0]
+            if (abs(target.tap_point[0] - expected_point[0]) > 20
+                    or abs(target.tap_point[1] - expected_point[1]) > 20):
+                raise TapAborted("fresh 帧目标牌位置漂移，拒绝点击")
+            return self._synthetic_discard(
+                fresh_result, expected_tile, target.box,
+                before_count=(fresh.evidence or {}).get("expected_concealed"))
+
+        self._tap.pending_context = self._pending_context(
+            result.get("hand_ids"), result)
+        marker["outcome"] = "attempt"
+        try:
+            outcome = self._tap.execute(synthetic, fresh_validator=validate_fresh)
+        except TapPrecheckRetryExhausted as exc:
+            marker["outcome"] = "precheck_retry_exhausted"
+            return self._anomaly("bright_subset_precheck", str(exc), started, base)
+        except TapUnverified as exc:
+            return self._stop("tap_aborted", f"多亮白名单点击后无法验证：{exc}", base)
+        except TapAborted as exc:
+            return self._stop("tap_aborted", f"多亮白名单被执行器拒绝：{exc}", base)
+        except Exception as exc:  # noqa: BLE001
+            return self._stop("tap_failed", f"多亮白名单点击结果未知：{exc}", base)
+        self.actions_done += 1
+        self._hand_ledger.forget_tile(expected_tile)
+        self._bright_subset.reset()
+        self._bright_subset_advice = None
         marker["outcome"] = "verified"
         return self._event({
             **base, "event": "action", "tap": outcome.get("tap"),
@@ -1547,6 +2393,125 @@ class AutoPlayLoop:
             board.selection_panel,
         )
 
+    @staticmethod
+    def _verify_pass_after_overlay_underread(
+        before: BoardState,
+        after: BoardState,
+    ) -> tuple[bool, str]:
+        """只救回“过后立即摸牌、点击前被行动栏少读”的实机状态。
+
+        行动圆盘覆盖手牌时，点击前识牌可能从合法等待张数少读成 14；
+        点“过”后圆盘消失且立即轮到我方摸牌，完整手牌恢复为合法摸牌
+        张数 17。这个恢复不能放进通用 L3 的 ``+0/+1`` 白名单，否则会
+        连带放宽碰/吃/杠。因此这里只接受一组封闭的正证据：副露逐组
+        完全不变、点击前确实少于合法等待张数、点击后恰为合法摸牌张
+        数、行动圆盘实测为 0、吃候选面板不在、且没有进入结算。
+        """
+        if before.melds is None or after.melds is None:
+            return False, "过后副露不可测，不能启用行动栏遮挡恢复"
+        if before.melds != after.melds:
+            return False, "过后副露发生变化，不能按行动栏遮挡恢复"
+        meld_groups = len(after.melds)
+        legal_wait = 16 - 3 * meld_groups
+        legal_draw = legal_wait + 1
+        if before.concealed_count is None or before.concealed_count >= legal_wait:
+            return False, (
+                f"过前暗手 {before.concealed_count} 不符合行动栏遮挡少读"
+                f"（应小于 {legal_wait}）")
+        if after.concealed_count != legal_draw:
+            return False, (
+                f"过后暗手 {after.concealed_count} 不是合法摸牌张数 "
+                f"{legal_draw}")
+        if after.claim_buttons != 0:
+            return False, "过后行动圆盘未被实测为 0"
+        if after.selection_panel is True:
+            return False, "过后吃候选面板仍在，不能按已完成恢复"
+        if after.settled is True:
+            return False, "过后已进入结算，不能按立即摸牌恢复"
+        if after.turn_owner not in (None, "me"):
+            return False, "过后倒计时不属于我方，不能按立即摸牌恢复"
+        return True, (
+            f"过状态已验证（行动栏遮挡少读 {before.concealed_count}→"
+            f"合法摸牌 {legal_draw}，副露不变、圆盘消失）")
+
+    @staticmethod
+    def _verify_pass_dimmed_underread(
+        before: BoardState,
+        after: BoardState,
+        image: np.ndarray,
+    ) -> tuple[bool, str]:
+        """只救回「过」之后客户端把暗手整体压暗造成的少读。
+
+        实机 2026-10-25 21:56（房间 604624 第 7 局）：点「过」后暗手
+        16→6，16 是本副露下的合法等待张数、6 是压暗帧坏读。既有
+        :meth:`_verify_pass_after_overlay_underread` 只覆盖「点击前被行动
+        栏遮挡少读」这个方向；压暗是「点击后少读」，必须单独一条。
+
+        只接受一组封闭正证据：副露逐组完全不变、暗手读数确实偏低、
+        固定 ROI 压暗证据成立（与吃后共用同一把尺 ``CHI_DIMMED_*``，
+        不改任何全局识牌阈值）、行动圆盘实测为 0、候选面板不在、
+        没有进入结算。任一条不成立都不启用。
+        """
+        if before.melds is None or after.melds is None:
+            return False, "过后副露不可测，不能启用压暗少读豁免"
+        if before.melds != after.melds:
+            return False, "过后副露发生变化，不能按压暗少读豁免"
+        if before.concealed_count is None or after.concealed_count is None:
+            return False, "过后暗手张数不可测，不能按压暗少读豁免"
+        if after.concealed_count >= before.concealed_count:
+            return False, "过后暗手未少读，不按压暗少读豁免"
+        dim = AutoPlayLoop._chi_dimmed_hand_evidence(image)
+        if not dim["dimmed"]:
+            return False, "过后手牌不是已验证的客户端压暗态"
+        if after.claim_buttons != 0:
+            return False, "过后行动圆盘未被实测为 0"
+        if after.selection_panel is True:
+            return False, "过后吃候选面板仍在，不能按压暗少读豁免"
+        if after.settled is True:
+            return False, "过后已进入结算，不能按压暗少读豁免"
+        return True, (
+            f"过状态已验证（过后副露逐组不变、行动圆盘消失；暗手读数 "
+            f"{before.concealed_count}→{after.concealed_count} 处于客户端"
+            f"压暗态 p70={dim['p70']}, bright_ratio={dim['bright_ratio']}，"
+            "按已知压暗坏读处理，不用该张数否决真实过牌）")
+
+    @staticmethod
+    def _verify_pass_new_window(
+        before: BoardState,
+        after: BoardState,
+    ) -> tuple[bool, str]:
+        """执行器已证明「同槽位新窗口」时，「过」的 L3 追加判据。
+
+        2 人局连续行动时，下一个行动窗口的圆盘落在**完全相同**的槽位
+        （实测 2026-10-25 21:54：点击前 吃+过 → 点击后 杠+过）。执行器
+        已经用「行动行以外画面推进」证明这一击送达（
+        ``tap_executor.CLAIM_OUTSIDE_ACTION_BANDS``），L3 就**不能**再要求
+        「圆盘消失」——新窗口的圆盘本来就在同一槽位。
+
+        这里只补一组封闭正证据：副露逐组不变、暗手相对变化 0/+1、未结算、
+        且确实实测到新窗口的圆盘（``claim_buttons > 0``；若为 0 则走原有
+        的「圆盘已消失」路径，不经过本条）。
+        """
+        if before.melds is None or after.melds is None:
+            return False, "同槽位新窗口：副露不可测，不能按新窗口放行"
+        if before.melds != after.melds:
+            return False, "同槽位新窗口：副露发生变化，不能按新窗口放行"
+        if before.concealed_count is None or after.concealed_count is None:
+            return False, "同槽位新窗口：暗手张数不可测，不能按新窗口放行"
+        gap = after.concealed_count - before.concealed_count
+        if gap not in (0, 1):
+            return False, (f"同槽位新窗口：暗手 {before.concealed_count}→"
+                           f"{after.concealed_count} 不在 0/+1 内")
+        if after.settled is True:
+            return False, "同槽位新窗口：已进入结算，不走豁免"
+        if not after.claim_buttons:
+            return False, "同槽位新窗口：未实测到新窗口圆盘，不走豁免"
+        return True, (
+            f"过状态已验证（同槽位新窗口）：执行器已证明点击送达且牌局推进，"
+            f"新行动窗口圆盘数 {after.claim_buttons}、副露逐组不变、暗手 "
+            f"{before.concealed_count}→{after.concealed_count}（0/+1 内），"
+            "下一步交给新窗口自己的决策")
+
     def _verify_claim_settled(
         self,
         before: BoardState,
@@ -1555,6 +2520,7 @@ class AutoPlayLoop:
         tag: str,
         note: str,
         extra_check=None,
+        accept_new_window: bool = False,
     ) -> tuple[bool, str, "BoardState | None", list]:
         """claim 点击后的落定语义验证，替代旧的单帧 ``verify_after_click``。
 
@@ -1594,6 +2560,22 @@ class AutoPlayLoop:
                     np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
                 board = self._board_from_frame(raw, path, image, note=note)
                 verified, reason = verify_after_click(before, board, action)
+                if action == ACTION_PASS and not verified:
+                    recovered, recovery_reason = (
+                        self._verify_pass_after_overlay_underread(before, board))
+                    if not recovered:
+                        # 反方向：客户端在「过」之后把暗手整体压暗，
+                        # 分类器少读（实机 16→6）。同样只认封闭正证据。
+                        recovered, recovery_reason = (
+                            self._verify_pass_dimmed_underread(
+                                before, board, image))
+                    if not recovered and accept_new_window:
+                        # 执行器已证明"旧窗口关闭 + 新窗口同槽位"：牌局推进了，
+                        # 新窗口的圆盘本来就在同一槽位，不能再要求圆盘消失。
+                        recovered, recovery_reason = (
+                            self._verify_pass_new_window(before, board))
+                    if recovered:
+                        verified, reason = True, recovery_reason
                 if extra_check is not None:
                     verified, reason = extra_check(
                         board, verified, reason, image)
@@ -1780,7 +2762,9 @@ class AutoPlayLoop:
         verified, verify_reason, _after_board, settle_samples = (
             self._verify_claim_settled(
                 before, decision.action, tag="after_claim",
-                note="行动点击后 fresh 状态"))
+                note="行动点击后 fresh 状态",
+                accept_new_window=bool(
+                    outcome.get("same_slot_new_window"))))
         payload["auto_click"].update({
             "semantic_verified": verified,
             "semantic_reason": verify_reason,

@@ -1,6 +1,5 @@
 """Lobby-to-table read-only handoff regression: no ADB taps."""
 from __future__ import annotations
-import io
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -9,7 +8,6 @@ import cv2
 import numpy as np
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-import assist_window
 import lobby_follow
 from lobby_preflight import LobbyAssessment
 from lobby_follow import LobbyProgress
@@ -117,6 +115,59 @@ def test_waiting_room_stays_observing_without_start_click():
     assert window._lobby_active is True
     assert any(ms==1200 for ms,_fn in window.root.scheduled)
     assert "等待开始游戏" in window.status.get()
+
+
+def test_advance_waiting_room_runs_guarded_start(monkeypatch,tmp_path):
+    image=np.zeros((900,1600,3),np.uint8)
+    monkeypatch.setattr(lobby_follow,"_capture_image",lambda *a,**k:image)
+    monkeypatch.setattr(lobby_follow,"assess_frame",lambda _img:
+        LobbyAssessment("waiting_room",None,"not_visible","waiting",False))
+    seen=[]
+    monkeypatch.setattr(lobby_follow,"execute_auto_start",lambda *a,**k:
+        (seen.append(k) or lobby_follow.StartExecution(
+            "started","已开始",True,"in_game",image)))
+    out=lobby_follow.advance(
+        "emulator-5556","adb.exe",tmp_path,
+        allow_start=True,expected_account="玉姐",room_cards_snapshot=9,
+        sleep_fn=lambda _s:None)
+    assert out.state=="in_game" and out.started and out.clicked
+    assert seen[0]["expected_account"]=="玉姐"
+    assert seen[0]["room_cards"]==9
+
+
+def test_advance_waiting_room_identity_block_is_terminal(monkeypatch,tmp_path):
+    image=np.zeros((900,1600,3),np.uint8)
+    monkeypatch.setattr(lobby_follow,"_capture_image",lambda *a,**k:image)
+    monkeypatch.setattr(lobby_follow,"assess_frame",lambda _img:
+        LobbyAssessment("waiting_room",None,"not_visible","waiting",False))
+    monkeypatch.setattr(lobby_follow,"execute_auto_start",lambda *a,**k:
+        lobby_follow.StartExecution(
+            "blocked","玩家不匹配",False,"waiting_room",image))
+    out=lobby_follow.advance(
+        "emulator-5556","adb.exe",tmp_path,
+        allow_start=True,expected_account="玉姐")
+    assert out.terminal is True
+    assert out.clicked is False
+
+
+def test_member_overlay_waiting_room_cannot_be_handed_to_in_game(monkeypatch,tmp_path):
+    image=np.zeros((900,1600,3),np.uint8)
+    monkeypatch.setattr(lobby_follow,"_capture_image",lambda *a,**k:image)
+    monkeypatch.setattr(lobby_follow,"assess_frame",lambda _img:
+        LobbyAssessment("in_game",None,"not_visible","generic green",False))
+    monkeypatch.setattr(lobby_follow,"waiting_room_visual_evidence",lambda _img:
+        {"matched":True,"member_overlay":True})
+    seen=[]
+    monkeypatch.setattr(lobby_follow,"execute_auto_start",lambda *a,**k:
+        (seen.append(k) or lobby_follow.StartExecution(
+            "wait","已收起面板，等待对手",True,"waiting_room",image)))
+    out=lobby_follow.advance(
+        "emulator-5556","adb.exe",tmp_path,
+        allow_start=True,expected_account="玉姐")
+    assert out.state=="waiting_room"
+    assert out.terminal is False
+    assert out.started is False
+    assert seen
 
 
 def test_advance_can_seat_even_when_room_card_ocr_is_unknown(monkeypatch,tmp_path):

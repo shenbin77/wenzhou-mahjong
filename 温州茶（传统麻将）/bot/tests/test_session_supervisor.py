@@ -121,7 +121,7 @@ def test_settlement_frames(path: Path) -> None:
     assert result.evidence["settled_signals"] == ["central_panel", "bottom_blackout"]
     plan = build_plan(result, serial="emulator-5558", session_dir="s")
     assert plan["action"] == "alert_only"
-    assert "永久禁止自动点击" in plan["reason"]
+    assert "监督器不点击" in plan["reason"]
     json.dumps(plan, ensure_ascii=False)
 
 
@@ -132,7 +132,7 @@ def test_lobby_frames(path: Path) -> None:
     assert result.evidence["warm_ratio"] >= 0.45
     plan = build_plan(result, serial="emulator-5556", session_dir="s")
     assert plan["action"] == "alert_only"
-    assert "永久禁止自动点击" in plan["reason"]
+    assert "监督器只保存截图" in plan["reason"]
     json.dumps(plan, ensure_ascii=False)
 
 
@@ -142,7 +142,7 @@ def test_waiting_room_frames_are_not_misclassified_as_in_game(path: Path) -> Non
     assert result.state is SessionState.WAITING_ROOM
     assert result.evidence["waiting_room"]["player_count"] == 2
     plan = build_plan(result, serial="emulator-5556", session_dir="s")
-    assert plan["action"] == "wait_for_manual_start"
+    assert plan["action"] == "wait_for_session_entry"
     assert "不发布点击计划" in plan["reason"]
     json.dumps(plan, ensure_ascii=False)
 

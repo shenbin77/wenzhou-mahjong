@@ -1,10 +1,13 @@
 """Single front end for recommendation follow and explicitly armed autoplay.
 
-``开始跟随`` is read-only observation/recommendation.  ``开启全自动代打`` is
+``开始跟随`` seats and starts a game (it does tap, and it spends 房卡), then
+falls back to read-only observation/recommendation.  ``开启全自动代打`` is
 the separate hand-off to the guarded ``AutoPlayLoop`` and is currently limited
 to the development target (tea 2-player; full-match acceptance is pending).
 Both paths keep immutable
-evidence; neither ever clicks start-game, payment, leave-table or settlement UI.
+evidence.  A dedicated lobby executor may click the reviewed tea-2p seat and
+Start Game controls after the user presses Start Follow/Full Auto; the generic
+in-game executor still rejects payment, leave-table and settlement UI.
 """
 
 from __future__ import annotations
@@ -119,8 +122,6 @@ def append_user_flag(session_dir: str | Path, event: dict) -> Path:
 
 def format_review_summary(result: dict) -> tuple[str, str]:
     """Render an auto-review outcome for the problem strip (text, level)."""
-    if result.get("placeholder"):
-        return "自动复盘：复盘核心尚未就绪（占位），本场未做自动筛查", "wait"
     count = int(result.get("issue_count") or 0)
     report = str(result.get("report_md") or "")
     suffix = f" · 报告：{report}" if report else ""
@@ -383,6 +384,8 @@ class TeaAssistWindow:
         self._lobby_bootstrap_enabled = True
         self._lobby_active = False
         self._lobby_in_game_verified = False
+        self._lobby_room_cards: int | None = None
+        self._lobby_card_status = "unknown"
         self._lobby_future: Future | None = None
         self._lobby_timer: str | None = None
         self._auto_future: Future | None = None
@@ -435,16 +438,19 @@ class TeaAssistWindow:
         self.caishen_title = tk.StringVar(value="财神：—")
         self.always_on_top = tk.BooleanVar(value=bool(state.get("topmost", True)))
         self.manual_caishen = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="选择玩法、绑定雷电设备；开始跟随会先检查大厅/房卡，进入牌局后核对玩法。")
+        self.status = tk.StringVar(value="选择玩法、绑定雷电设备；开始跟随会自动找位、坐下、凑齐后开局，再进入持续推荐。")
         self.hand = tk.StringVar(value="手牌：—")
         self.suggestion = tk.StringVar(value="尚未开始")
         self.reason = tk.StringVar(value="离线预检结果不能用于当前对局。")
         self.latency = tk.StringVar(value="最近一帧：—")
         self.fresh = tk.StringVar(value="尚未更新")
         self.period = tk.StringVar(value=f"周期 {BASE_INTERVAL_MS} ms")
-        self.live_info = tk.StringVar(value="只读画面，不会代点。")
+        self.live_info = tk.StringVar(
+            value="注意：点“开始跟随”后会真的代你点击——自动找空位、坐下、"
+                  "点“开始游戏”并消耗房卡；进入牌局后只给建议、不再点击。"
+                  "绝不充值、洗切或离桌。")
         self.preview_title = tk.StringVar(value="实时跟随")
-        self.preview_flags = tk.StringVar(value="绑定设备后可从大厅开始观察；当前暂不自动入座，不会自动扣房卡。")
+        self.preview_flags = tk.StringVar(value="开始跟随会自动找温州茶2人空座并开局；绝不充值、洗切或离桌。")
         self.preview_meta = tk.StringVar(
             value="")
         self.offline_notice = tk.StringVar(value="")
@@ -464,6 +470,7 @@ class TeaAssistWindow:
         self.hud_last_discard = tk.StringVar(value="最近出牌：未识别")
         self.hud_claim_buttons = tk.StringVar(value="鸣牌按钮：未识别")
         self._follow_pipeline = None
+        self._last_stop_reason = ""
         self.display_source: str | None = None
         self._restore_binding()
         self._build()
@@ -2268,15 +2275,17 @@ class TeaAssistWindow:
             self.start()
 
     def _begin_lobby_follow(self) -> None:
-        """Guarded tea-2p seating; never clicks Start Game/recharge/invite."""
+        """Guarded tea-2p seating/start; never recharge/wash/cut/leave."""
         self._lobby_active = True
         self._lobby_in_game_verified = False
+        self._lobby_room_cards = None
+        self._lobby_card_status = "unknown"
         self._lobby_future = None
         self.start_button.configure(text="停止找位")
         self.status.set(
-            "正在查找温州茶2人空座并自动入座；不会自动点开始游戏、充值或邀请。")
+            "正在查找温州茶2人空座并自动入座；凑齐且身份/玩法核验通过后自动开始游戏。")
         self._set_operational_status(
-            "自动找位", "仅允许真帧确认后的空座和规则说明关闭", level="wait")
+            "自动找位", "只允许已复核的空座、规则关闭和开始游戏；绝不充值", level="wait")
         self._schedule_lobby_probe(0)
 
     def _schedule_lobby_probe(self, delay_ms: int) -> None:
@@ -2290,7 +2299,11 @@ class TeaAssistWindow:
         if self._lobby_future is None:
             from lobby_follow import advance
             self._lobby_future = self.executor.submit(
-                advance, self.serial.get().strip(), DEFAULT_ADB_PATH, self.session_dir)
+                advance, self.serial.get().strip(), DEFAULT_ADB_PATH,
+                self.session_dir,
+                allow_start=True,
+                expected_account=self.account.get().strip(),
+                room_cards_snapshot=getattr(self, "_lobby_room_cards", None))
         if not self._lobby_future.done():
             self._schedule_lobby_probe(120)
             return
@@ -2303,11 +2316,14 @@ class TeaAssistWindow:
             self.status.set(f"自动找位失败：{exc}；已停止后续点击。")
             self._set_operational_status("自动找位失败", str(exc), level="error")
             return
+        if progress.room_cards is not None:
+            self._lobby_room_cards = progress.room_cards
+            self._lobby_card_status = progress.room_card_status
         if progress.state == "in_game":
             self._lobby_active = False
             self._lobby_in_game_verified = True
             self.start_button.configure(text="开始跟随")
-            self.status.set("检测到已经发牌的对局，转交现有实时跟随识牌流程。")
+            self.status.set("已自动进入牌局，转交现有实时跟随识牌流程。")
             self.start()
             return
         self.status.set(progress.message)
@@ -2424,6 +2440,42 @@ class TeaAssistWindow:
             flags.set("左侧仍是旧截图，仅作对照；等待第一张实时画面。")
         self._schedule(0)
 
+    def _append_stop_record(self) -> None:
+        """Append one ``event="stop"`` row to ``follow_session.jsonl``.
+
+        A follow run blocked by the start gate used to stop without writing
+        anything, so a session holding only the header and 0 frames gave no
+        clue afterwards which gate (binding / identity / mode / recorder)
+        blocked it. The reason is whatever the status bar says right now —
+        ``_start_frame`` stashes it there before calling ``stop()``.
+
+        ``SessionLogger.append`` normalises the row through
+        ``build_follow_record``, which keeps only its own fixed field set:
+        the stop marker must be ``event="stop"`` (top-level ``kind`` is not
+        carried over — only the session header has one), and ``ts`` lands
+        in ``at``. The reason survives as ``vision.reason``, which is
+        exactly where ``auto_review._screen_stops`` looks for it.
+        """
+        pipeline = getattr(self, "_follow_pipeline", None)
+        logger = getattr(pipeline, "logger", None)
+        if logger is None or not getattr(logger, "enabled", False):
+            return
+        reason = str(getattr(self, "_last_stop_reason", "") or "")
+        self._last_stop_reason = ""
+        if not reason and getattr(self, "status", None) is not None:
+            try:
+                reason = str(self.status.get())
+            except Exception:
+                reason = ""
+        try:
+            logger.append({
+                "event": "stop", "kind": "stop", "reason": reason,
+                "ts": datetime.now().astimezone().isoformat(),
+            })
+        except Exception:
+            # 台账是证据，不能反过来阻断停止流程。
+            pass
+
     def stop(self) -> None:
         if getattr(self, "_lobby_active", False):
             self._stop_lobby_follow()
@@ -2431,12 +2483,16 @@ class TeaAssistWindow:
         if getattr(self, "full_auto_running", False):
             self._stop_full_auto()
         follow_session = None
+        was_continuous = bool(self.continuous)
         if self.continuous:
             resolve_dir = getattr(self, "_active_follow_session_dir", None)
             if callable(resolve_dir):
                 follow_session = resolve_dir()
         stopped_live = (
             self.continuous and getattr(self, "display_source", None) == "live")
+        # 停止原因必须先落台账：跟随被门禁拦下时，这一行是事后唯一的复盘证据。
+        if was_continuous:
+            self._append_stop_record()
         self.continuous = False
         self.continuous_round = None
         self.continuous_caishen = None
@@ -2502,6 +2558,8 @@ class TeaAssistWindow:
 
     def _start_frame(self, *, record: bool) -> None:
         if not self._ready():
+            # 门禁原因只写在状态栏；先存下来，stop() 会把它写进 follow_session.jsonl。
+            self._last_stop_reason = self.status.get()
             self.stop()
             return
         mode = self._mode_key()
@@ -3305,7 +3363,7 @@ class TeaAssistWindow:
             self._start_full_auto()
 
     def _start_full_auto(self) -> None:
-        """Hand the current tea-2p table to the guarded continuous BOT."""
+        """Start the whole lobby-to-game flow, then hand off to the BOT."""
         if not self._channel_ready():
             self.full_auto_status.set("真实动作通道未就绪；已拒绝接管。")
             return
@@ -3315,9 +3373,14 @@ class TeaAssistWindow:
                 "推荐模式", "当前玩法未完成全自动实机验收", level="wait")
             return
         if not self.continuous:
-            self.full_auto_status.set("请先点“开始跟随”，核对实时识牌和推荐后再开启全自动。")
+            self._full_auto_wanted = True
+            self._auto_resume_pending = True
+            self.full_auto_status.set(
+                "全自动已排队：先自动找位、坐下并开局；发牌后通过门禁即接管出牌。")
             self._set_operational_status(
-                "等待推荐", "尚未启动实时跟随，拒绝交出点击权", level="error")
+                "自动开局", "正在启动开始跟随全流程", level="wait")
+            if not getattr(self, "_lobby_active", False):
+                self.start()
             return
         if not self._identity_gate_ok(max_age_seconds=10.0):
             self._begin_identity_check(pending="full_auto")
@@ -3398,7 +3461,7 @@ class TeaAssistWindow:
         self.full_auto_status.set("全自动跟随中 · BOT 已接管识牌/决策/点击")
         self._full_auto_wanted = True
         self.live_info.set(
-            "BOT 接管中；绝不点击开始游戏、结算、离桌、充值或分享。")
+            "BOT 接管中；开局已由专用门禁完成；绝不点击结算、离桌、充值或分享。")
         self._set_operational_status(
             "全自动代打", "正在做启动门禁自检", level="wait")
         for attr in ("embedded_follow_log", "follow_session_log"):

@@ -77,14 +77,20 @@ def _window(tmp_path: Path):
     return window
 
 
-def test_full_auto_refuses_handoff_before_recommendation(tmp_path):
+def test_full_auto_starts_follow_flow_before_recommendation(tmp_path):
     window = _window(tmp_path)
     window.continuous = False
+    window._lobby_active = False
+    started = []
+    window.start = lambda: started.append("follow")
 
     window._start_full_auto()
 
     assert window.full_auto_running is False
-    assert "先点“开始跟随”" in window.full_auto_status.get()
+    assert started == ["follow"]
+    assert window._full_auto_wanted is True
+    assert window._auto_resume_pending is True
+    assert "自动找位" in window.full_auto_status.get()
 
 
 def test_full_auto_handoff_enables_guarded_loop(monkeypatch, tmp_path):

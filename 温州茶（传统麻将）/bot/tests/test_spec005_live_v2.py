@@ -492,6 +492,10 @@ class _FakeWindow:
     # the fake must answer with the same implementation, not a guess.
     _result_source = staticmethod(assist_window.frame_result_source)
     _invalidate_live_advice = assist_window.TeaAssistWindow._invalidate_live_advice
+    # stop() 现在会先把停止原因写进 follow_session.jsonl 再丢 pipeline 句柄，
+    # 桩必须同样绑定真实实现，而不是留空（本桩没有 _follow_pipeline.logger，
+    # 真实实现会直接早退，不会写文件）。
+    _append_stop_record = assist_window.TeaAssistWindow._append_stop_record
 
 def test_stop_and_start_clear_the_round_lock():
     window = _FakeWindow()

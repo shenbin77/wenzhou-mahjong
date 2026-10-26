@@ -580,7 +580,10 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         assert not hasattr(window, "confirm_mode")
         assert "disabled" in window.auto_button.state()
         assert window.problem_status.get() == "状态：—"
-        assert window.live_info.get() == "只读画面，不会代点。"
+        # 首屏文案必须如实说明"开始跟随会代点并消耗房卡"，不能再声称只读。
+        opening = window.live_info.get()
+        assert "代你点击" in opening and "消耗房卡" in opening
+        assert "不会代点" not in opening
         assert window.live_label.master is window.preview_panel
         assert window.bind_button.cget("text") == "已连接/重检"
         assert "disabled" not in window.unbind_button.state()

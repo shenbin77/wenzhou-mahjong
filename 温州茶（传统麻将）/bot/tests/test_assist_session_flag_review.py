@@ -195,9 +195,11 @@ def test_format_review_summary_variants():
     assert text == "自动复盘：疑似问题 5 个（d×9、a×3、b×1）"
     assert level == "wait"
 
-    text, level = format_review_summary({"placeholder": True})
-    assert "尚未就绪" in text
-    assert level == "wait"
+
+def test_auto_review_placeholder_branch_is_removed():
+    source = Path(assist_window.__file__).read_text(encoding="utf-8")
+    assert "复盘核心尚未就绪（占位）" not in source
+    assert 'result.get("placeholder")' not in source
 
 
 # -- session-end review wiring --------------------------------------------

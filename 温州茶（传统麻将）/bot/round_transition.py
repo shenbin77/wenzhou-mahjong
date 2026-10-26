@@ -255,6 +255,10 @@ class RoundTransitionExecutor:
         scene = round_end_scene(image)
         return bool(button["ok"] and scene["ok"]), {"button": button, "scene": scene}
 
+    def probe(self, image) -> tuple[bool, dict]:
+        """Read-only settlement/next-round probe for the enclosing loop."""
+        return self._gates(image)
+
     def attempt(self, *, round_no: Optional[int] = None,
                 round_total: int = MATCH_ROUND_TOTAL) -> TransitionResult:
         if self.halted:

@@ -260,7 +260,7 @@ def execute_auto_seat(
             if on_frame:
                 on_frame("seated", final)
             return SeatExecution(
-                "seated", "已自动坐下并关闭目标规则说明；开始游戏仍需人工点击",
+                "seated", "已自动坐下并关闭目标规则说明；等待开始游戏门禁",
                 True, final_state, final,
             )
         if watch.state not in (WatchState.LOBBY, WatchState.UNKNOWN):

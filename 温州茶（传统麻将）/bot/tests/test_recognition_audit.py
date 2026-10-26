@@ -21,6 +21,41 @@ def _diagnostic(tile_id, *, accepted=True, reason="accepted"):
             "accepted": accepted, "reason": reason}
 
 
+def make_hidden_root(*, attempts: int = 6, delay: float = 0.25):
+    """Create a withdrawn Tk root, retrying transient Tcl-init failures.
+
+    ``tk.Tk()`` occasionally raises ``TclError`` while the Tcl/Tk script
+    library is being sourced, e.g.::
+
+        Can't find a usable tk.tcl ...
+        couldn't read file ".../tcl/tk8.6/scale.tcl": no such file or directory
+
+    or ``invalid command name "tcl_findLibrary"`` (the same failed
+    ``tk.tcl`` load seen from the other side). The referenced files do
+    exist on disk, so this is a transient read/init failure of the host
+    environment under load, not something the assertions below can
+    observe. Retrying only absorbs that environment noise: every
+    assertion still runs against a real, fully initialised window, and
+    no gate is relaxed. If Tk is genuinely broken the retries run out
+    and the failure is reported as-is.
+    """
+    import time
+    import tkinter as tk
+
+    last_error: BaseException | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:  # transient Tcl library init failure
+            last_error = exc
+            time.sleep(delay)
+            continue
+        root.withdraw()
+        return root
+    raise AssertionError(
+        f"Tk root creation failed {attempts} times in a row: {last_error!r}")
+
+
 def test_every_prediction_is_unreviewed_until_a_human_checks(tmp_path):
     frame = tmp_path / "frame.png"
     frame.write_bytes(b"raw frame")
@@ -109,7 +144,6 @@ def test_live_worker_records_each_analyzed_frame_and_errors(tmp_path, monkeypatc
 
 
 def test_review_window_displays_recorded_frame_without_changing_source(tmp_path):
-    import tkinter as tk
     from PIL import Image
     from recognition_review import RecognitionReview
 
@@ -120,8 +154,7 @@ def test_review_window_displays_recorded_frame_without_changing_source(tmp_path)
         "status": "advise", "hand": ["w1"],
         "vision_diagnostics": [_diagnostic(1)]}, mode="tea_2p")
     append_frame_event(tmp_path, event)
-    root = tk.Tk()
-    root.withdraw()
+    root = make_hidden_root()
     try:
         review = RecognitionReview(root, tmp_path)
         review.window.withdraw()
@@ -172,7 +205,6 @@ def test_primary_window_preflight_shows_real_frame_without_adb(tmp_path, monkeyp
     Production gates / timeouts are untouched.
     """
     import time
-    import tkinter as tk
     from concurrent.futures import Future
     import assist_window
     from tile_render import _has_face
@@ -193,8 +225,7 @@ def test_primary_window_preflight_shows_real_frame_without_adb(tmp_path, monkeyp
 
     monkeypatch.setattr(assist_window, "LiveCapture", forbidden_adb)
     monkeypatch.setattr(assist_window, "save_window_state", lambda *_args, **_kwargs: None)
-    root = tk.Tk()
-    root.withdraw()
+    root = make_hidden_root()
     window = assist_window.TeaAssistWindow(root)
     window.session_dir = tmp_path / "session"
     window.mode.set(mode)
@@ -234,7 +265,6 @@ def test_primary_window_preflight_shows_real_frame_without_adb(tmp_path, monkeyp
 
 def test_video_frames_feed_primary_view_without_opening_second_window(tmp_path, monkeypatch):
     import time
-    import tkinter as tk
     from PIL import Image
     import assist_window
     import recognition_video
@@ -255,8 +285,7 @@ def test_video_frames_feed_primary_view_without_opening_second_window(tmp_path, 
 
     monkeypatch.setattr(recognition_video, "audit_video", fake_video)
     monkeypatch.setattr(assist_window, "save_window_state", lambda *_args, **_kwargs: None)
-    root = tk.Tk()
-    root.withdraw()
+    root = make_hidden_root()
     window = assist_window.TeaAssistWindow(root)
     window.session_dir = tmp_path / "session"
     try:
@@ -276,14 +305,12 @@ def test_video_frames_feed_primary_view_without_opening_second_window(tmp_path, 
 
 
 def test_previous_compact_window_opens_as_primary_live_view(monkeypatch):
-    import tkinter as tk
     import assist_window
 
     monkeypatch.setattr(assist_window, "load_window_state", lambda *_a: {
         "x": 0, "y": 0, "w": 440, "h": 560, "topmost": True})
     monkeypatch.setattr(assist_window, "save_window_state", lambda *_args, **_kwargs: None)
-    root = tk.Tk()
-    root.withdraw()
+    root = make_hidden_root()
     requested = []
     real_geometry = root.geometry
     def record_geometry(value):

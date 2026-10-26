@@ -29,6 +29,10 @@ from brain_v0.engine.wenzhou_rules import hand_is_win, hand_shanten, ting_tiles
 
 _SHU_TEMPLATE_DIR = (Path(__file__).resolve().parent.parent / "代打BOT" /
                      "majiang-bot" / "pc_bot" / "templates_hongzhong_v2")
+# 熟局红中放炮的财神按规则固定是红中，与 live_capture.observed_caishen("shu_*")
+# 返回的 caishen_source="rule" 一致。告诉识别器后，"财"角标牌与整张纯金牌才能
+# 按红中计入闭手，否则会被当成未识别牌导致整帧弃权。
+_SHU_CAISHEN_LABEL = 'hongzhong'
 
 
 def _validate_hand(labels: list[str], meld_count: int = 0) -> list[int]:
@@ -104,6 +108,7 @@ def analyze_shu_snapshot(
                 "hand": [], "meld_count": 0, "suggested_boxes": [],
                 "dry_run": True, "status": "abstain", "reason": early_reason}
     vision = TileVision(template_dir=_SHU_TEMPLATE_DIR)
+    vision.caishen_label = _SHU_CAISHEN_LABEL
     try:
         vision.recognize_hand(image)
     finally:

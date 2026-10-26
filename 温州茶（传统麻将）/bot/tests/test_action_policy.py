@@ -352,6 +352,42 @@ def test_hu_with_melds_is_not_verifiable() -> None:
     assert "副露" in decision.blocked_reason
 
 
+def test_runner_can_accept_exact_server_hu_when_meld_engine_is_unverified(
+        monkeypatch) -> None:
+    """服务端胡盘救回只在 runner 显式开启且胡/过模板均过闸时生效。"""
+    hand = HandState(
+        concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 41),
+        melds=((41, 42, 43),), incoming_tile=42,
+        incoming_source="opponent", player_count=2)
+    cfg = ActionPolicyConfig(
+        trust_server_hu_button=True,
+        require_template_match=False,
+    )
+    monkeypatch.setattr(
+        ap, "_status_for", lambda _per, _button: ap.TEMPLATE_STATUS_MATCHED)
+    decision = decide_action(state(hu_button(), pass_button()), hand, cfg)
+    assert decision is not None
+    assert decision.action == ACTION_HU
+    assert decision.blocked_reason == ""
+    assert decision.engine[ACTION_HU]["server_button_override"] is True
+
+
+def test_server_hu_override_never_accepts_own_discard(monkeypatch) -> None:
+    hand = HandState(
+        concealed=(1, 2, 3, 4, 5, 6, 7, 8),
+        melds=((41, 42, 43), (21, 22, 23)), incoming_tile=25,
+        incoming_source="self", player_count=2)
+    cfg = ActionPolicyConfig(
+        trust_server_hu_button=True,
+        require_template_match=False,
+    )
+    monkeypatch.setattr(
+        ap, "_status_for", lambda _per, _button: ap.TEMPLATE_STATUS_MATCHED)
+    decision = decide_action(state(hu_button(), pass_button()), hand, cfg)
+    assert decision is not None
+    assert not decision.executable
+
+
 def test_pass_alone_is_blocked_by_default() -> None:
     """过从不单独出现（已验证口径），单独出现即视为状态不可信。"""
     decision = decide_action(state(pass_button()), NO_CLAIM_HAND, ADVISORY)

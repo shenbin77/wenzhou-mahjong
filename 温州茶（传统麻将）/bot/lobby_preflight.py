@@ -58,7 +58,8 @@ def assess_frame(image, *, low_at: int = LOW_CARDS_REMINDER_AT) -> LobbyAssessme
     status = str(evidence.get("status") or "unknown")
     if not isinstance(count, int) or isinstance(count, bool) or count < 0 or status != "ok":
         return LobbyAssessment(state, None, status,
-                               "无法可靠读取房卡余额（" + status + "）；请核验数字模板，暂停自动入座。", False)
+                               "无法可靠读取房卡余额（" + status + "）；"
+                               "可无扣费入座，开局仅走用户已授权的专用门禁且绝不充值。", False)
     if count == 0:
         return LobbyAssessment(state, 0, "ok",
                                "房卡已用完：已禁止新开局，请手动处理（不会自动充值）。", False)

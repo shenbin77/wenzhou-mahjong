@@ -16,6 +16,7 @@ if str(BOT_DIR) not in sys.path:
 from assist_shu import (analyze_shu_manual_hand, analyze_shu_snapshot,
                         import_shu_and_analyze)  # noqa: E402
 from mode_vision import detect_shu_rule_text  # noqa: E402
+from tile_vision import TILE_IDS, TileVision  # noqa: E402
 
 FRAMES = BOT_DIR.parents[1] / "阿法算牌分析" / "熟识牌对照_20261018"
 SHU_GOLD = BOT_DIR.parent / "采集" / "box_replay_harvest_missing"
@@ -69,6 +70,25 @@ def test_real_four_player_draw_frame_has_exact_hand_and_located_advice(
     assert result["suggested_boxes"]
     assert marked.is_file() and result["dry_run"] is True
     assert hashlib.sha256(frame.read_bytes()).hexdigest() == before
+
+
+def test_shu_vision_is_told_hongzhong_is_the_caishen(monkeypatch):
+    """熟局财神按规则固定是红中；识别器必须拿到它，否则角标/金牌整帧弃权。"""
+    import assist_shu
+
+    assert assist_shu._SHU_CAISHEN_LABEL in TILE_IDS
+    original = TileVision.recognize_hand
+    observed: list[object] = []
+
+    def spy(self, image, *args, **kwargs):
+        observed.append(self.caishen_label)
+        return original(self, image, *args, **kwargs)
+
+    monkeypatch.setattr(TileVision, "recognize_hand", spy)
+    result = analyze_shu_snapshot(FRAMES / "frame_233s_14.png",
+                                  confirmed_four_player=True)
+    assert observed == ["hongzhong"]
+    assert result["status"] == "advise"
 
 
 def test_uncertain_and_incomplete_replay_frames_abstain(tmp_path):

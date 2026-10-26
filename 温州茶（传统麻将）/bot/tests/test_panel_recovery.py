@@ -275,18 +275,34 @@ def hint_panel_frame(png_bytes: bytes, box) -> bytes:
     return encoded.tobytes()
 
 
+#: 真实的 ``subprocess.run``，在测试用 ``monkeypatch`` 把 ``subprocess.run``
+#: 换成 :class:`FakeAdb` 之前捕获（本模块 import 时）。
+REAL_SUBPROCESS_RUN = subprocess.run
+
+
 class FakeAdb:
-    """与 test_tap_executor 同口径：记录命令，离线应答 dumpsys/截图/点击。"""
+    """与 test_tap_executor 同口径：记录命令，离线应答 dumpsys/截图/点击。
+
+    只有本测试注入的 ``fake-adb`` 命令才被伪造；**其它一切子进程调用都转交
+    真实** ``subprocess.run``。原因（2026-10-25 隔离性事故）：把无关命令也
+    伪造成 ``returncode=0`` 会让运行环境的删除拦截层（PATH 里的
+    ``sitecustomize`` 安全删除 shim）误信「回收站助手已成功删除」，于是
+    ``pathlib.Path.unlink`` 变成静默空操作——``panel_recovery.clear_state``
+    照旧返回 True，待二击状态文件却还留在盘上，本文件两个「验证成功后清除」
+    用例因此假红（单独跑该用例也会红，与测试顺序无关）。
+    """
 
     def __init__(self, png_frames: list[bytes]):
         self.frames = list(png_frames)
         self.commands: list[list[str]] = []
+        self.real_run = REAL_SUBPROCESS_RUN
 
-    def __call__(self, command, capture_output=False, timeout=None,
-                 check=False, creationflags=0, **kwargs):
+    def __call__(self, command, *args, **kwargs):
         parts = [str(part) for part in command]
         if not parts or parts[0] != "fake-adb":
-            return subprocess.CompletedProcess(command, 0, b"", b"")
+            # 与 adb 无关的调用（环境删除助手、Tcl 探测等）必须走真实实现，
+            # 否则会把"进程里所有子进程都成功"这个假事实泄漏给被测系统。
+            return self.real_run(command, *args, **kwargs)
         self.commands.append(parts)
         joined = " ".join(parts)
         if "dumpsys" in joined:

@@ -744,6 +744,54 @@ def test_claim_tap_fails_and_dumps_evidence_when_nothing_changed(
     assert data["claim"]["action"] == "peng"
 
 
+def test_claim_pass_accepts_new_window_in_same_slot(monkeypatch, tmp_path):
+    """2 人局连打：过盘槽位逐像素相同、但牌局已推进 → 判同槽位新窗口。
+
+    实机依据 20261025_215415：点击前 吃+过，点击后 杠+过，两帧按钮框完全
+    一致（吃→杠换了字形、槽位没变），剩牌 65→64。旧逻辑只看圆盘，把这判成
+    "点击未生效"并整局停手；新逻辑看行动行以外的画面变化。
+    """
+    before = _claim_frame_with_hand_mark(False)
+    after = _claim_frame_with_hand_mark(True)
+    fake = FakeAdb([before, after])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    outcome = executor.execute_claim(PASS_CENTER, action="pass")
+
+    assert outcome["executed"] is True
+    assert outcome["same_slot_new_window"] is True
+    assert len(fake.tap_commands()) == 1
+    data = _read_evidence(tmp_path)
+    assert data["claim"]["claim_result"] == "same_slot_new_window"
+    assert data["claim"]["same_slot_new_window"]["changed"] is True
+
+
+def test_claim_pass_rejects_when_nothing_changed_anywhere(
+        monkeypatch, tmp_path):
+    """圆盘不变且行动行以外也没变化 → 仍然 fail-closed，不放行。"""
+    frame = _claim_frame_with_hand_mark(False)
+    fake = FakeAdb([frame, frame])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    with pytest.raises(TapUnverified, match="画面未变化"):
+        executor.execute_claim(PASS_CENTER, action="pass")
+
+    assert len(fake.tap_commands()) == 1  # 失败即停，不重发
+    data = _read_evidence(tmp_path)
+    assert data["claim"]["same_slot_new_window"]["changed"] is False
+
+
+def _claim_frame_with_hand_mark(mark: bool) -> bytes:
+    """金盘+过盘同帧；``mark`` 时在行动行以外画一块“牌局已推进”的变化。"""
+    image = _blank_frame()
+    cv2.circle(image, GOLD_CENTER, 60, (0, 200, 255), -1)
+    cv2.circle(image, PASS_CENTER, 55, (255, 170, 0), -1)
+    if mark:
+        # y≥700 属于手牌带：行动行（y500-700）之外。
+        cv2.rectangle(image, (200, 780), (1200, 860), (235, 235, 235), -1)
+    return _png(image)
+
+
 def test_claim_tap_rejects_cancel_disc_and_unreadable_frame(
         monkeypatch, tmp_path):
     """取消盘永不点；读不出圆盘时不点（连"过"都不点）。"""

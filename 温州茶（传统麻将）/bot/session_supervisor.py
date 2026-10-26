@@ -361,7 +361,7 @@ def build_plan(
         base.update({
             "action": "alert_only",
             "reason": ("结算/牌局结束画面（双信号确认）：保存截图并告警；"
-                       "确定、返回大厅、开始游戏等离桌/开局按钮永久禁止自动点击"),
+                       "监督器不点击确定、返回大厅或开始游戏，开始游戏只归专用场次入口"),
         })
     elif state is SessionState.HINT_PANEL:
         if classification.loop_stopped:
@@ -377,14 +377,14 @@ def build_plan(
     elif state is SessionState.LOBBY:
         base.update({
             "action": "alert_only",
-            "reason": ("画面已在大厅：保存截图并告警；桌子、规则窗、开始游戏、"
-                       "充值及任何重进桌流程永久禁止自动点击"),
+            "reason": ("画面已在大厅：监督器只保存截图并告警；找位/规则窗/开始游戏"
+                       "由用户显式启动的专用场次入口负责，监督器绝不点击充值"),
         })
     elif state is SessionState.WAITING_ROOM:
         base.update({
-            "action": "wait_for_manual_start",
-            "reason": ("茶 2 人等候室：只确认当前实例已坐下；开始游戏仍由用户手动点击，"
-                       "监督不启动/重拉局内循环，也不发布点击计划"),
+            "action": "wait_for_session_entry",
+            "reason": ("茶 2 人等候室：监督器不发布点击计划；用户显式启动的专用场次入口"
+                       "会在本人/玩法/对手/按钮门禁通过后单击开始游戏"),
         })
     elif state is SessionState.CLAIM_WINDOW:
         if classification.loop_stopped:

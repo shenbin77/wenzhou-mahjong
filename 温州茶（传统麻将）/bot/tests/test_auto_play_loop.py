@@ -41,9 +41,10 @@ from auto_play_loop import (  # noqa: E402
     hud_fingerprint,
 )
 from action_guard import ActionGuardResult  # noqa: E402
-from action_policy import ACTION_PASS, ActionDecision  # noqa: E402
+from action_policy import ACTION_PASS, ActionDecision, BoardState  # noqa: E402
 from harvest_tea import EXPECTED_PACKAGE  # noqa: E402
 from invite_dialog import InvitationState  # noqa: E402
+from promo_popup import PromoPopupState  # noqa: E402
 from tap_executor import TapPlan, TapRejected  # noqa: E402
 
 HUD_A = b"hud-" + bytes(range(32))
@@ -214,6 +215,8 @@ class FakeTap:
         self.execute_calls: list[dict] = []
         self.execute_claim_calls: list[dict] = []
         self.execute_invitation_calls: list[dict] = []
+        self.execute_leave_calls: list[dict] = []
+        self.execute_close_popup_calls: list[dict] = []
 
     def plan(self, analysis):
         self.plan_calls.append(analysis)
@@ -232,10 +235,25 @@ class FakeTap:
         return {"executed": True, "dry_run": False, "stage": "clicked",
                 "tap": list(point), "ui_responded": True}
 
+    def execute_leave_table(self, point=None, **kwargs):
+        self.execute_leave_calls.append({"point": point, **kwargs})
+        return {"executed": True, "dry_run": False, "stage": "verified",
+                "action": "leave_table", "tap": [400, 824],
+                "box": [246, 777, 554, 872], "verified": True,
+                "reason": "牌局结束版式双帧确认，点击后连续两帧消失"}
+
     def execute_invitation_cancel(self, point, **kwargs):
         self.execute_invitation_calls.append({"point": point, **kwargs})
         return {"executed": True, "dry_run": False, "stage": "verified",
                 "tap": list(point), "verified": True}
+
+    def execute_close_popup(self, point=None, **kwargs):
+        self.execute_close_popup_calls.append({"point": point, **kwargs})
+        return {"executed": True, "dry_run": False, "stage": "verified",
+                "action": "close_promo_popup",
+                "tap": list(point or (1466, 190)),
+                "box": [1438, 160, 1495, 221], "verified": True,
+                "reason": "促销弹窗版式双帧确认，点击后连续两帧不再命中"}
 
 
 def increasing_clock(step: float = 0.01):
@@ -868,6 +886,21 @@ def test_geometry_rejection_stops_without_retry(tmp_path):
     assert len(tap.execute_calls) == 1        # 本帧只尝试一次
     assert loop.stopped is True
     assert loop.tick()["event"] == "skip"
+    assert len(tap.execute_calls) == 1
+
+
+def test_preclick_fresh_frame_exhaustion_is_bounded_recovery_not_terminal(
+        tmp_path):
+    error = auto_play_loop.TapPrecheckRetryExhausted(
+        "点击前连续 3 帧复核失败，未发送点击：副露瞬时误读")
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, tap=FakeTap(execute_error=error))
+    settle(loop)
+    event = loop.tick()
+    assert event["event"] == "error"
+    assert event["error"] == "discard_precheck_retry_exhausted"
+    assert event["consecutive_errors"] == 1
+    assert loop.stopped is False
     assert len(tap.execute_calls) == 1
 
 
@@ -1588,6 +1621,8 @@ def _hand_analysis(hand_ids, melds=None) -> dict:
 
 
 HAND16_IDS = [1, 1, 2, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 42, 43]
+HAND14_IDS = HAND16_IDS[:14]
+HAND17_IDS = HAND16_IDS + [44]
 HAND10_IDS = [1, 1, 2, 4, 5, 6, 7, 21, 22, 23]
 HAND12_IDS = [1, 1, 2, 4, 5, 6, 7, 8, 21, 22, 23, 24]
 
@@ -1613,6 +1648,52 @@ def _pass_loop(tmp_path, monkeypatch, analyses):
         analyses=analyses,
         action_guard=CLAIM_GUARD, claim_auto_click=True, tap=tap)
     return loop, tap
+
+
+def test_pass_overlay_underread_recovers_only_exact_legal_draw_state():
+    before = BoardState(
+        concealed_count=14, melds=(), claim_buttons=2,
+        settled=False, turn_owner="opponent")
+    after = BoardState(
+        concealed_count=17, melds=(), claim_buttons=0,
+        settled=False, turn_owner="me", selection_panel=False)
+    ok, reason = AutoPlayLoop._verify_pass_after_overlay_underread(before, after)
+    assert ok, reason
+    assert "14→合法摸牌 17" in reason
+
+
+@pytest.mark.parametrize("after", [
+    BoardState(concealed_count=16, melds=(), claim_buttons=0,
+               settled=False, turn_owner="me", selection_panel=False),
+    BoardState(concealed_count=17, melds=((1, 1, 1),), claim_buttons=0,
+               settled=False, turn_owner="me", selection_panel=False),
+    BoardState(concealed_count=17, melds=(), claim_buttons=1,
+               settled=False, turn_owner="me", selection_panel=False),
+    BoardState(concealed_count=17, melds=(), claim_buttons=0,
+               settled=False, turn_owner="me", selection_panel=True),
+])
+def test_pass_overlay_underread_rejects_incomplete_or_changed_evidence(after):
+    before = BoardState(
+        concealed_count=14, melds=(), claim_buttons=2,
+        settled=False, turn_owner="opponent")
+    ok, _reason = AutoPlayLoop._verify_pass_after_overlay_underread(before, after)
+    assert not ok
+
+
+def test_pass_verify_accepts_real_14_to_17_overlay_recovery(tmp_path, monkeypatch):
+    """5558 实机回归：行动栏前帧少读 14，过后立即摸牌恢复 17。"""
+    loop, tap = _pass_loop(tmp_path, monkeypatch, [
+        _hand_analysis(HAND14_IDS),
+        _hand_analysis(HAND17_IDS),
+    ])
+    event = loop.tick()
+    assert event["event"] == "idle"
+    auto = event["claim"]["auto_click"]
+    assert auto["executed"] is True
+    assert auto["semantic_verified"] is True
+    assert "行动栏遮挡少读 14→合法摸牌 17" in auto["semantic_reason"]
+    assert len(tap.execute_claim_calls) == 1
+    assert loop.stopped is False
 
 
 def test_pass_verify_recovers_from_dimmed_first_frame(tmp_path, monkeypatch):
@@ -1691,3 +1772,582 @@ def test_pass_verify_unsettled_frames_fail_closed(tmp_path, monkeypatch):
     assert len(samples) == 8
     assert len(tap.execute_claim_calls) == 1
     assert loop.actions_done == 0
+
+
+# ----------------------------------------------------------------------
+# 9. 多亮白名单（亮簇 1..N 张）：亮牌集合只是可打范围，绝不自行选牌
+# ----------------------------------------------------------------------
+# 实机反馈（2026-10-25，房间 604624）：听牌/摸切时游戏压暗整手，亮起的牌
+# 可能是 1 张、2 张甚至更多。单亮路径表达不了 >=2 张，循环因此卡在「识牌
+# 不完整/等待摸牌」。这里锁死新的接线：
+#   * 亮簇 >=2 张 → 白名单；只有「算牌建议落在白名单内 + 白名单连续 2 帧
+#     一致」才点，其余一律弃权并记 gate=bright_subset_unconfirmed；
+#   * 单亮帧仍旧走原来那条路径（白名单不接管），行为不变。
+ID_W1, ID_DONG, ID_NAN, ID_BEI = 1, 61, 62, 64
+BRIGHT_LABELS = {ID_W1: "w1", ID_DONG: "dong", ID_NAN: "nan", ID_BEI: "bei"}
+
+
+def bright_frame(levels: list[float], band: int = 100) -> bytes:
+    """手牌带压暗到 ``band``，再按 ``hand_boxes`` 逐框涂指定亮度。"""
+    image = np.zeros((900, 1600, 3), dtype=np.uint8)
+    image[:, :] = (40, 70, 40)
+    image[760:, :] = band
+    for box, level in zip(hand_boxes(len(levels)), levels):
+        x0, y0, x1, y1 = box
+        image[y0:y1, x0:x1] = int(level)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
+def bright_result(ids, *, status="abstain", suggestion_index=None,
+                  caishen="w1", reason="识牌不完整，停止决策"):
+    """与真实 analyze 返回体同形：逐框给 id，可选带一条建议。"""
+    boxes = hand_boxes(len(ids))
+    diagnostics = [{
+        "tile_id": tile_id,
+        "label": BRIGHT_LABELS.get(tile_id),
+        "box": list(box),
+        "accepted": tile_id is not None,
+        "region": "concealed",
+        "score": .99 if tile_id is not None else .1,
+        "margin": .2,
+        "caishen_marked": False,
+    } for tile_id, box in zip(ids, boxes)]
+    suggestion_id = (ids[suggestion_index]
+                     if suggestion_index is not None else None)
+    return {
+        "status": status, "mode": "tea_2p", "caishen": caishen,
+        "hand_ids": [int(t) for t in ids if t is not None],
+        "melds": [], "meld_count": 0, "reason": reason,
+        "suggestion": BRIGHT_LABELS.get(suggestion_id),
+        "suggestion_id": suggestion_id,
+        "suggested_boxes": ([list(boxes[suggestion_index])]
+                            if suggestion_index is not None else []),
+        "vision_diagnostics": diagnostics,
+    }
+
+
+TWO_BRIGHT_LEVELS = [100.0] * 15 + [214.0, 214.0]
+TWO_BRIGHT_IDS = [None] * 15 + [ID_NAN, ID_BEI]
+
+
+def test_multi_bright_without_advice_abstains_with_gate(tmp_path):
+    """真实多亮帧的样子：analyze abstain（识牌不完整）→ 弃权，零点击。"""
+    frame = bright_frame(TWO_BRIGHT_LEVELS)
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[frame],
+        analyses=[bright_result(TWO_BRIGHT_IDS)])
+    settle(loop)                                   # 第 1 帧：白名单待确认
+    event = loop.tick()                            # 第 2 帧：白名单已确认
+
+    assert event["event"] == "idle"
+    assert event["gate"] == "bright_subset_unconfirmed"
+    assert event["status"] == "abstain"
+    assert tap.execute_calls == [] and tap.plan_calls == []
+    assert loop.actions_done == 0
+    marker = event["bright_subset_cut"]
+    assert marker["multi_candidate"] is True
+    assert marker["bright_count"] == 2
+    assert marker["outcome"] == "no_advice"
+    assert [item["tile_id"] for item in marker["whitelist"]] == [ID_NAN, ID_BEI]
+
+
+def test_multi_bright_advice_outside_whitelist_abstains(tmp_path):
+    """算牌建议不在白名单内 → 弃权（绝不点白名单外的牌）。"""
+    frame = bright_frame(TWO_BRIGHT_LEVELS)
+    ids = TWO_BRIGHT_IDS
+    result = bright_result(ids, status="advise", suggestion_index=0)
+    # 建议牌改成白名单外的东（模拟"算牌器想打暗牌"）
+    result["suggestion_id"] = ID_DONG
+    result["suggestion"] = BRIGHT_LABELS[ID_DONG]
+    result["suggested_boxes"] = [list(hand_boxes(17)[0])]
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[frame], analyses=[result])
+    settle(loop)
+    event = loop.tick()
+
+    assert event["event"] == "idle"
+    assert event["gate"] == "bright_subset_unconfirmed"
+    assert "不在亮牌白名单" in event["reason"]
+    assert event["bright_subset_cut"]["outcome"] == "advice_outside_whitelist"
+    assert tap.execute_calls == [] and tap.plan_calls == []
+    assert loop.actions_done == 0
+
+
+def test_multi_bright_advice_inside_whitelist_taps_that_tile(tmp_path):
+    """建议牌落在白名单内 + 连续 2 帧一致 → 点它，并按手牌 −1 验证。"""
+    frame = bright_frame(TWO_BRIGHT_LEVELS)
+    result = bright_result(TWO_BRIGHT_IDS, status="advise",
+                           suggestion_index=16)
+    assert result["suggestion_id"] == ID_BEI
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[frame], analyses=[result])
+    settle(loop)
+    event = loop.tick()
+
+    assert event["event"] == "action"
+    assert event["verified"] is True
+    assert len(tap.execute_calls) == 1
+    synthetic = tap.execute_calls[0]
+    assert synthetic["suggestion_id"] == ID_BEI
+    assert synthetic["suggested_boxes"] == [list(hand_boxes(17)[16])]
+    assert synthetic["_locked_before_count"] == 17
+    assert event["bright_subset_cut"]["outcome"] == "verified"
+    assert event["bright_subset_cut"]["chosen"]["tile_id"] == ID_BEI
+    assert loop.actions_done == 1
+
+
+def test_multi_bright_first_frame_never_taps(tmp_path):
+    """白名单还必须连续 2 帧一致：第 1 帧只记证据，不点。"""
+    frame = bright_frame(TWO_BRIGHT_LEVELS)
+    result = bright_result(TWO_BRIGHT_IDS, status="advise",
+                           suggestion_index=16)
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[frame], analyses=[result])
+
+    event = loop.tick()
+
+    assert event["event"] == "idle"
+    assert event["bright_subset_cut"]["streak"] == 1
+    assert event["bright_subset_cut"]["confirmed"] is False
+    assert tap.execute_calls == []
+
+
+def test_multi_bright_unreadable_tile_abstains(tmp_path):
+    """亮牌里有一张牌面读不出 → 弃权（不猜牌）。"""
+    frame = bright_frame(TWO_BRIGHT_LEVELS)
+    ids = [None] * 15 + [ID_NAN, None]
+    result = bright_result(ids, status="advise", suggestion_index=15)
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[frame], analyses=[result])
+    settle(loop)
+    event = loop.tick()
+
+    assert event["event"] == "idle"
+    assert event["gate"] == "bright_subset_unconfirmed"
+    assert event["bright_subset_cut"]["outcome"] == "tile_identity_unknown"
+    assert tap.execute_calls == []
+
+
+def test_multi_bright_dry_run_plans_without_tapping(tmp_path):
+    """dry_run 下多亮白名单同样只算坐标、零点击。"""
+    frame = bright_frame(TWO_BRIGHT_LEVELS)
+    result = bright_result(TWO_BRIGHT_IDS, status="advise",
+                           suggestion_index=16)
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=False, frames=[frame], analyses=[result])
+    settle(loop)
+    event = loop.tick()
+
+    assert event["event"] == "dry_run_plan"
+    assert tap.plan_calls and tap.execute_calls == []
+    assert tap.plan_calls[0]["suggestion_id"] == ID_BEI
+
+
+def test_single_bright_frame_still_uses_single_path(tmp_path):
+    """1 亮帧不被白名单接管：仍走原有单亮摸切路径（行为不变）。"""
+    levels = [100.0] * 16 + [214.0]
+    ids = [None] * 16 + [ID_NAN]
+    frame = bright_frame(levels)
+    result = bright_result(ids, status="abstain")
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[frame], analyses=[result])
+    settle(loop)
+    event = loop.tick()
+
+    assert event["event"] == "action"
+    assert len(tap.execute_calls) == 1
+    assert tap.execute_calls[0]["suggestion_id"] == ID_NAN
+    assert event["single_bright_cut"]["outcome"] == "verified"
+    # 白名单检测同样命中，但张数只有 1 → 不接管
+    assert event["bright_subset_cut"]["multi_candidate"] is False
+    assert "outcome" not in event["bright_subset_cut"]
+
+
+def test_multi_bright_changed_advice_waits_for_stable_frame(tmp_path):
+    """建议牌两帧不一致 → 先弃权；第三帧建议稳定后才点（防单帧抖动）。"""
+    frame = bright_frame(TWO_BRIGHT_LEVELS)
+    first = bright_result(TWO_BRIGHT_IDS, status="advise",
+                          suggestion_index=15)   # 建议南
+    second = bright_result(TWO_BRIGHT_IDS, status="advise",
+                           suggestion_index=16)  # 建议北
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, frames=[frame], analyses=[first, second])
+    settle(loop)                                     # 第 1 帧：建议南
+    unstable = loop.tick()                           # 第 2 帧：建议北（变了）
+
+    assert unstable["event"] == "idle"
+    assert unstable["gate"] == "bright_subset_unconfirmed"
+    assert unstable["bright_subset_cut"]["outcome"] == "advice_unstable"
+    assert unstable["bright_subset_advice"]["streak"] == 1
+    assert tap.execute_calls == []
+
+    stable = loop.tick()                             # 第 3 帧：建议仍是北
+    assert stable["event"] == "action"
+    assert stable["bright_subset_advice"]["streak"] == 2
+    assert tap.execute_calls[0]["suggestion_id"] == ID_BEI
+
+
+# ---------------------------------------------------------------------------
+# 手牌账本兜底（2026-10-25 22:13 实机：整手压暗 + 亮起 2 张时弃权 6 分钟）
+#
+# 真帧证据：17 个手牌框里 15 框面亮度 100（压暗）、2 框 214（亮）；
+# analyze 只读出 5 张 → abstain；亮牌白名单本身读得对（南/西）。
+# 旧行为是 bright_subset_unconfirmed 死等"算牌建议"，直到游戏高亮自己
+# 超时才恢复。这里锁住新行为：同局同张数时用账本手牌算出该打哪张。
+# ---------------------------------------------------------------------------
+LEDGER_HAND17 = [1, 1, 2, 2, 3, 3, 4, 4, 21, 21, 22, 22, 23, 23, 24, 24, 62]
+
+
+def _fake_subset(tile_ids, *, expected=17, hit=True, unresolved=False):
+    from types import SimpleNamespace
+
+    candidates = [
+        SimpleNamespace(tile_id=tile_id, tile_label=f"t{tile_id}",
+                        box=hand_boxes(len(tile_ids))[index],
+                        tap_point=[0, 0])
+        for index, tile_id in enumerate(tile_ids)
+    ]
+    return SimpleNamespace(
+        hit=hit, unresolved=unresolved, candidates=candidates,
+        evidence={"expected_concealed": expected},
+        whitelist_ids=lambda: tuple(c.tile_id for c in candidates),
+    )
+
+
+def _prime_ledger(loop):
+    loop._hand_ledger.remember(
+        {"status": "advise", "hand_ids": list(LEDGER_HAND17), "melds": [],
+         "caishen": "w1", "caishen_id": 1},
+        round_seq=loop.round.seq, caishen="w1")
+
+
+def test_ledger_advice_replaces_missing_advice(tmp_path):
+    """压暗帧没有算牌建议时，账本给出「白名单内最优」那张，且不越界。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop)
+    subset = _fake_subset([24, 62])
+
+    advice = loop._ledger_advice(subset, {"status": "abstain",
+                                          "reason": "识牌不完整，停止决策",
+                                          "caishen": "w1"})
+
+    assert advice is not None
+    assert advice["tile_id"] in (24, 62)
+    assert advice["whitelist"] == [24, 62]
+    assert sorted(advice["hand"]) == sorted(LEDGER_HAND17)
+    assert advice["candidate_count"] >= 1
+
+
+def test_ledger_advice_never_overrides_real_advice(tmp_path):
+    """本帧真建议本身就在白名单内时，兜底不许接管（避免两套口径打架）。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop)
+
+    advice = loop._ledger_advice(
+        _fake_subset([24, 62]),
+        {"status": "advise", "suggestion_id": 24, "caishen": "w1"})
+
+    assert advice is None
+
+
+def test_ledger_advice_takes_over_when_real_advice_is_illegal(tmp_path):
+    """真建议落在白名单外 → 游戏根本不允许打那张，必须由兜底改挑白名单内候选。
+
+    实机场景（2026-10-25 房间 915995，emulator-5558）：听牌后整手压暗，识牌只
+    读到部分手牌，引擎建议 3条(id=43)，而游戏高亮的可打范围只有 东/西(id=61/63)。
+    若继续"一成不变地尊重真建议"，这一家会永远打不出去，整桌卡到超时。
+    """
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop)
+
+    advice = loop._ledger_advice(
+        _fake_subset([24, 62]),
+        {"status": "advise", "suggestion_id": 1, "caishen": "w1"})
+
+    assert advice is not None
+    assert advice["tile_id"] in (24, 62)
+
+
+def test_ledger_advice_rejects_whitelist_outside_memory(tmp_path):
+    """白名单有一张不在账本手牌上 → 账本与本帧不是同一手牌，弃权。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop)
+
+    assert loop._ledger_advice(
+        _fake_subset([24, 63]),
+        {"status": "abstain", "caishen": "w1"}) is None
+
+
+def test_ledger_advice_rejects_count_mismatch(tmp_path):
+    """张数不等（摸牌/吃碰后）→ 账本过期，弃权。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop)
+
+    assert loop._ledger_advice(
+        _fake_subset([24, 62], expected=16),
+        {"status": "abstain", "caishen": "w1"}) is None
+
+
+def test_ledger_advice_rejects_without_memory(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+
+    assert loop._ledger_advice(
+        _fake_subset([24, 62]),
+        {"status": "abstain", "caishen": "w1"}) is None
+
+
+def test_ledger_advice_requires_whitelist_hit(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_ledger(loop)
+
+    from types import SimpleNamespace
+    empty = SimpleNamespace(hit=False, unresolved=False, candidates=[],
+                            evidence={}, whitelist_ids=lambda: ())
+    assert loop._ledger_advice(empty, {"status": "abstain"}) is None
+
+
+# ---------------------------------------------------------------------------
+# 牌局结束（局数打满 16/16）→ 返回大厅
+#
+# 实机 20261025 22:58：局数 16/16，画面为「牌局结束」+ 冠军横幅 + 底部三按钮。
+# 旧行为被 gate_turn 判 blocked 直接停机，整场会话结束、必须人工点返回大厅。
+# ---------------------------------------------------------------------------
+MATCH_END_BOXES = ((246, 777, 554, 872), (646, 777, 954, 872),
+                   (1046, 764, 1413, 873))
+
+
+def match_end_frame() -> np.ndarray:
+    image = np.zeros((900, 1600, 3), dtype=np.uint8)
+    image[:, :] = (48, 96, 60)
+    for x0, y0, x1, y1 in MATCH_END_BOXES:
+        cv2.rectangle(image, (x0, y0), (x1, y1), (95, 205, 170), -1)
+    return image
+
+
+def test_match_end_clicks_return_lobby_once(tmp_path):
+    """牌局结束 → 点返回大厅（一次），并清空本局所有跨帧状态。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop._bright_subset_advice = (loop.round.seq, 24, 2)
+
+    event = loop._match_end_event(
+        match_end_frame(), Path(tmp_path) / "f.png", {}, 0.0)
+
+    assert event is not None and event["event"] == "left_table"
+    assert len(tap.execute_leave_calls) == 1
+    assert event["match_end"]["present"] is True
+    assert loop._left_table is True
+    assert loop._bright_subset_advice is None
+    # 再调一次不许重复点
+    assert loop._match_end_event(match_end_frame(), Path(tmp_path) / "f2.png",
+                                 {}, 0.0) is None
+    assert len(tap.execute_leave_calls) == 1
+
+
+def test_match_end_ignores_normal_table(tmp_path):
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    plain = np.zeros((900, 1600, 3), dtype=np.uint8)
+    plain[:, :] = (48, 96, 60)
+
+    assert loop._match_end_event(plain, Path(tmp_path) / "f.png", {}, 0.0) is None
+    assert tap.execute_leave_calls == []
+
+
+def test_after_leaving_blocked_frame_is_idle_not_stop(tmp_path):
+    """已返回大厅后，即使画面被判 blocked 也不许硬停机。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop._left_table = True
+
+    event = loop._match_end_event(
+        np.zeros((900, 1600, 3), dtype=np.uint8), Path(tmp_path) / "f.png",
+        {}, 0.0)
+
+    assert event is None
+    assert tap.execute_leave_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 促销弹窗（「限时优惠」）→ 关掉右上角菱形 ❌
+#
+# 弹窗盖住整屏：它必须比牌局结束、回合门禁更早判，否则下面所有读数都是
+# 弹窗上的像素。关闭通道与出牌通道完全隔离，且关了预算次数还在就停手。
+# 落点 (1466,190) 与 tests/test_promo_popup.py 的实机探针帧一致。
+# ---------------------------------------------------------------------------
+PROMO_CLOSE_CENTER = (1466, 190)
+PROMO_CLOSE_BOX = (1438, 160, 1495, 221)
+
+
+def promo_present(center=PROMO_CLOSE_CENTER) -> PromoPopupState:
+    """一帧「弹窗在屏且落点可信」的读数。"""
+    return PromoPopupState(
+        present=True, close_center=center, close_box=PROMO_CLOSE_BOX,
+        score=.983, scale=1.45, margin=.0, struct_ok=True,
+        reason="促销弹窗关闭按钮命中",
+    )
+
+
+def promo_absent() -> PromoPopupState:
+    return PromoPopupState(
+        present=False, score=.603, reason="模板分不足：0.603 < 0.9")
+
+
+def promo_unresolved() -> PromoPopupState:
+    """弹窗在屏但结构校验不过：只记弃权，绝不给落点。"""
+    return PromoPopupState(
+        present=True, close_center=None, close_box=None,
+        score=.94, scale=1.45, margin=.0, struct_ok=False,
+        reason="结构特征与模板不符，拒绝给出落点",
+    )
+
+
+def test_promo_popup_is_closed_once_and_logged(tmp_path, monkeypatch):
+    """弹窗帧 → 触发一次 execute_close_popup，台账记 popup_dismiss。"""
+    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+                        lambda _image: promo_present())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    event = loop.tick()
+
+    assert event["event"] == "popup_dismiss"
+    assert len(tap.execute_close_popup_calls) == 1
+    assert tap.execute_close_popup_calls[0]["point"] == PROMO_CLOSE_CENTER
+    assert event["promo_popup"]["present"] is True
+    assert event["promo_close_count"] == 1
+    logged = events_of(loop, "popup_dismiss")
+    assert len(logged) == 1
+    assert logged[0]["promo_popup"]["close_center"] == list(PROMO_CLOSE_CENTER)
+    assert loop.stopped is False
+
+
+def test_promo_popup_close_consumes_the_frame_without_discarding(
+        tmp_path, monkeypatch):
+    """关闭成功后本帧直接 return：绝不在弹窗还盖着的时候出牌。"""
+    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+                        lambda _image: promo_present())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    event = loop.tick()
+
+    assert event["event"] == "popup_dismiss"
+    assert tap.execute_calls == []               # 出牌通道零调用
+    assert tap.execute_claim_calls == []         # 行动行零调用
+    assert tap.execute_leave_calls == []         # 离桌通道零调用
+    assert tap.plan_calls == []
+    assert loop.actions_done == 0                # 关弹窗不算一次出牌
+
+
+def test_promo_popup_stuck_after_budget_stops_the_loop(tmp_path, monkeypatch):
+    """连续关闭 PROMO_CLOSE_BUDGET 次弹窗仍在 → 停手留证，不无限重试。"""
+    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+                        lambda _image: promo_present())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    for _ in range(auto_play_loop.PROMO_CLOSE_BUDGET):
+        assert loop.tick()["event"] == "popup_dismiss"
+        assert loop.stopped is False
+
+    stuck = loop.tick()
+
+    assert stuck["event"] == "stop"
+    assert stuck["gate"] == "promo_popup_stuck"
+    assert "promo_popup_stuck" in loop.stop_reason or "促销弹窗" in loop.stop_reason
+    # 预算用尽后一次都不许多点。
+    assert len(tap.execute_close_popup_calls) == auto_play_loop.PROMO_CLOSE_BUDGET
+    assert loop.tick()["event"] == "skip"
+    assert len(tap.execute_close_popup_calls) == auto_play_loop.PROMO_CLOSE_BUDGET
+
+
+def test_promo_popup_unresolved_abstains_without_clicking(
+        tmp_path, monkeypatch):
+    """弹窗在屏但落点不可信 → 弃权、零点击，且本帧不进回合门禁。
+
+    门禁在这类帧上求值大概率判 ``blocked``，那会既清 ``turn_history`` 又
+    直接 ``_stop("gate_turn")`` 把整场打停——所以弹窗在屏的帧必须被拦在
+    门禁之前，宁可空转等弹窗变可读，也不能用弹窗像素去做停机判定。
+    """
+    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+                        lambda _image: promo_unresolved())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    event = loop.tick()
+
+    assert event["event"] == "promo_popup_abstain"
+    assert event["status"] == "abstain"
+    assert tap.execute_close_popup_calls == []
+    assert tap.execute_calls == []
+    # 门禁没看过这一帧：台账里既没有 turn_gate，也留了跳过的留证。
+    assert "turn_gate" not in event
+    assert event["turn_gate_skipped"] == "promo_popup_on_screen"
+    assert len(events_of(loop, "promo_popup_abstain")) == 1
+    assert events_of(loop, "promo_popup_abstain")[0]["promo_popup"]["present"] is True
+    assert loop.stopped is False
+
+
+def test_promo_popup_frame_never_reaches_the_turn_gate(tmp_path, monkeypatch):
+    """弹窗帧不进回合门禁求值：turn_history 不被清，也不会被 blocked 打停。"""
+    popup_on = {"on": False}
+    monkeypatch.setattr(
+        auto_play_loop, "read_promo_popup",
+        lambda _image: promo_present() if popup_on["on"] else promo_absent())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    settle(loop)                                  # 无弹窗：先攒出连续帧历史
+    history_before = list(loop.turn_history)
+    assert history_before
+
+    popup_on["on"] = True
+    event = loop.tick()
+
+    assert event["event"] == "popup_dismiss"
+    assert "turn_gate" not in event               # 门禁确实没求值
+    assert event["turn_gate_skipped"] == "promo_popup_on_screen"
+    assert loop.turn_history == history_before    # 帧历史原样保住
+    assert loop.stopped is False
+    assert len(tap.execute_close_popup_calls) == 1
+
+
+def test_no_promo_popup_leaves_the_original_path_untouched(tmp_path,
+                                                            monkeypatch):
+    """无弹窗 → 完全走原链路；弹窗通道零调用，计数保持清零。"""
+    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+                        lambda _image: promo_absent())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    settle(loop)
+
+    event = loop.tick()
+
+    assert event["event"] == "action"
+    assert tap.execute_close_popup_calls == []
+    assert len(tap.execute_calls) == 1
+    assert loop._promo_close_count == 0
+    assert events_of(loop, "popup_dismiss") == []
+    assert events_of(loop, "promo_popup_abstain") == []
+
+
+def test_promo_close_budget_resets_on_new_round(tmp_path, monkeypatch):
+    """换局清零同屏预算：新一局的弹窗重新起算，不继承上一局的关闭次数。
+
+    弹窗全程在屏（这样"没弹窗就清零"那条路径不会掩盖换局清零）：
+    第一局关 1 次 → 换局帧清零 → 换局帧自己再关 1 次，所以计数停在 1
+    而不是 2。中间那帧是 round_suspect，门禁禁止任何点击。
+    """
+    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+                        lambda _image: promo_present())
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True,
+        analyses=[advise(status="wait", suggested_boxes=[])],
+        hud=[(HUD_A, None), (HUD_B, None), (HUD_B, None)])
+
+    assert loop.tick()["event"] == "popup_dismiss"
+    assert loop._promo_close_count == 1
+    assert loop.round.seq == 1
+
+    suspect = loop.tick()
+    assert suspect["round_signal"]["state"] == "round_suspect"
+    assert loop._promo_close_count == 1          # 疑似换局帧：零点击
+
+    assert loop.tick()["event"] == "popup_dismiss"
+    assert loop.round.seq == 2
+    assert loop._promo_close_count == 1          # 换局已清零，不继承上一局
+    assert len(tap.execute_close_popup_calls) == 2
+    assert loop.stopped is False

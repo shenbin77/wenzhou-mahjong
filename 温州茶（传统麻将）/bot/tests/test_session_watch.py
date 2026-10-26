@@ -530,10 +530,10 @@ def test_manager_login_holds_and_alerts() -> None:
     assert mgr.state is ManagerState.HOLD
 
 
-def test_manager_waiting_room_never_publishes_a_tap_plan() -> None:
+def test_manager_waiting_room_defers_to_dedicated_session_entry() -> None:
     mgr = SessionManager()
     plan = mgr.step(_watch(WatchState.WAITING_ROOM))
-    assert plan["action"] == "wait_for_manual_start"
+    assert plan["action"] == "wait_for_session_entry"
     assert plan["kind"] == "none"
     assert plan["execute"] is False
     assert mgr.state is ManagerState.WAITING_ROOM

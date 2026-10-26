@@ -105,6 +105,57 @@ def test_window_start_fails_loud_when_jsonl_cannot_be_created(tmp_path: Path):
     assert "disk full" in getattr(window, "_status", "")
 
 
+def test_stop_writes_reason_row_before_dropping_pipeline(tmp_path: Path):
+    """A gate-blocked follow must leave a kind=stop row, not just the header."""
+    window = assist_window.TeaAssistWindow.__new__(assist_window.TeaAssistWindow)
+    pipeline = FollowPipeline(tmp_path / "sess", mode="tea_2p", enabled=True)
+    path = pipeline.start({"account": "玉姐"})
+    window._follow_pipeline = pipeline
+    window.continuous = True
+    window.continuous_round = None
+    window.continuous_caishen = None
+    window.display_source = "live"
+    window.start_button = None
+    window.timer = None
+    window.status = _Var("绑定已失效（账号不一致）；点“绑定”更新后再开始跟随。")
+    window.live_info = _Var("")
+    window._last_stop_reason = window.status.get()
+    # 只验证台账写入；界面刷新与本次改动无关，置空即可。
+    window._refresh_binding_views = lambda: None
+    window._invalidate_live_advice = lambda: None
+    window._style_start_button = None
+    window._set_hud_expanded = None
+    window._apply_preview_layout = None
+    window._set_operational_status = None
+    # Avoid a background review racing the direct end-to-end assertion below.
+    window._schedule_session_review = lambda _session_dir: None
+    assist_window.TeaAssistWindow.stop(window)
+    rows = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["kind"] == "session_header"
+    assert len(rows) == 2
+    assert rows[-1]["event"] == "stop"
+    assert rows[-1]["gates"]["stop_kind"] is None
+    assert rows[-1]["decision"]["kind"] == "none"
+    assert "绑定已失效" in rows[-1]["vision"]["reason"]
+    assert window._follow_pipeline is None
+
+    from auto_review import review_session
+
+    summary = review_session(path.parent)
+    stops = [issue for issue in summary["issues"]
+             if issue["category"] == "stop"]
+    assert len(stops) == 1
+    assert stops[0]["source"] == "follow_session.jsonl"
+    assert stops[0]["line"] == 2
+    assert stops[0]["excerpt"]["gate"] is None
+    assert "绑定已失效" in stops[0]["excerpt"]["reason"]
+    assert "绑定已失效" in Path(summary["report_md"]).read_text(encoding="utf-8")
+
+
 class _Var:
     def __init__(self, value=""):
         self._v = value

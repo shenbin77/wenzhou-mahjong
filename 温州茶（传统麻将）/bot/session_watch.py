@@ -1016,7 +1016,8 @@ NOMINAL_TARGETS = {
 
 #: 点击白名单（骨架登记，执行层启用时只许这三项，且每项点后必须验状态迁移）：
 #: W1 结算屏→返回大厅；W2 大厅→点桌子图；W3 规则窗→右上 X。
-#: 充值/开局直点/分享战绩/离桌确认等不在白名单内，永久禁止（开发档案硬规则）。
+#: 本只读规划器仍不发布开局点击；开始游戏仅归 lobby_start 专用执行器。
+#: 充值/分享战绩/离桌确认等不在任何白名单内，永久禁止。
 CLICK_WHITELIST = ("return_to_lobby", "enter_table", "dismiss_rules_x")
 
 
@@ -1107,8 +1108,9 @@ class SessionManager:
             self.state = ManagerState.WAITING_ROOM
             self.enter_retries = 0
             return self._emit({
-                "action": "wait_for_manual_start", "kind": "none",
-                "reason": "waiting_room：两端坐下与开始游戏由用户确认；只监控，不点击",
+                "action": "wait_for_session_entry", "kind": "none",
+                "reason": ("waiting_room：只读管家不点击；用户显式启动的专用场次入口"
+                           "负责身份/玩法/对手/按钮复核与单次开始"),
             })
         if ws is WatchState.IN_GAME:
             self.state = ManagerState.IN_GAME

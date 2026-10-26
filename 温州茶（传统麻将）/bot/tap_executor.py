@@ -101,6 +101,15 @@ from tea_bot import _TEMPLATE_DIR  # noqa: F401  # 仅复用已验证的茶模�
 from tile_vision import TILE_IDS, TileVision
 from chi_panel_vision import ChiPanelState, read_chi_panel
 from invite_dialog import InvitationState, read_invitation
+from lobby_autostart import (
+    RoomState,
+    StartPlan,
+    TABLE_BAND,
+    plan_start,
+    read_lobby_room,
+)
+from match_end import MatchEndState, read_match_end
+from promo_popup import PromoPopupState, read_promo_popup
 from turn_gate import detect_settled_screen
 
 import panel_recovery
@@ -161,6 +170,15 @@ SELECTION_CANCEL_ROI_X_MAX: int = 1580
 # 落点必须离实测圆盘框边缘至少 2px：压边的点不是"稳稳落在圆盘上"。
 CLAIM_BOX_EDGE_MARGIN: int = 2
 
+# 「同槽位新窗口」判定：2 人局连续行动时，吃/碰/杠 圆盘与「过」圆盘在屏幕上
+# 落在**完全相同**的槽位（实测 2026-10-25 21:54 帧 20261025_215415：点击前
+# 吃+过、点击后 杠+过，两帧按钮框逐像素一致，但剩牌 65→64、手牌与牌河都变了）。
+# 只看目标圆盘会把「旧窗口关闭 + 新窗口同槽位出现」误判成「点击未生效」而整局
+# 停手。此时改看**行动行带以外**的画面变化：牌局确实推进了才算点击送达。
+CLAIM_OUTSIDE_ACTION_BANDS: tuple[tuple[int, int], ...] = ((0, 500), (700, 900))
+CLAIM_OUTSIDE_MEAN_MIN: float = 1.0
+CLAIM_OUTSIDE_RATIO_MIN: float = 0.008
+
 #: 永不放行的圆盘种类。``取消`` 点了会不可逆地中断进行中的选择（吃面板）。
 CLAIM_KIND_BLACKLIST: frozenset[str] = frozenset({KIND_CANCEL})
 
@@ -202,6 +220,40 @@ PANEL_ROI_Y_MAX: int = 700
 
 #: 吃候选面板点组动作名（只在本模块与吃链台账之间使用）。
 PANEL_ACTION: str = "chi_select"
+
+#: 促销弹窗关闭动作名（只在本模块与代打主循环的弹窗台账之间使用）。
+PROMO_POPUP_ACTION: str = "close_promo_popup"
+
+#: 开新场（比赛场房间 → 点空座入座）动作名。
+OPEN_TABLE_ACTION: str = "open_table"
+
+# ---------------------------------------------------------------------------
+# 开新场（房间入座）通道的独立几何白名单
+#
+# 与出牌（手牌 y≥720）、行动行（x∈[740,1520]、y∈[560,660]）、吃候选面板
+# （x∈[560,1400]、y∈[500,700]）**互不相干**：房间空座加号实测在 (115,267)
+# 一带，既不在手牌横排也不在行动行/面板带上，借任何一条既有通道都等于把
+# 安全边界交给巧合。所以这条通道自带桌位带 + 禁区两套几何，全部照
+# ``lobby_autostart`` 的实测常量对齐。
+# ---------------------------------------------------------------------------
+
+#: 桌位带（xyxy）：与 ``lobby_autostart.TABLE_BAND`` 同口径，出带即拒绝。
+LOBBY_OPEN_BAND: tuple[int, int, int, int] = tuple(int(v) for v in TABLE_BAND)
+
+#: 房间画面上绝不能点的五个矩形（1600x900 实测，来源
+#: ``_takeover/lobby_autostart_wiring.md`` §5；与 ``lobby_autostart`` 的测试
+#: ``NO_TAP_ZONES`` 一一对应）。误点后果依次是：挡屏 / 开二级页 / 拉起支付 /
+#: 直接结束比赛场 / 跳出活动页。
+LOBBY_NO_TAP_ZONES: tuple[tuple[int, int, int, int], ...] = (
+    (1420, 740, 1600, 900),   # 右下绿色「功能」圆盘（实测中心 1528,825）
+    (1470, 10, 1600, 290),    # 右侧竖排图标：会员/成员详情/战绩/排行榜/设置/更多
+    (470, 45, 595, 105),      # 顶部「充值」(528,73) —— 最危险的一个
+    (1520, 140, 1600, 280),   # 房主「闭赛」(1558,205) / 成员「分享」(1528,205)
+    (1380, 90, 1500, 190),    # 「大海钓场」活动入口 (1455,164)
+)
+
+#: 房间入座计划的两帧中心漂移上限（空座卡 90x112，加号中心允许小抖动）。
+LOBBY_OPEN_MAX_DRIFT: int = 25
 
 
 class TapAborted(RuntimeError):
@@ -706,10 +758,19 @@ class TapExecutor:
                 read_claims(after))
             claim_record["action_ui_after"] = self._action_ui_evidence(after)
             if not metrics["changed"]:
-                raise TapUnverified(
-                    f"行动行点击 ({x},{y}) 后目标圆盘区域画面未变化"
-                    f"（diff_mean={metrics['diff_mean']}, "
-                    f"changed_ratio={metrics['changed_ratio']}），未证明点击生效")
+                # 同槽位新窗口：目标圆盘像素不变，但行动行以外已经推进
+                # （牌河/手牌/剩余数变化）→ 旧窗口已关闭、新窗口落在同一
+                # 槽位，点击已送达。整幅画面都没变才判「未证明点击生效」。
+                wide = self._outside_action_row_metrics(before, after)
+                claim_record["same_slot_new_window"] = wide
+                if not wide["changed"]:
+                    raise TapUnverified(
+                        f"行动行点击 ({x},{y}) 后目标圆盘区域画面未变化"
+                        f"（diff_mean={metrics['diff_mean']}, "
+                        f"changed_ratio={metrics['changed_ratio']}），未证明点击生效")
+                claim_record["claim_result"] = "same_slot_new_window"
+            same_slot_new_window = bool(
+                claim_record.get("claim_result") == "same_slot_new_window")
             # 审计 A（2026-10-27 Codex 只读审计）：按钮区域变化/按钮消失都不能
             # 单独证明动作成功——动画结束、被其它 UI 覆盖、游戏超时取消都有
             # 同样的像素表现。本模块只证明"点击送达且 UI 有响应"：目标圆盘
@@ -726,7 +787,7 @@ class TapExecutor:
                     b for b in still_there
                     if b.get("kind") == KIND_CANCEL
                 ]
-            if still_there:
+            if still_there and not same_slot_new_window:
                 raise TapUnverified(
                     f"行动行点击 ({x},{y}) 后目标圆盘仍实测存在于 "
                     f"{still_there[0]['box']}，点击没有生效，不重试")
@@ -742,6 +803,8 @@ class TapExecutor:
             "claim_buttons_after": len(claim_record["buttons_after"]),
             # 只证明到 UI 层：点击送达、画面响应、圆盘消失。
             "ui_responded": True,
+            # 同槽位新窗口：点击后旧窗口关闭、新行动窗口落在同一槽位。
+            "same_slot_new_window": same_slot_new_window,
             # 语义级（真的碰成了/胡进结算了）本模块证明不了，绝不谎称。
             "semantic_verified": False,
             "semantic_verifier": "action_policy.verify_after_click",
@@ -851,6 +914,418 @@ class TapExecutor:
             "box": list(box), "click_metrics": metrics,
             "verified": True,
             "reason": "邀请文案与矩形取消按钮双帧确认，点击后邀请文案消失",
+        }
+        evidence.dump("verified", outcome["reason"])
+        return outcome
+
+    # ------------------------------------------------------------------
+    # 牌局结束 → 返回大厅：固定版式专用白名单，不借道出牌/行动行任何一道闸
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_match_end_leave(
+        state: MatchEndState,
+        point: tuple[int, int] | None,
+    ) -> tuple[int, int, tuple[int, int, int, int]]:
+        if not isinstance(state, MatchEndState) or not state.present:
+            raise TapRejected("本帧没有实测到牌局结束画面，拒绝点击")
+        if state.leave_box is None or len(state.leave_box) != 4:
+            raise TapAborted("牌局结束画面缺少「返回大厅」按钮框，证据不完整")
+        box = tuple(int(v) for v in state.leave_box)
+        x = (box[0] + box[2]) // 2
+        y = (box[1] + box[3]) // 2
+        if point is not None:
+            requested = (int(point[0]), int(point[1]))
+            if not TapExecutor._claim_point_in_box(requested, box):
+                raise TapRejected(
+                    f"返回大厅坐标 {requested} 不在 fresh 帧实测按钮框 "
+                    f"{list(box)} 内，拒绝点击")
+            if max(abs(requested[0] - x), abs(requested[1] - y)) > 25:
+                raise TapRejected(
+                    f"返回大厅按钮两帧中心漂移超过 25px：旧 {requested} / 新 "
+                    f"({x},{y})，拒绝点击")
+            return requested[0], requested[1], box
+        return x, y, box
+
+    def execute_leave_table(
+        self,
+        point: tuple[int, int] | None = None,
+        *,
+        image: np.ndarray | None = None,
+        session_dir: str | Path | None = None,
+        verify_delay: float | None = None,
+        verify_frames: int = 3,
+    ) -> dict:
+        """牌局结束（局数打满）时点「返回大厅」。
+
+        与出牌通道**完全分离**：出牌通道只校验"点在某个手牌框内"，而
+        (400,824) 这类按钮中心恰好会落在手牌框内，借道等于把安全边界交给
+        巧合。这里只放行 ``match_end.read_match_end`` 实测到的那个按钮框。
+
+        真点时重新截屏，要求牌局结束版式仍在、按钮中心相对旧帧漂移 ≤25px；
+        点击后要求连续 2 帧不再命中牌局结束版式才算生效。**不命中就不点、
+        点了没变化就抛 TapUnverified，绝不补点第二下。**
+        """
+        dump_dir = self._resolve_claim_session_dir(session_dir)
+        if not self._enabled:
+            if image is None:
+                raise TapAborted("返回大厅 dry_run 必须显式传 image，拒绝盲点")
+            state = read_match_end(image)
+            x, y, box = self._resolve_match_end_leave(state, point)
+            return {
+                "executed": False, "dry_run": True, "stage": "plan",
+                "action": "leave_table", "tap": [x, y], "box": list(box),
+                "match_end": state.ledger(),
+            }
+
+        evidence = _TapEvidence(dump_dir, tile_label="leave_table")
+        try:
+            self._require_game_foreground()
+            before = self._screenshot()
+            evidence.before = before
+            state = read_match_end(before)
+            x, y, box = self._resolve_match_end_leave(state, point)
+            evidence.tap = [x, y]
+            evidence.box = list(box)
+            evidence.claim = {
+                "action": "leave_table",
+                "control": "layout_return_lobby",
+                "source": "match_end.read_match_end",
+                "match_end_before": state.ledger(),
+                "discard_channel_reused": False,
+            }
+            self._require_game_foreground()
+            self._tap(x, y)
+            delay = self.verify_delay if verify_delay is None else max(
+                0.0, float(verify_delay))
+            if delay > 0:
+                time.sleep(delay)
+            clear_frames = 0
+            last_state = None
+            for _attempt in range(max(1, int(verify_frames))):
+                after = self._screenshot()
+                last_state = read_match_end(after)
+                if last_state.present:
+                    clear_frames = 0
+                else:
+                    clear_frames += 1
+                    if clear_frames >= 2:
+                        break
+                time.sleep(max(0.25, delay or 0.0))
+            evidence.after = after
+            evidence.claim["match_end_after"] = last_state.ledger()
+            if clear_frames < 2:
+                raise TapUnverified(
+                    f"点返回大厅 ({x},{y}) 后牌局结束版式仍在/未见连续两帧消失，"
+                    "不补点，交人工确认")
+        except Exception as exc:  # noqa: BLE001 - 先落证据，原异常照抛
+            evidence.dump(type(exc).__name__, str(exc))
+            raise
+
+        outcome = {
+            "executed": True, "dry_run": False, "stage": "verified",
+            "action": "leave_table", "tap": [x, y], "box": list(box),
+            "verified": True,
+            "reason": "牌局结束版式双帧确认，点击后连续两帧消失",
+            "match_end_after": last_state.ledger() if last_state else None,
+        }
+        evidence.dump("verified", outcome["reason"])
+        return outcome
+
+    # ------------------------------------------------------------------
+    # 促销弹窗关闭入口：菱形 ❌ 专用白名单，与出牌/行动行/离桌互不借道
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_promo_close(
+        state: PromoPopupState,
+        point: tuple[int, int] | None,
+    ) -> tuple[int, int, tuple[int, int, int, int]]:
+        if not isinstance(state, PromoPopupState) or not state.present:
+            raise TapRejected("本帧没有实测到促销弹窗，拒绝点击")
+        if state.close_center is None or state.close_box is None:
+            raise TapAborted(
+                f"发现促销弹窗，但关闭按钮证据不完整：{state.reason}")
+        center = tuple(int(v) for v in state.close_center)
+        box = tuple(int(v) for v in state.close_box)
+        if point is not None:
+            requested = (int(point[0]), int(point[1]))
+            if not TapExecutor._claim_point_in_box(requested, box):
+                raise TapRejected(
+                    f"促销弹窗关闭坐标 {requested} 不在 fresh 帧实测按钮框 "
+                    f"{list(box)} 内，拒绝点击")
+            if max(abs(requested[0] - center[0]),
+                   abs(requested[1] - center[1])) > 12:
+                raise TapRejected(
+                    f"促销弹窗关闭按钮两帧中心漂移超过 12px：旧 {requested} / "
+                    f"新 {center}，拒绝点击")
+        return center[0], center[1], box
+
+    def execute_close_popup(
+        self,
+        point: tuple[int, int] | None = None,
+        *,
+        image: np.ndarray | None = None,
+        session_dir: str | Path | None = None,
+        verify_delay: float | None = None,
+        verify_frames: int = 3,
+    ) -> dict:
+        """关掉「限时优惠」促销弹窗的菱形 ❌ 按钮。
+
+        与出牌通道**完全分离**：关闭按钮在 (1466,190) 一带，既不在手牌横排
+        （y≥720）也不在行动行，借任何一条既有通道都等于把安全边界交给巧合。
+        这里只放行 ``promo_popup.read_promo_popup`` 实测到的那个按钮框，
+        ``close_center`` 为空（模板分过线但结构校验不过）一律不点。
+
+        真点时重新截屏，要求弹窗仍在、按钮中心相对旧帧漂移 ≤12px；点击后
+        要求**连续 2 帧**不再命中弹窗版式才算生效。不命中就不点、点了没消失
+        就抛 :class:`TapUnverified`，**绝不补点第二下**——弹窗后面盖着什么
+        由下一帧重新判定，本模块不猜。
+        """
+        dump_dir = self._resolve_claim_session_dir(session_dir)
+        if not self._enabled:
+            if image is None:
+                raise TapAborted(
+                    "促销弹窗关闭 dry_run 必须显式传 image，拒绝盲点")
+            state = read_promo_popup(image)
+            x, y, box = self._resolve_promo_close(state, point)
+            return {
+                "executed": False, "dry_run": True, "stage": "plan",
+                "action": PROMO_POPUP_ACTION, "tap": [x, y], "box": list(box),
+                "promo_popup": state.ledger(),
+            }
+
+        evidence = _TapEvidence(dump_dir, tile_label=PROMO_POPUP_ACTION)
+        try:
+            self._require_game_foreground()
+            before = self._screenshot()
+            evidence.before = before
+            state = read_promo_popup(before)
+            x, y, box = self._resolve_promo_close(state, point)
+            evidence.tap = [x, y]
+            evidence.box = list(box)
+            evidence.claim = {
+                "action": PROMO_POPUP_ACTION,
+                "control": "promo_close_x",
+                "source": "promo_popup.read_promo_popup",
+                "channel": "promo_popup",
+                "promo_popup_before": state.ledger(),
+                # 与出牌通道隔离的显式声明：本入口不复用 validate_target /
+                # validate_claim_point / 离桌版式的任何一道闸。
+                "discard_channel_reused": False,
+            }
+            self._require_game_foreground()
+            self._tap(x, y)
+            delay = self.verify_delay if verify_delay is None else max(
+                0.0, float(verify_delay))
+            if delay > 0:
+                time.sleep(delay)
+            clear_frames = 0
+            last_state = None
+            after = before
+            for _attempt in range(max(1, int(verify_frames))):
+                after = self._screenshot()
+                last_state = read_promo_popup(after)
+                if last_state.present:
+                    clear_frames = 0
+                else:
+                    clear_frames += 1
+                    if clear_frames >= 2:
+                        break
+                time.sleep(max(0.25, delay or 0.0))
+            evidence.after = after
+            evidence.claim["promo_popup_after"] = (
+                last_state.ledger() if last_state else None)
+            if clear_frames < 2:
+                raise TapUnverified(
+                    f"点促销弹窗关闭 ({x},{y}) 后弹窗仍在/未见连续两帧消失，"
+                    "不补点，交人工确认")
+        except Exception as exc:  # noqa: BLE001 - 先落证据，原异常照抛
+            evidence.dump(type(exc).__name__, str(exc))
+            raise
+
+        outcome = {
+            "executed": True, "dry_run": False, "stage": "verified",
+            "action": PROMO_POPUP_ACTION, "tap": [x, y], "box": list(box),
+            "verified": True,
+            "reason": "促销弹窗版式双帧确认，点击后连续两帧不再命中",
+            "promo_popup_after": last_state.ledger() if last_state else None,
+        }
+        evidence.dump("verified", outcome["reason"])
+        return outcome
+
+    # ------------------------------------------------------------------
+    # 开新场入口：比赛场房间 → 点空座「+」入座。房间专用白名单，
+    # 与出牌 / 行动行 / 离桌 / 促销弹窗 / 吃面板 五条通道互不借道
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_open_table(
+        state: RoomState,
+        plan: StartPlan | None,
+        point: tuple[int, int] | None,
+    ) -> tuple[int, int, tuple[int, int, int, int]]:
+        """把「房间 + 入座计划」折算成一个可点的落点；任一校验不过即拒绝。
+
+        与 :meth:`validate_target`（手牌 y≥720）、:meth:`validate_claim_point`
+        （行动行）、:meth:`validate_chi_panel_point`（吃面板）**没有任何调用
+        关系**：房间空座加号实测在 (115,267) 一带，套任何一条既有白名单都会
+        被误杀或（更糟）被巧合放行。这里只信 ``lobby_autostart`` 自己测出来的
+        空座卡框，并再校验一次落点几何（模块内已经校过一遍，这里是双保险）。
+        """
+        if (not isinstance(state, RoomState) or not state.present
+                or state.waiting_room):
+            raise TapRejected(
+                "本帧没有实测到比赛场房间画面"
+                f"（{getattr(state, 'reason', '')}），拒绝点击")
+        if not isinstance(plan, StartPlan) or plan.action != "join_table":
+            raise TapRejected("房间画面没有给出可入座的空座计划，拒绝点击")
+        if plan.box is None or len(plan.box) != 4:
+            raise TapAborted("入座计划缺少空座卡框，证据不完整")
+        if plan.evidence.get("unit") != 0:
+            raise TapRejected(
+                f"入座计划落点在桌位组 {plan.evidence.get('unit')}：只允许点最左"
+                "桌位组 0，右边那组点下去是另建一桌，拒绝点击")
+        box = tuple(int(v) for v in plan.box)
+        band = LOBBY_OPEN_BAND
+        if not (band[0] <= box[0] and box[2] <= band[2]
+                and band[1] <= box[1] and box[3] <= band[3]):
+            raise TapRejected(
+                f"空座卡框 {list(box)} 跑出桌位带 {list(band)}，拒绝点击")
+        target = tuple(int(v) for v in plan.point)
+        if not TapExecutor._claim_point_in_box(target, box):
+            raise TapRejected(
+                f"入座落点 {list(target)} 不在 fresh 帧实测空座卡框 "
+                f"{list(box)} 内，拒绝点击")
+        if point is not None:
+            requested = (int(point[0]), int(point[1]))
+            if not TapExecutor._claim_point_in_box(requested, box):
+                raise TapRejected(
+                    f"入座坐标 {list(requested)} 不在 fresh 帧实测空座卡框 "
+                    f"{list(box)} 内，拒绝点击")
+            if max(abs(requested[0] - target[0]),
+                   abs(requested[1] - target[1])) > LOBBY_OPEN_MAX_DRIFT:
+                raise TapRejected(
+                    f"入座落点两帧漂移超过 {LOBBY_OPEN_MAX_DRIFT}px：旧 "
+                    f"{list(requested)} / 新 {list(target)}，拒绝点击")
+            target = requested
+        for zone in LOBBY_NO_TAP_ZONES:
+            x0, y0, x1, y1 = zone
+            if x0 <= target[0] <= x1 and y0 <= target[1] <= y1:
+                raise TapRejected(
+                    f"入座落点 {list(target)} 落在房间实测禁区 {list(zone)} 内，"
+                    "拒绝点击")
+        return target[0], target[1], box
+
+    def execute_open_table(
+        self,
+        point: tuple[int, int] | None = None,
+        *,
+        image: np.ndarray | None = None,
+        session_dir: str | Path | None = None,
+        verify_delay: float | None = None,
+        verify_frames: int = 4,
+        require_join_existing: bool = True,
+    ) -> dict:
+        """比赛场房间 → 点空座「+」入座（开新场）。
+
+        与出牌通道**完全分离**：房间空座加号在 (115,267) 一带，既不在手牌横排
+        （y≥720）也不在行动行带内；出牌通道只校验"点在某个手牌框内"，借道等于
+        把安全边界交给巧合。这里只放行 ``lobby_autostart.plan_start`` 实测到的
+        那个空座卡框，并再校验一次「unit==0 / 在自身框内 / 框在桌位带内 /
+        不在五个禁区内」。
+
+        **房卡门写死在这里**：``require_join_existing=True``（默认）时，只有
+        ``plan.evidence["join_existing"]`` 为真才放行——也就是**只并入已有空座**
+        （不扣房卡）。需要新建桌一律 ``TapRejected``：房卡余额目前一个数都
+        读不出来（``session_watch`` 返回 ``digit_templates_incomplete``），
+        在看不见余额时建桌会把房卡悄悄打光。
+
+        真点时重新截屏，要求房间仍在、入座计划仍在、落点漂移 ≤
+        :data:`LOBBY_OPEN_MAX_DRIFT` px；点击后要求**连续 2 帧**不再满足
+        "房间且有空座"才算生效。不命中就不点、点了没变化就抛
+        :class:`TapUnverified`，**绝不补点第二下**——实测点空座后 1 秒画面
+        仍长得像房间（``lobby_probe/011`` 是 units=2 / seats=3），没有这条
+        就会连点、多建桌。
+        """
+        dump_dir = self._resolve_claim_session_dir(session_dir)
+
+        def _resolve(before: np.ndarray,
+                     requested: tuple[int, int] | None):
+            state = read_lobby_room(before)
+            plan = plan_start(before)
+            if (require_join_existing and plan is not None
+                    and not plan.evidence.get("join_existing", False)):
+                raise TapRejected(
+                    "房卡读数不可用（session_watch: digit_templates_incomplete），"
+                    "只允许并入已有空座；这一下是新建桌、会扣房卡，拒绝点击")
+            return state, plan, self._resolve_open_table(state, plan, requested)
+
+        if not self._enabled:
+            if image is None:
+                raise TapAborted("开新场 dry_run 必须显式传 image，拒绝盲点")
+            state, plan, (x, y, box) = _resolve(image, point)
+            return {
+                "executed": False, "dry_run": True, "stage": "plan",
+                "action": OPEN_TABLE_ACTION, "tap": [x, y], "box": list(box),
+                "lobby_room": state.ledger(),
+                "lobby_plan": plan.ledger() if plan else None,
+            }
+
+        evidence = _TapEvidence(dump_dir, tile_label=OPEN_TABLE_ACTION)
+        try:
+            self._require_game_foreground()
+            before = self._screenshot()
+            evidence.before = before
+            state, plan, (x, y, box) = _resolve(before, point)
+            evidence.tap = [x, y]
+            evidence.box = list(box)
+            evidence.claim = {
+                "action": OPEN_TABLE_ACTION,
+                "control": "lobby_seat_plus",
+                "source": "lobby_autostart.plan_start",
+                "channel": "lobby_open_table",
+                "lobby_room_before": state.ledger(),
+                "lobby_plan_before": plan.ledger() if plan else None,
+                "require_join_existing": bool(require_join_existing),
+                # 与出牌通道隔离的显式声明：本入口不复用 validate_target /
+                # validate_claim_point / 离桌 / 弹窗 / 吃面板任何一道闸。
+                "discard_channel_reused": False,
+            }
+            self._require_game_foreground()
+            self._tap(x, y)
+            delay = self.verify_delay if verify_delay is None else max(
+                0.0, float(verify_delay))
+            if delay > 0:
+                time.sleep(delay)
+            clear_frames = 0
+            last_state = None
+            after = before
+            for _attempt in range(max(1, int(verify_frames))):
+                after = self._screenshot()
+                last_state = read_lobby_room(after)
+                # 「房间且有空座」还在 → 清零重来；连续两帧不在才算生效。
+                if last_state.present and last_state.seats:
+                    clear_frames = 0
+                else:
+                    clear_frames += 1
+                    if clear_frames >= 2:
+                        break
+                time.sleep(max(0.25, delay or 0.0))
+            evidence.after = after
+            evidence.claim["lobby_room_after"] = (
+                last_state.ledger() if last_state else None)
+            if clear_frames < 2:
+                raise TapUnverified(
+                    f"点房间空座 ({x},{y}) 后画面仍是「房间且有空座」，"
+                    "不补点，交人工确认")
+        except Exception as exc:  # noqa: BLE001 - 先落证据，原异常照抛
+            evidence.dump(type(exc).__name__, str(exc))
+            raise
+
+        outcome = {
+            "executed": True, "dry_run": False, "stage": "verified",
+            "action": OPEN_TABLE_ACTION, "tap": [x, y], "box": list(box),
+            "verified": True,
+            "reason": "房间入座版式双帧确认，点击后连续两帧不再是「房间且有空座」",
+            "lobby_room_after": last_state.ledger() if last_state else None,
         }
         evidence.dump("verified", outcome["reason"])
         return outcome
@@ -1822,6 +2297,55 @@ class TapExecutor:
                 "raised": [item for item in items if item["raised"]],
                 "median_y1": median_y1, "lift_px": RAISED_BOX_LIFT_PX,
                 "selected_gate": gate.get("reason", "")}
+
+    @staticmethod
+    def _outside_action_row_metrics(
+        before: np.ndarray,
+        after: np.ndarray,
+    ) -> dict:
+        """量「行动圆盘槽位以外」的画面变化，证明牌局已推进（纯仪表化）。
+
+        只看 ``CLAIM_OUTSIDE_ACTION_BANDS`` 两条带（默认 y<500 与 y≥700），
+        刻意避开 y500-700 的圆盘槽位：同槽位新窗口时那一段本来就逐像素
+        相同，把它算进来只会稀释信号。
+
+        阈值依据 2026-10-25 21:54 实机真帧（``20261025_215415``，点击前
+        吃+过 / 点击后 杠+过、剩牌 65→64）：两条带合计均值差 2.16、显著
+        变化像素 2.52%；同一帧自比为 0。取观测值约一半作为下限。
+
+        Returns:
+            ``{"diff_mean", "changed_ratio", "changed", "bands"}``；帧缺失、
+            尺寸不一致或带为空时全部记 ``None``/``False``（fail-closed）。
+        """
+        metrics: dict = {"diff_mean": None, "changed_ratio": None,
+                         "changed": False,
+                         "bands": [list(band) for band in CLAIM_OUTSIDE_ACTION_BANDS]}
+        if (before is None or after is None
+                or not isinstance(before, np.ndarray)
+                or not isinstance(after, np.ndarray)
+                or before.shape != after.shape):
+            return metrics
+        height = int(before.shape[0])
+        first = (cv2.cvtColor(before, cv2.COLOR_BGR2GRAY)
+                 if before.ndim == 3 else before)
+        second = (cv2.cvtColor(after, cv2.COLOR_BGR2GRAY)
+                  if after.ndim == 3 else after)
+        strips = []
+        for top, bottom in CLAIM_OUTSIDE_ACTION_BANDS:
+            top = max(0, min(height, int(top)))
+            bottom = max(0, min(height, int(bottom)))
+            if bottom <= top:
+                continue
+            strips.append(cv2.absdiff(first[top:bottom], second[top:bottom]))
+        if not strips:
+            return metrics
+        diff = np.vstack(strips) if len(strips) > 1 else strips[0]
+        metrics["diff_mean"] = float(diff.mean())
+        metrics["changed_ratio"] = float((diff > 8).mean())
+        metrics["changed"] = (
+            metrics["diff_mean"] >= CLAIM_OUTSIDE_MEAN_MIN
+            and metrics["changed_ratio"] >= CLAIM_OUTSIDE_RATIO_MIN)
+        return metrics
 
     @staticmethod
     def _target_column_metrics(
