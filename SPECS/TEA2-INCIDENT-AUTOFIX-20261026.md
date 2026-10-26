@@ -24,11 +24,11 @@
 
 - `incident.json`：首故障、最新故障、版本、进程头、最近 30 条白名单结构化事件和脱敏证据引用；session 与 evidence 使用哈希/相对引用，不外发昵称目录、窗口标题或屏幕绝对坐标；
 - `README.md`：人读摘要；
-- 根 `index.json`：open／resolved 索引；
+- 根 `index.json`：`open`／`verification_pending`／`resolved` 索引；
 - `watchdog_status.json`：守护线程、设备映射和最近复盘状态；
 - `human-input\*.jsonl`：仅目标雷电窗口内的鼠标按下。
 
-不复制截图、原始日志、密钥、Token、Cookie、密码、聊天或无关文件。相同历史 fingerprint 幂等更新且已 resolved 不会被重扫重开；同一会话后续不同 line/fingerprint 可独立生成 open 包。修复并回归、实机同路径不再复现后才用 `mark_incident_resolved()` 写入解决说明。
+不复制截图、原始日志、密钥、Token、Cookie、密码、聊天或无关文件。相同历史 fingerprint 幂等更新且已 resolved 不会被重扫重开；同一会话后续不同 line/fingerprint 可独立生成 open 包。代码修复并完成离线回归、但同路径实机尚未复验时，使用 `mark_incident_verification_pending()`，既不让巡检重复修旧记录，也不谎称已解决；实机同路径不再复现后才用 `mark_incident_resolved()` 写入解决说明。
 
 ## 4. 产品接线
 
