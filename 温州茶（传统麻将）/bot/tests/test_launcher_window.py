@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -303,7 +304,7 @@ def test_pending_desktop_activation_opens_exactly_one_free_serial():
     assert opened == [("emulator-5556", "open")]
 
 
-def test_no_device_keeps_activation_pending_and_schedules_retry():
+def test_no_device_finishes_activation_without_background_retry():
     launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
     launcher._activation_pending = True
     launcher._closed = False
@@ -311,79 +312,148 @@ def test_no_device_keeps_activation_pending_and_schedules_retry():
     launcher._rows = []
     messages = []
     launcher.status_var = SimpleNamespace(set=messages.append)
-    scheduled = []
-    launcher._schedule_empty_refresh = lambda: scheduled.append(True)
 
     launcher._run_pending_activation()
 
-    assert launcher._activation_pending is True
-    assert scheduled == [True]
-    assert "自动等待" in messages[-1]
+    assert launcher._activation_pending is False
+    assert "启动雷电＋辅助器" in messages[-1]
 
 
-def test_recovery_opens_only_online_bound_desired_profile_once():
+def test_launcher_has_no_periodic_device_retry_or_background_restore():
+    assert not hasattr(manager.MahjongLauncher, "_schedule_empty_refresh")
+    assert not hasattr(manager.MahjongLauncher, "_recover_bound_assistants")
+
+
+@pytest.mark.parametrize(("row", "expected"), [
+    (manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None,
+                       online=False), True),
+    (manager.DeviceRow("emulator-5554", None, None, None,
+                       online=False), False),
+    (manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None,
+                       online=True), False),
+    (manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", 1200,
+                       online=False), True),
+])
+def test_offline_start_button_requires_saved_offline_free_profile(row, expected):
+    assert manager.can_start_offline_device(row) is expected
+
+
+def test_start_ldplayer_then_opens_same_serial_assistant(monkeypatch):
+    calls = []
+
+    def fake_start(serial, *, ldconsole, online_serials):
+        calls.append((serial, ldconsole, tuple(online_serials())))
+        return SimpleNamespace(ok=True, status="started", detail="")
+
+    monkeypatch.setitem(
+        sys.modules, "ldplayer_control",
+        SimpleNamespace(start_and_wait_online=fake_start))
+    monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
+    monkeypatch.setattr(
+        manager, "connected_devices", lambda _adb: ["emulator-5556"])
+    monkeypatch.setattr(
+        manager, "open_or_restore",
+        lambda serial: calls.append(("open", serial)) or ("started", 1300))
+
+    result = manager.start_ldplayer_and_assistant("emulator-5556")
+
+    assert result == ("started", "started", 1300)
+    assert calls == [
+        ("emulator-5556", manager.LDCONSOLE_PATH, ("emulator-5556",)),
+        ("open", "emulator-5556"),
+    ]
+
+
+def test_ldplayer_error_never_opens_assistant(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "ldplayer_control",
+        SimpleNamespace(start_and_wait_online=lambda *_args, **_kwargs:
+                        SimpleNamespace(ok=False, status="error",
+                                        detail="实例不存在")))
+    monkeypatch.setattr(
+        manager, "open_or_restore",
+        lambda _serial: pytest.fail("assistant opened after LDPlayer failure"))
+
+    with pytest.raises(RuntimeError, match="实例不存在"):
+        manager.start_ldplayer_and_assistant("emulator-5558")
+
+
+def test_offline_row_start_is_one_background_operation():
     launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
     launcher._closed = False
     launcher._busy_serials = set()
-    launcher._suppressed_autostart = set()
     launcher._rows = [
-        manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None,
-                          online=True, desired_open=True),
         manager.DeviceRow("emulator-5556", "烘熊瞎", "tea_2p", None,
                           online=False, desired_open=True),
-        manager.DeviceRow("emulator-5558", "拾则", "tea_2p", None,
-                          online=True, desired_open=False),
     ]
     messages = []
     launcher.status_var = SimpleNamespace(set=messages.append)
-    opened = []
-    launcher._operate_device = lambda serial, operation: (
-        opened.append((serial, operation)), launcher._busy_serials.add(serial))
+    button_states = []
+    launcher._buttons = {"emulator-5556": [
+        SimpleNamespace(configure=lambda **kwargs: button_states.append(kwargs))]}
+    submitted = []
+    launcher._submit = lambda *args: submitted.append(args)
 
-    launcher._recover_bound_assistants()
-    launcher._recover_bound_assistants()
+    launcher._start_offline_device("emulator-5556")
+    launcher._start_offline_device("emulator-5556")
 
-    assert opened == [("emulator-5554", "open")]
-    assert "重新上线" in messages[-1]
+    assert submitted == [(
+        "start-ld:emulator-5556", manager.start_ldplayer_and_assistant,
+        "emulator-5556")]
+    assert button_states == [{"state": "disabled"}]
+    assert "正在处理中" in messages[-1]
 
 
-def test_user_quit_suppresses_same_process_autorecovery():
+def test_online_or_unknown_row_never_submits_ldplayer_start():
     launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
     launcher._closed = False
     launcher._busy_serials = set()
-    launcher._suppressed_autostart = {"emulator-5554"}
     launcher._rows = [
         manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None,
-                          online=True, desired_open=True),
+                          online=True),
     ]
+    launcher._buttons = {}
     launcher.status_var = SimpleNamespace(set=lambda _value: None)
-    launcher._operate_device = lambda *_args: pytest.fail(
-        "explicitly stopped assistant auto-reopened")
+    launcher._submit = lambda *_args: pytest.fail("ineligible LDPlayer started")
 
-    launcher._recover_bound_assistants()
+    launcher._start_offline_device("emulator-5554")
+    launcher._start_offline_device("emulator-5558")
 
 
-def test_recovery_backoff_and_circuit_breaker_prevent_flash_loop(monkeypatch):
+def test_identical_refresh_rows_do_not_rebuild_widgets():
     launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
-    launcher._closed = False
-    launcher._busy_serials = set()
-    launcher._suppressed_autostart = set()
-    launcher._recovery_inflight = set()
-    launcher._rows = [manager.DeviceRow(
-        "emulator-5554", "玉姐", "tea_2p", None,
-        online=True, desired_open=True)]
-    launcher.status_var = SimpleNamespace(set=lambda _value: None)
-    launcher._operate_device = lambda *_args: pytest.fail(
-        "backoff/circuit-breaker profile was restarted")
+    launcher._rendered_rows = None
+    rendered = []
+    launcher._render = lambda rows: rendered.append(tuple(rows))
+    first = [manager.DeviceRow(
+        "emulator-5554", "玉姐", "tea_2p", 1200, online=True)]
+    changed = [manager.DeviceRow(
+        "emulator-5554", "玉姐", "tea_2p", None, online=True)]
 
-    monkeypatch.setattr(manager.time, "monotonic", lambda: 100.0)
-    launcher._recovery_failures = {"emulator-5554": (1, 105.0)}
-    launcher._recover_bound_assistants()
+    assert launcher._render_if_changed(first) is True
+    assert launcher._render_if_changed(list(first)) is False
+    assert launcher._render_if_changed(changed) is True
+    assert rendered == [tuple(first), tuple(changed)]
 
-    launcher._recovery_failures = {
-        "emulator-5554": (
-            manager.AUTORECOVERY_FAILURE_BUDGET, float("inf"))}
-    launcher._recover_bound_assistants()
+
+def test_start_failure_is_reported_and_refreshes_once():
+    launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
+    launcher._busy_serials = {"emulator-5558"}
+    states = []
+    launcher._buttons = {"emulator-5558": [
+        SimpleNamespace(configure=lambda **kwargs: states.append(kwargs))]}
+    messages = []
+    launcher.status_var = SimpleNamespace(set=messages.append)
+    refreshes = []
+    launcher.refresh = lambda **kwargs: refreshes.append(kwargs)
+
+    launcher._finish_ldplayer_start(
+        "emulator-5558", None, "实例 index 2 不存在")
+
+    assert launcher._busy_serials == set()
+    assert states == [{"state": "normal"}]
+    assert refreshes == [{
+        "status_after": "emulator-5558：启动失败：实例 index 2 不存在"}]
 
 
 def test_incident_watchdog_same_serial_set_is_single_instance():

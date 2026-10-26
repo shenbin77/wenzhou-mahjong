@@ -38,4 +38,8 @@
 {"ts":"2026-10-26T22:59:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-013","summary":"删除调用方布尔门并补同帧16/16视觉门禁，对抗回归159项与独立复审通过"}
 {"ts":"2026-10-27T00:52:00+08:00","action":"add","type":"error","id":"ERR-20261027-001","summary":"深层安全门测试被更早L1拒绝遮蔽，独立审查复现自动过风险"}
 {"ts":"2026-10-27T00:53:00+08:00","action":"resolve","type":"error","id":"ERR-20261027-001","summary":"强制前置模板门命中并在自摸安全门缺失时禁止胡和自动过"}
+{"ts":"2026-10-27T01:18:00+08:00","action":"add","type":"learning","id":"LRN-20261027-001","summary":"多开管理器改为显式单设备启动并取消周期设备刷新"}
+{"ts":"2026-10-27T01:18:00+08:00","action":"promote","type":"learning","id":"LRN-20261027-001","summary":"单设备雷电和辅助器启动语义固化","target":"AGENTS.md"}
+{"ts":"2026-10-27T01:32:00+08:00","action":"add","type":"error","id":"ERR-20261027-002","summary":"PowerShell分号未阻断diff-check失败后的本地提交"}
+{"ts":"2026-10-27T01:33:00+08:00","action":"resolve","type":"error","id":"ERR-20261027-002","summary":"拆分验证与提交门禁并清理新文件末尾空行"}
 ```

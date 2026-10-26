@@ -1,5 +1,24 @@
 # Learnings
 
+## [LRN-20261027-001] 多开管理器采用显式单设备启动而非周期刷新
+
+**Priority**: high
+**Status**: promoted
+**Area**: launcher-ux
+
+### 内容
+用户纠正：“一键启动”不是批量拉起全部雷电，而是按某个离线设备行后，只启动该设备对应的一台雷电并打开一个辅助器；管理器不需要周期性后台刷新。旧实现每轮刷新销毁并重建设备行，会造成可见闪烁，也让自动行为超出用户预期。
+
+### 建议修复
+设备列表只在初始化、手动刷新和明确操作完成后更新；单行启动须先由 `ldconsole list2` 验证实例存在，再有限等待该 serial 上线并打开辅助器。重复、未知或不存在的实例全部拒绝，且不恢复跟随或全自动代打权限。
+
+### 元数据
+- Source: correction
+- Pattern-Key: explicit-single-device-launch
+- Promoted-To: AGENTS.md
+
+---
+
 ## [LRN-20261026-001] 完整场次事实与零人工验收必须分开
 
 **Priority**: high

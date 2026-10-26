@@ -1,8 +1,8 @@
 """One visible entry point for the per-emulator Mahjong assistants.
 
-This window only discovers connected devices and opens or restores one UI per
-serial.  It never starts following, sends game taps, or infers that a locally
-saved nickname proves the account currently logged into the emulator.
+This window discovers devices, explicitly starts one saved LDPlayer on demand,
+and opens or restores one UI per serial.  It never starts following, sends game
+taps, or infers that a saved nickname proves the account currently logged in.
 """
 from __future__ import annotations
 
@@ -35,9 +35,6 @@ MANAGER_SIGNAL = "manager"
 CONTROL_ACK_TIMEOUT_S = 4.0
 PROCESS_EXIT_TIMEOUT_S = 6.0
 STARTUP_READY_TIMEOUT_S = 10.0
-EMPTY_DEVICE_REFRESH_MS = 3000
-AUTORECOVERY_FAILURE_BUDGET = 3
-AUTORECOVERY_BACKOFF_S = (5.0, 30.0)
 MANAGER_MUTEX_NAME = "Local\\WenzhouMahjongAssistantManager"
 LOGS_ROOT = HERE.parent / "采集" / "dev_auto_play"
 INCIDENT_ROOT = HERE.parents[1] / "_incidents" / "tea2"
@@ -162,6 +159,27 @@ def collect_device_rows(*, base: Path = PROFILE_BASE) -> list[DeviceRow]:
                 base, serial, default=binding is not None),
         ))
     return rows
+
+
+def can_start_offline_device(row: DeviceRow) -> bool:
+    """Only a saved, offline profile may expose the explicit LDPlayer start."""
+    return bool(not row.online and row.account)
+
+
+def start_ldplayer_and_assistant(serial: str) -> tuple[str, str, int]:
+    """Explicitly start one LDPlayer, wait for ADB, then open its assistant."""
+    from ldplayer_control import start_and_wait_online
+
+    serial = safe_serial(serial)
+    result = start_and_wait_online(
+        serial,
+        ldconsole=LDCONSOLE_PATH,
+        online_serials=lambda: connected_devices(_adb_path()),
+    )
+    if not result.ok:
+        raise RuntimeError(result.detail or f"{serial} 雷电启动失败")
+    action, pid = open_or_restore(serial)
+    return result.status, action, pid
 
 
 def open_or_restore(serial: str) -> tuple[str, int]:
@@ -331,10 +349,8 @@ class MahjongLauncher:
         self._buttons: dict[str, list[tk.Button]] = {}
         self._busy_serials: set[str] = set()
         self._activation_pending = True
-        self._suppressed_autostart: set[str] = set()
-        self._recovery_inflight: set[str] = set()
-        self._recovery_failures: dict[str, tuple[int, float]] = {}
-        self._empty_refresh_after = None
+        self._rendered_rows: tuple[DeviceRow, ...] | None = None
+        self._post_refresh_status: str | None = None
         self._watchdog = None
         self._watchdog_thread: threading.Thread | None = None
         self._watchdog_config_thread: threading.Thread | None = None
@@ -376,7 +392,7 @@ class MahjongLauncher:
         words.pack(side="left", fill="x", expand=True)
         tk.Label(words, text="温州麻将辅助器", bg=BG, fg=TEXT,
                  font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
-        tk.Label(words, text="为每台在线雷电打开一个独立辅助器", bg=BG, fg=MUTED,
+        tk.Label(words, text="按设备启动雷电并打开一个独立辅助器", bg=BG, fg=MUTED,
                  font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(2, 0))
 
         self.refresh_button = tk.Button(
@@ -429,7 +445,9 @@ class MahjongLauncher:
         threading.Thread(target=worker, daemon=True,
                          name=f"mahjong-launcher-{tag}").start()
 
-    def refresh(self) -> None:
+    def refresh(self, *, status_after: str | None = None) -> None:
+        if status_after is not None:
+            self._post_refresh_status = status_after
         if self._refreshing or self._closed:
             return
         self._refreshing = True
@@ -440,21 +458,30 @@ class MahjongLauncher:
     def _open_device(self, serial: str) -> None:
         self._operate_device(serial, "open")
 
+    def _start_offline_device(self, serial: str) -> None:
+        if self._closed:
+            return
+        row = next((item for item in self._rows if item.serial == serial), None)
+        if row is None or not can_start_offline_device(row):
+            self.status_var.set(
+                f"{serial} 当前不是可启动的离线已保存设备，请先刷新状态。")
+            return
+        if serial in self._busy_serials:
+            self.status_var.set(f"{serial} 正在处理中；不会重复提交操作。")
+            return
+        self._busy_serials.add(serial)
+        for button in self._buttons.get(serial, []):
+            button.configure(state="disabled")
+        self.status_var.set(f"正在启动 {serial} 雷电并等待 ADB 上线…")
+        self._submit(
+            f"start-ld:{serial}", start_ldplayer_and_assistant, serial)
+
     def _operate_device(self, serial: str, operation: str) -> None:
         if self._closed:
             return
         if serial in self._busy_serials:
             self.status_var.set(f"{serial} 正在处理中；不会重复提交操作。")
             return
-        suppressed = getattr(self, "_suppressed_autostart", None)
-        if suppressed is None:
-            suppressed = self._suppressed_autostart = set()
-        automatic = serial in getattr(self, "_recovery_inflight", set())
-        if operation == "quit":
-            suppressed.add(serial)
-        elif operation in {"open", "restart"} and not automatic:
-            suppressed.discard(serial)
-            getattr(self, "_recovery_failures", {}).pop(serial, None)
         self._busy_serials.add(serial)
         for button in self._buttons.get(serial, []):
             button.configure(state="disabled")
@@ -467,46 +494,6 @@ class MahjongLauncher:
         }
         self._submit(f"{operation}:{serial}", functions[operation], serial)
 
-    def _cancel_empty_refresh(self) -> None:
-        after_id, self._empty_refresh_after = self._empty_refresh_after, None
-        if after_id is not None:
-            try:
-                self.root.after_cancel(after_id)
-            except tk.TclError:
-                pass
-
-    def _schedule_empty_refresh(self) -> None:
-        if self._closed or self._empty_refresh_after is not None:
-            return
-
-        def retry() -> None:
-            self._empty_refresh_after = None
-            if not self._closed:
-                self.refresh()
-
-        self._empty_refresh_after = self.root.after(EMPTY_DEVICE_REFRESH_MS, retry)
-
-    def _recover_bound_assistants(self) -> None:
-        """Restore one crash-lost bound UI at a time; never restore autoplay."""
-        if self._closed or self._busy_serials:
-            return
-        for row in self._rows:
-            failures = getattr(self, "_recovery_failures", {})
-            count, retry_at = failures.get(row.serial, (0, 0.0))
-            if (row.online and row.account and row.desired_open
-                    and row.pid is None
-                    and row.serial not in self._suppressed_autostart
-                    and count < AUTORECOVERY_FAILURE_BUDGET
-                    and time.monotonic() >= retry_at):
-                self.status_var.set(
-                    f"{row.serial} 已重新上线，正在恢复已保存辅助器窗口…")
-                inflight = getattr(self, "_recovery_inflight", None)
-                if inflight is None:
-                    inflight = self._recovery_inflight = set()
-                inflight.add(row.serial)
-                self._operate_device(row.serial, "open")
-                return
-
     def _run_pending_activation(self) -> None:
         if not self._activation_pending or self._closed:
             return
@@ -516,10 +503,9 @@ class MahjongLauncher:
         target = choose_activation_target(self._rows)
         if target is None:
             self.status_var.set(
-                "没有在线雷电；本窗口会自动等待，启动雷电后将打开辅助器。")
-            self._schedule_empty_refresh()
+                "没有在线雷电；请选择已保存设备行的“启动雷电＋辅助器”。")
+            self._activation_pending = False
             return
-        self._cancel_empty_refresh()
         self._activation_pending = False
         self._operate_device(target.serial, "open")
 
@@ -718,7 +704,7 @@ class MahjongLauncher:
             f"辅助器已开 {sum(r.pid is not None for r in rows)} 台")
         if not rows:
             tk.Label(self.list_frame,
-                     text="没有在线雷电。管理器会自动等待；启动雷电即可。",
+                     text="没有设备配置。请先在雷电多开器中创建实例。",
                      bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 11),
                      pady=36).pack(fill="x")
             return
@@ -739,14 +725,26 @@ class MahjongLauncher:
                      font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(4, 0))
             state = (f"辅助器运行中 · PID {row.pid}" if row.pid is not None
                      else ("辅助器未打开" if row.online
-                           else "等待雷电上线后自动恢复"))
+                           else "雷电离线 · 可手动启动"))
             tk.Label(panel, text=state, bg=SURFACE,
                      fg=GREEN if row.pid is not None else MUTED,
                      font=("Microsoft YaHei UI", 9)).pack(side="left", padx=12)
             controls = tk.Frame(panel, bg=SURFACE)
             controls.pack(side="right")
             buttons: list[tk.Button] = []
-            if row.pid is not None:
+            if can_start_offline_device(row):
+                button = tk.Button(
+                    controls, text="启动雷电＋辅助器",
+                    command=lambda serial=row.serial:
+                        self._start_offline_device(serial),
+                    bg=GOLD, fg="#22252e", activebackground="#ffd989",
+                    activeforeground="#22252e", relief="flat", padx=12,
+                    pady=8, font=("Microsoft YaHei UI", 9, "bold"),
+                    state=("disabled" if row.serial in self._busy_serials
+                           else "normal"))
+                button.pack(side="left")
+                buttons.append(button)
+            elif row.pid is not None:
                 operations = [
                     ("恢复窗口", "open", GOLD, "#22252e"),
                     ("退出", "quit", BG, MUTED),
@@ -762,7 +760,9 @@ class MahjongLauncher:
                         bg=background, fg=foreground,
                         activebackground="#465168", activeforeground=TEXT,
                         relief="flat", padx=10, pady=8,
-                        font=("Microsoft YaHei UI", 9, "bold"))
+                        font=("Microsoft YaHei UI", 9, "bold"),
+                        state=("disabled" if row.serial in self._busy_serials
+                               else "normal"))
                     button.pack(side="left", padx=(5, 0))
                     buttons.append(button)
             elif row.online:
@@ -771,13 +771,39 @@ class MahjongLauncher:
                     command=lambda serial=row.serial: self._open_device(serial),
                     bg=GOLD, fg="#22252e", activebackground="#ffd989",
                     activeforeground="#22252e", relief="flat", padx=12,
-                    pady=8, font=("Microsoft YaHei UI", 9, "bold"))
+                    pady=8, font=("Microsoft YaHei UI", 9, "bold"),
+                    state=("disabled" if row.serial in self._busy_serials
+                           else "normal"))
                 button.pack(side="left")
                 buttons.append(button)
             else:
                 tk.Label(controls, text="配置保留中", bg=SURFACE, fg=MUTED,
                          font=("Microsoft YaHei UI", 9)).pack(side="left")
             self._buttons[row.serial] = buttons
+
+    def _render_if_changed(self, rows: list[DeviceRow]) -> bool:
+        """Avoid destroying Tk rows when a refresh reports identical state."""
+        snapshot = tuple(rows)
+        if snapshot == self._rendered_rows:
+            return False
+        self._rendered_rows = snapshot
+        self._render(rows)
+        return True
+
+    def _finish_ldplayer_start(self, serial: str, result,
+                               error: str | None) -> None:
+        self._busy_serials.discard(serial)
+        for button in self._buttons.get(serial, []):
+            button.configure(state="normal")
+        if error:
+            message = f"{serial}：启动失败：{error}"
+        else:
+            ld_status, action, pid = result
+            ld_text = "雷电已在线" if ld_status == "already_online" else "雷电已启动"
+            action_text = "辅助器已恢复" if action == "restored" else "辅助器已打开"
+            message = f"{serial}：{ld_text}，{action_text}（PID {pid}）"
+        # This is an explicit operation completion, not a background poll.
+        self.refresh(status_after=message)
 
     def _poll(self) -> None:
         if self._closed:
@@ -798,47 +824,30 @@ class MahjongLauncher:
                 self._refreshing = False
                 self.refresh_button.configure(state="normal")
                 if error:
+                    self._post_refresh_status = None
                     self.status_var.set(f"设备检查失败：{error}")
-                    if self._activation_pending:
-                        self._schedule_empty_refresh()
                 else:
                     self._rows = result
-                    self._render(result)
+                    self._render_if_changed(result)
                     self._ensure_incident_watchdog(result)
-                    self.status_var.set("选择对应雷电打开或恢复辅助器。")
+                    message = self._post_refresh_status
+                    self._post_refresh_status = None
+                    self.status_var.set(
+                        message or "选择对应雷电打开或恢复辅助器。")
+            elif tag.startswith("start-ld:"):
+                serial = tag.split(":", 1)[1]
+                self._finish_ldplayer_start(serial, result, error)
             elif any(tag.startswith(f"{operation}:")
                      for operation in ("open", "quit", "restart")):
                 operation, serial = tag.split(":", 1)
                 self._busy_serials.discard(serial)
-                automatic = serial in getattr(self, "_recovery_inflight", set())
-                getattr(self, "_recovery_inflight", set()).discard(serial)
                 if error:
-                    if automatic:
-                        previous, _retry_at = self._recovery_failures.get(
-                            serial, (0, 0.0))
-                        failures = previous + 1
-                        if failures >= AUTORECOVERY_FAILURE_BUDGET:
-                            self._recovery_failures[serial] = (failures, float("inf"))
-                            self._suppressed_autostart.add(serial)
-                            self.status_var.set(
-                                f"{serial}：连续 {failures} 次启动失败，已熔断自动恢复；"
-                                "不会继续闪窗，请检查后手动点“打开辅助器”。")
-                        else:
-                            delay = AUTORECOVERY_BACKOFF_S[
-                                min(failures - 1, len(AUTORECOVERY_BACKOFF_S) - 1)]
-                            self._recovery_failures[serial] = (
-                                failures, time.monotonic() + delay)
-                            self.status_var.set(
-                                f"{serial}：启动失败（{failures}/"
-                                f"{AUTORECOVERY_FAILURE_BUDGET}），{delay:g} 秒后再试：{error}")
-                    else:
-                        self.status_var.set(f"{serial}：{error}")
+                    self.status_var.set(f"{serial}：{error}")
                     for button in self._buttons.get(serial, []):
                         button.configure(state="normal")
                     if self._activation_pending:
                         self.refresh()
                 else:
-                    self._recovery_failures.pop(serial, None)
                     action, pid = result
                     verbs = {
                         "restored": "已确认恢复",
@@ -850,9 +859,7 @@ class MahjongLauncher:
                     self.status_var.set(f"{serial}：{verb}辅助器（PID {pid}）")
                     self.refresh()
             if tag == "refresh" and not error:
-                self._schedule_empty_refresh()
                 self._run_pending_activation()
-                self._recover_bound_assistants()
             elif tag == "watchdog" and result is not None:
                 self._apply_watchdog_event(result, error)
         self._retry_incident_watchdog_if_needed()
@@ -862,7 +869,6 @@ class MahjongLauncher:
         if self._closed:
             return
         self._closed = True
-        self._cancel_empty_refresh()
         if self._stop_incident_watchdog():
             self.root.destroy()
             return

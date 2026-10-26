@@ -27,6 +27,23 @@ OSError: [Errno 28] No space left on device
 
 ---
 
+## [ERR-20261027-002] PowerShell 分号未阻断失败后的提交
+
+**Priority**: medium
+**Status**: resolved
+**Area**: tools
+
+### 摘要
+提交前把 `git diff --cached --check` 与 `git commit` 用 PowerShell 分号串联；前者发现新文件末尾多余空行并返回失败后，后者仍继续执行，导致需要立即清理并修正本地提交。
+
+### 建议修复
+验证门禁与提交必须分成独立工具调用，或显式检查 `$LASTEXITCODE` 后再提交；不能依赖 PowerShell 分号短路。此次已删除多余空行、重新执行 `git diff --check`，并修正尚未推送的本地提交。
+
+### 元数据
+- Reproducible: yes
+
+---
+
 ## [ERR-20261027-001] 对抗测试被更早门禁遮蔽而假绿
 
 **Priority**: high
