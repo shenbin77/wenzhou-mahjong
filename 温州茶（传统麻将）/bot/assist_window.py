@@ -4339,6 +4339,35 @@ DEFAULT_ADB_PATH = ""
 ADB_RESOLVE_NOTE = ""
 
 
+def report_launch_result(message: str) -> None:
+    """把启动结论送达操作者：有控制台就打印，``pythonw`` 无控制台就弹窗。
+
+    桌面快捷方式走 ``pythonw.exe``，其 ``sys.stdout`` 为 ``None``，``print``
+    会被静默丢弃。于是「没有空闲在线雷电窗口」这类 **fail-closed 正常退出**
+    在用户看来就是"双击没反应、辅助器打不开"，而实际原因（模拟器没启动）
+    一个字也看不到。2026-10-26 用户正是被这个静默卡住。
+
+    Args:
+        message: 要送达的人话结论。
+
+    反馈本身**绝不许**影响启动或退出流程：任何异常都吞掉。
+    """
+    print(message, flush=True)
+    import sys
+    if sys.stdout is not None:
+        return                      # 控制台已经把话带到了，不必再弹窗
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            from tkinter import messagebox
+            messagebox.showwarning("温州麻将辅助器", message)
+        finally:
+            root.destroy()
+    except Exception:               # noqa: BLE001 - 反馈失败不许阻止退出
+        pass
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="温州麻将辅助器：每个serial独立窗口")
     parser.add_argument("--serial", default=None)
@@ -4352,14 +4381,18 @@ if __name__ == "__main__":
     except (OSError, RuntimeError, ImportError, ValueError) as exc:
         # An unavailable device listing or process scanner must not produce a
         # second unguarded operator for the same emulator.
-        print(f"雷电设备检查失败：{exc}", flush=True)
+        report_launch_result(f"雷电设备检查失败：{exc}")
         raise SystemExit(2) from exc
     if open_pid is not None:
         activate_window(open_pid)
-        print(f"现有辅助器 PID {open_pid} 已打开；不重复运行。", flush=True)
+        report_launch_result(f"现有辅助器 PID {open_pid} 已打开；不重复运行。")
         raise SystemExit(0)
     if chosen is None:
-        print("没有空闲在线雷电窗口。已有窗口请从任务栏切换。", flush=True)
+        report_launch_result(
+            "没有空闲在线雷电窗口。\n\n"
+            "请先打开雷电多开器并启动模拟器，等它完全进入桌面后，"
+            "再重新双击辅助器。\n"
+            "如果辅助器窗口已经在跑，请从任务栏切换过去。")
         raise SystemExit(0)
     if args.serial is None:
         # A desktop shortcut has no --serial. Spawn the selected serial as an
@@ -4380,4 +4413,4 @@ if __name__ == "__main__":
         pid = existing_window_pids(DEFAULT_SERIAL).get(chosen)
         if pid is not None:
             activate_window(pid)
-        print(f"{chosen} 已被其他辅助器窗口使用，不再重复启动。", flush=True)
+        report_launch_result(f"{chosen} 已被其他辅助器窗口使用，不再重复启动。")
