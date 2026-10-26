@@ -5427,6 +5427,14 @@ def report_launch_result(message: str) -> None:
         pass
 
 
+def revoke_startup_click_authority(serial: str, root: Path | None = None) -> None:
+    """A newly initialized UI never inherits a pre-existing resume command."""
+    from full_auto_control import revoke_pending_command
+
+    if not revoke_pending_command(serial, root=root):
+        raise RuntimeError(f"{serial} 无法撤销遗留全自动命令，拒绝初始化窗口")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="温州麻将辅助器：每个serial独立窗口")
     parser.add_argument("--serial", default=None)
@@ -5469,6 +5477,14 @@ if __name__ == "__main__":
     try:
         # Separate namespace from the BOT live-click lease.
         with hold_serial("ui:" + chosen):
+            # Acquire ownership before touching the command slot.  A duplicate
+            # child that loses this lease must not consume the live window's
+            # pending ``stop`` command.
+            try:
+                revoke_startup_click_authority(chosen)
+            except (OSError, RuntimeError, ValueError) as exc:
+                report_launch_result(str(exc))
+                raise SystemExit(2) from exc
             app_root = tk.Tk()
             TeaAssistWindow(app_root, serial=chosen)
             app_root.mainloop()

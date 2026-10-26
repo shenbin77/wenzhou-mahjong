@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from full_auto_control import revoke_pending_command
 from instance_profile import safe_serial
 from harvest_tea import DEFAULT_ADB
 
@@ -66,6 +67,8 @@ def connected_devices(adb_path: str = DEFAULT_ADB) -> list[str]:
 def start_window(serial: str, *, detached: bool = True):
     """Spawn an independent UI process, never another BOT implementation."""
     serial = safe_serial(serial)
+    if not revoke_pending_command(serial):
+        raise RuntimeError(f"{serial} 无法撤销遗留全自动命令，拒绝启动窗口")
     exe = Path(sys.executable)
     if detached and exe.name.lower() == "python.exe":
         ui_exe = exe.with_name("pythonw.exe")

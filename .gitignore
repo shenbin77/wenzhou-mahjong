@@ -71,6 +71,7 @@ _backups/
 /_wt_*/
 /_incidents/*
 !/_incidents/README.md
+/_control/
 
 # 编辑器 / 系统
 .vscode/

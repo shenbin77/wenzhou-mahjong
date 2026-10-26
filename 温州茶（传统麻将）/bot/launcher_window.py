@@ -184,19 +184,28 @@ def start_ldplayer_and_assistant(serial: str) -> tuple[str, str, int]:
     return result.status, action, pid
 
 
+def _revoke_stale_click_authority(serial: str) -> None:
+    """Every new UI process starts without inherited follow/click authority."""
+    from full_auto_control import revoke_pending_command
+
+    if not revoke_pending_command(serial):
+        raise RuntimeError(f"{serial} 无法撤销遗留全自动命令，拒绝启动窗口")
+
+
 def open_or_restore(serial: str) -> tuple[str, int]:
     """Recheck online state and ownership immediately before acting."""
     serial = safe_serial(serial)
     pid = existing_window_pids(DEFAULT_SERIAL).get(serial)
     if pid is not None:
-        _request_confirmed(serial, "restore")
         set_assistant_desired_open(PROFILE_BASE, serial, True)
+        _request_confirmed(serial, "restore")
         return "restored", pid
     if serial not in connected_devices(_adb_path()):
         raise RuntimeError(f"{serial} 已离线，设置已保留，未启动辅助器")
+    set_assistant_desired_open(PROFILE_BASE, serial, True)
+    _revoke_stale_click_authority(serial)
     process = start_window(serial)
     _wait_for_started_window(serial, process)
-    set_assistant_desired_open(PROFILE_BASE, serial, True)
     return "started", int(process.pid)
 
 
@@ -214,17 +223,14 @@ def recover_window_only(serial: str) -> tuple[str, int]:
         return "already_running", pid
     if serial not in connected_devices(_adb_path()):
         return "offline", 0
-    from full_auto_control import revoke_pending_command
-
-    if not revoke_pending_command(serial):
-        raise RuntimeError(f"{serial} 无法撤销遗留全自动命令，拒绝恢复窗口")
+    _revoke_stale_click_authority(serial)
     process = start_window(serial)
     _wait_for_started_window(serial, process)
     # The newly constructed window persists ``True`` itself.  Never write it
     # here: an explicit exit may have changed the intent to ``False`` while
     # this worker was waiting for the startup ACK.
     if not read_assistant_desired_open(PROFILE_BASE, serial, default=False):
-        return "desired_false", 0
+        return "desired_false", int(process.pid)
     return "started", int(process.pid)
 
 
@@ -297,17 +303,19 @@ def restart_assistant(serial: str) -> tuple[str, int]:
         raise RuntimeError(f"{serial} 已离线，保留现有辅助器且不重启")
     pid = existing_window_pids(DEFAULT_SERIAL).get(serial)
     if pid is None:
+        set_assistant_desired_open(PROFILE_BASE, serial, True)
+        _revoke_stale_click_authority(serial)
         process = start_window(serial)
         _wait_for_started_window(serial, process)
-        set_assistant_desired_open(PROFILE_BASE, serial, True)
         return "started", int(process.pid)
     _request_confirmed(serial, "quit")
     if not _wait_for_window_exit(pid):
         raise RuntimeError(
             f"{serial} 旧窗口 PID {pid} 未按时退出；为避免双实例，未启动新窗口")
+    set_assistant_desired_open(PROFILE_BASE, serial, True)
+    _revoke_stale_click_authority(serial)
     process = start_window(serial)
     _wait_for_started_window(serial, process)
-    set_assistant_desired_open(PROFILE_BASE, serial, True)
     return "restarted", int(process.pid)
 
 
@@ -867,21 +875,31 @@ class MahjongLauncher:
             self._reconcile_known_desired_windows()
             return
         action, pid = result
-        if action in {"offline", "desired_false"}:
-            detail = ("雷电已离线，请手动刷新或启动本行雷电"
-                      if action == "offline" else "恢复意图已取消")
-            changes = ({"online": False, "pid": None}
-                       if action == "offline"
-                       else {"desired_open": False, "pid": None})
-            self._replace_row(serial, **changes)
+        if action == "offline":
+            detail = "雷电已离线，请手动刷新或启动本行雷电"
+            self._replace_row(serial, online=False, pid=None)
             self.status_var.set(f"{serial}：{detail}；不会后台等待。")
+            self._reconcile_known_desired_windows()
+            return
+        if action == "desired_false":
+            row = self._replace_row(
+                serial, desired_open=False, pid=(pid or None))
+            if row is not None and pid:
+                self._arm_liveness_watch(row)
+                detail = f"退出意图已确认，等待窗口 PID {pid} 结束"
+            else:
+                detail = "恢复意图已取消"
+            self.status_var.set(f"{serial}：{detail}；不会恢复代打。")
             self._reconcile_known_desired_windows()
             return
         if not read_assistant_desired_open(
                 PROFILE_BASE, serial, default=False):
-            self._replace_row(serial, pid=None, desired_open=False)
+            row = self._replace_row(serial, pid=pid, desired_open=False)
+            if row is not None and pid:
+                self._arm_liveness_watch(row)
             self.status_var.set(
-                f"{serial}：恢复期间收到退出意图，保持关闭。")
+                f"{serial}：恢复期间收到退出意图，等待窗口 PID {pid} 结束；"
+                "不会恢复代打。")
             self._reconcile_known_desired_windows()
             return
         self._recovery_failures.pop(serial, None)
@@ -1094,10 +1112,16 @@ class MahjongLauncher:
                 if error:
                     if operation == "quit":
                         getattr(self, "_intentional_shutdowns", set()).discard(serial)
-                    self.status_var.set(f"{serial}：{error}")
+                    message = f"{serial}：{error}"
+                    self.status_var.set(message)
                     for button in self._buttons.get(serial, []):
                         button.configure(state="normal")
-                    if self._activation_pending:
+                    if operation in {"open", "restart"}:
+                        # An explicit operation may have partially changed the
+                        # PID.  Take one explicit fresh snapshot, then let the
+                        # normal serial reconciler decide whether to recover.
+                        self.refresh(status_after=message)
+                    elif self._activation_pending:
                         self.refresh()
                 else:
                     if operation in {"open", "restart", "quit"}:

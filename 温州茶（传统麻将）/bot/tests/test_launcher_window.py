@@ -20,6 +20,9 @@ def _isolate_lifecycle_state(monkeypatch):
         manager, "set_assistant_desired_open", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         manager, "_wait_for_started_window", lambda *_args, **_kwargs: None)
+    import full_auto_control
+    monkeypatch.setattr(
+        full_auto_control, "revoke_pending_command", lambda _serial: True)
 
 
 def test_collect_device_rows_keeps_each_local_binding_separate(tmp_path, monkeypatch):
@@ -104,15 +107,73 @@ def test_existing_assistant_can_be_restored_while_emulator_is_offline(monkeypatc
 
 
 def test_open_free_online_device_starts_one_ui(monkeypatch):
-    launched = []
+    calls = []
     monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
     monkeypatch.setattr(manager, "connected_devices", lambda _adb: ["emulator-5556"])
     monkeypatch.setattr(manager, "existing_window_pids", lambda _default: {})
-    monkeypatch.setattr(manager, "start_window",
-                        lambda serial: launched.append(serial) or SimpleNamespace(pid=1300))
+    import full_auto_control
+    monkeypatch.setattr(
+        manager, "set_assistant_desired_open",
+        lambda _base, serial, desired: calls.append(
+            ("desired", serial, desired)))
+    monkeypatch.setattr(
+        full_auto_control, "revoke_pending_command",
+        lambda serial: calls.append(("revoke", serial)) or True)
+    monkeypatch.setattr(
+        manager, "start_window",
+        lambda serial: calls.append(("start", serial)) or SimpleNamespace(pid=1300))
 
     assert manager.open_or_restore("emulator-5556") == ("started", 1300)
-    assert launched == ["emulator-5556"]
+    assert calls == [
+        ("desired", "emulator-5556", True),
+        ("revoke", "emulator-5556"), ("start", "emulator-5556")]
+
+
+def test_new_window_ack_does_not_overwrite_concurrent_exit_intent(monkeypatch):
+    desired = []
+    monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
+    monkeypatch.setattr(manager, "connected_devices",
+                        lambda _adb: ["emulator-5556"])
+    monkeypatch.setattr(manager, "existing_window_pids", lambda _default: {})
+    monkeypatch.setattr(manager, "set_assistant_desired_open",
+                        lambda _base, _serial, value: desired.append(value))
+    monkeypatch.setattr(manager, "start_window",
+                        lambda _serial: SimpleNamespace(pid=1300))
+    monkeypatch.setattr(manager, "_wait_for_started_window",
+                        lambda _serial, _process: desired.append(False))
+
+    assert manager.open_or_restore("emulator-5556") == ("started", 1300)
+    assert desired == [True, False]
+
+
+def test_existing_restore_does_not_overwrite_concurrent_exit_intent(
+        monkeypatch):
+    desired = []
+    monkeypatch.setattr(manager, "existing_window_pids",
+                        lambda _default: {"emulator-5554": 1200})
+    monkeypatch.setattr(manager, "set_assistant_desired_open",
+                        lambda _base, _serial, value: desired.append(value))
+    monkeypatch.setattr(manager, "_request_confirmed",
+                        lambda _serial, _command: desired.append(False))
+
+    assert manager.open_or_restore("emulator-5554") == ("restored", 1200)
+    assert desired == [True, False]
+
+
+def test_open_refuses_new_process_if_stale_authority_cannot_be_revoked(
+        monkeypatch):
+    monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
+    monkeypatch.setattr(manager, "connected_devices",
+                        lambda _adb: ["emulator-5556"])
+    monkeypatch.setattr(manager, "existing_window_pids", lambda _default: {})
+    import full_auto_control
+    monkeypatch.setattr(full_auto_control, "revoke_pending_command",
+                        lambda _serial: False)
+    monkeypatch.setattr(manager, "start_window",
+                        lambda _serial: pytest.fail("started with stale resume"))
+
+    with pytest.raises(RuntimeError, match="遗留全自动命令"):
+        manager.open_or_restore("emulator-5556")
 
 
 def test_window_only_recovery_revokes_stale_authority_and_waits_for_ack(
@@ -218,7 +279,7 @@ def test_window_only_recovery_does_not_overwrite_exit_during_startup(
                         lambda _serial: True)
 
     assert manager.recover_window_only("emulator-5556") == (
-        "desired_false", 0)
+        "desired_false", 1300)
 
 
 def test_started_window_requires_matching_pid_and_control_ack(monkeypatch):
@@ -317,6 +378,14 @@ def test_restart_starts_same_serial_after_confirmed_exit(monkeypatch):
                         lambda serial, command: calls.append((serial, command)))
     monkeypatch.setattr(manager, "_wait_for_window_exit",
                         lambda pid: calls.append(("wait", pid)) or True)
+    import full_auto_control
+    monkeypatch.setattr(
+        manager, "set_assistant_desired_open",
+        lambda _base, serial, desired: calls.append(
+            ("desired", serial, desired)))
+    monkeypatch.setattr(
+        full_auto_control, "revoke_pending_command",
+        lambda serial: calls.append(("revoke", serial)) or True)
     monkeypatch.setattr(
         manager, "start_window",
         lambda serial: calls.append(("start", serial)) or SimpleNamespace(pid=1300))
@@ -324,8 +393,32 @@ def test_restart_starts_same_serial_after_confirmed_exit(monkeypatch):
     assert manager.restart_assistant("emulator-5554") == ("restarted", 1300)
     assert calls == [
         ("emulator-5554", "quit"), ("wait", 1200),
+        ("desired", "emulator-5554", True),
+        ("revoke", "emulator-5554"),
         ("start", "emulator-5554"),
     ]
+
+
+def test_restart_start_failure_keeps_open_intent_for_safe_reconcile(
+        monkeypatch):
+    desired = []
+    monkeypatch.setattr(manager, "_adb_path", lambda: "adb")
+    monkeypatch.setattr(manager, "connected_devices",
+                        lambda _adb: ["emulator-5554"])
+    monkeypatch.setattr(manager, "existing_window_pids",
+                        lambda _default: {"emulator-5554": 1200})
+    monkeypatch.setattr(manager, "_request_confirmed",
+                        lambda _serial, _command: "")
+    monkeypatch.setattr(manager, "_wait_for_window_exit", lambda _pid: True)
+    monkeypatch.setattr(manager, "set_assistant_desired_open",
+                        lambda _base, _serial, value: desired.append(value))
+    monkeypatch.setattr(manager, "start_window",
+                        lambda _serial: (_ for _ in ()).throw(OSError("boom")))
+
+    with pytest.raises(OSError, match="boom"):
+        manager.restart_assistant("emulator-5554")
+
+    assert desired == [True]
 
 
 def test_offline_restart_keeps_existing_ui(monkeypatch):
@@ -608,9 +701,43 @@ def test_recovery_finish_honours_fresh_exit_intent(monkeypatch):
     launcher._finish_assistant_recovery(
         "emulator-5554", ("started", 1300), None)
 
-    assert launcher._rows[0].pid is None
+    assert launcher._rows[0].pid == 1300
     assert launcher._rows[0].desired_open is False
-    assert armed == []
+    assert armed == [launcher._rows[0]]
+
+
+def test_recovery_desired_false_result_tracks_spawned_pid_until_exit():
+    row = manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None)
+    launcher = _recovery_launcher(row)
+    launcher._recovery_inflight.add("emulator-5554")
+    launcher._busy_serials.add("emulator-5554")
+    armed = []
+    launcher._arm_liveness_watch = lambda current: armed.append(current)
+
+    launcher._finish_assistant_recovery(
+        "emulator-5554", ("desired_false", 1300), None)
+
+    assert launcher._rows[0].pid == 1300
+    assert launcher._rows[0].desired_open is False
+    assert armed == [launcher._rows[0]]
+
+
+def test_manual_open_failure_takes_one_explicit_snapshot(monkeypatch):
+    row = manager.DeviceRow("emulator-5554", "玉姐", "tea_2p", None)
+    launcher = _recovery_launcher(row)
+    launcher._activation_pending = False
+    launcher._refreshing = False
+    launcher._events.put(("open:emulator-5554", None, "startup ack missing"))
+    refreshed = []
+    launcher.refresh = lambda **kwargs: refreshed.append(kwargs)
+    launcher._retry_incident_watchdog_if_needed = lambda: None
+    launcher.root = SimpleNamespace(after=lambda _delay, _callback: None)
+    monkeypatch.setattr(manager, "consume_restore", lambda _name: False)
+
+    launcher._poll()
+
+    assert refreshed == [{
+        "status_after": "emulator-5554：startup ack missing"}]
 
 
 def test_recovery_failures_back_off_then_fuse_without_refresh(monkeypatch):

@@ -90,3 +90,38 @@ def test_never_raises_even_when_the_dialog_cannot_be_shown(monkeypatch):
 
     monkeypatch.setattr(assist_window, "tk", types.SimpleNamespace(Tk=_boom))
     assist_window.report_launch_result("弹窗失败也不许炸")
+
+
+def test_new_process_initialization_revokes_stale_click_authority(monkeypatch):
+    calls = []
+    import full_auto_control
+    monkeypatch.setattr(
+        full_auto_control, "revoke_pending_command",
+        lambda serial, root=None: calls.append((serial, root)) or True)
+
+    assist_window.revoke_startup_click_authority("emulator-5556")
+
+    assert calls == [("emulator-5556", None)]
+
+
+def test_new_process_initialization_fails_closed_when_revoke_fails(
+        monkeypatch):
+    import full_auto_control
+    monkeypatch.setattr(
+        full_auto_control, "revoke_pending_command",
+        lambda _serial, root=None: False)
+
+    with pytest.raises(RuntimeError, match="遗留全自动命令"):
+        assist_window.revoke_startup_click_authority("emulator-5556")
+
+
+def test_duplicate_child_startup_preserves_pending_stop(tmp_path):
+    import full_auto_control
+    full_auto_control.write_command(
+        "emulator-5556", "stop", root=tmp_path)
+
+    assist_window.revoke_startup_click_authority(
+        "emulator-5556", root=tmp_path)
+
+    assert full_auto_control.consume_command(
+        "emulator-5556", root=tmp_path) == "stop"

@@ -5,8 +5,9 @@
 合成帧继续覆盖执行器状态机；真帧覆盖模板/场景正例和正常对局负例。
 """
 import sys
+import time
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 
 import cv2
 import numpy as np
@@ -333,6 +334,126 @@ def test_full_auto_control_roundtrip(tmp_path):
         fac.write_command("emulator-5556", "click", root=tmp_path)
 
 
+def test_full_auto_control_paths_cannot_collide_after_serial_normalization(
+        tmp_path):
+    tcp = "127.0.0.1:5555"
+    underscore = "127.0.0.1_5555"
+    assert fac.control_path(tcp, tmp_path) != fac.control_path(
+        underscore, tmp_path)
+
+    fac.write_command(tcp, "resume", root=tmp_path)
+    fac.write_command(underscore, "stop", root=tmp_path)
+    assert fac.consume_command(tcp, root=tmp_path) == "resume"
+    assert fac.consume_command(underscore, root=tmp_path) == "stop"
+
+
+def test_tcp_revoke_does_not_delete_ambiguous_legacy_collision(tmp_path):
+    ambiguous = tmp_path / "full_auto_127.0.0.1_5555.cmd"
+    ambiguous.write_text("resume", encoding="utf-8")
+
+    assert fac.revoke_pending_command("127.0.0.1:5555", root=tmp_path) is True
+    assert ambiguous.read_text(encoding="utf-8") == "resume"
+
+
+def test_full_auto_control_consumes_unambiguous_legacy_emulator_command(
+        tmp_path):
+    legacy = fac._legacy_control_path("emulator-5556", root=tmp_path)
+    assert legacy is not None
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("resume", encoding="utf-8")
+
+    assert fac.consume_command("emulator-5556", root=tmp_path) == "resume"
+    assert not legacy.exists()
+
+
+def test_full_auto_control_stop_wins_current_legacy_conflict(tmp_path):
+    current = fac.control_path("emulator-5556", root=tmp_path)
+    legacy = fac._legacy_control_path("emulator-5556", root=tmp_path)
+    assert legacy is not None
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text("resume", encoding="utf-8")
+    legacy.write_text("stop", encoding="utf-8")
+
+    assert fac.consume_command("emulator-5556", root=tmp_path) == "stop"
+    assert not current.exists() and not legacy.exists()
+
+
+def test_stop_survives_partial_cleanup_failure_and_resume_never_runs(
+        tmp_path, monkeypatch):
+    serial = "emulator-5556"
+    current = fac.control_path(serial, root=tmp_path)
+    legacy = fac._legacy_control_path(serial, root=tmp_path)
+    assert legacy is not None
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text("stop", encoding="utf-8")
+    legacy.write_text("resume", encoding="utf-8")
+    original_unlink = Path.unlink
+
+    with monkeypatch.context() as scoped:
+        def selective_unlink(path, *args, **kwargs):
+            if path == legacy:
+                raise OSError("busy legacy resume")
+            return original_unlink(path, *args, **kwargs)
+
+        scoped.setattr(Path, "unlink", selective_unlink)
+        assert fac.consume_command(serial, root=tmp_path) == "stop"
+        assert current.read_text(encoding="utf-8") == "stop"
+        assert legacy.read_text(encoding="utf-8") == "resume"
+
+    assert fac.consume_command(serial, root=tmp_path) == "stop"
+    assert fac.consume_command(serial, root=tmp_path) is None
+
+
+def test_failed_duplicate_stop_write_preserves_existing_stop(
+        tmp_path, monkeypatch):
+    serial = "emulator-5556"
+    existing = fac.write_command(serial, "stop", root=tmp_path)
+    monkeypatch.setattr(
+        fac.os, "replace",
+        lambda _source, _target: (_ for _ in ()).throw(OSError("disk busy")))
+
+    with pytest.raises(OSError, match="disk busy"):
+        fac.write_command(serial, "stop", root=tmp_path)
+
+    assert existing.read_text(encoding="utf-8") == "stop"
+    assert fac.consume_command(serial, root=tmp_path) == "stop"
+
+
+def test_full_auto_control_concurrent_stop_is_not_deleted(
+        tmp_path, monkeypatch):
+    serial = "emulator-5556"
+    target = fac.write_command(serial, "resume", root=tmp_path)
+    entered = Event()
+    release = Event()
+    original_read = Path.read_text
+
+    def slow_read(path, *args, **kwargs):
+        value = original_read(path, *args, **kwargs)
+        if path == target:
+            entered.set()
+            assert release.wait(2.0)
+        return value
+
+    monkeypatch.setattr(Path, "read_text", slow_read)
+    consumed = []
+    consumer = Thread(target=lambda: consumed.append(
+        fac.consume_command(serial, root=tmp_path)))
+    consumer.start()
+    assert entered.wait(1.0)
+
+    writer = Thread(
+        target=lambda: fac.write_command(serial, "stop", root=tmp_path))
+    writer.start()
+    time.sleep(0.05)
+    assert writer.is_alive()
+    release.set()
+    consumer.join(2.0)
+    writer.join(2.0)
+
+    assert consumed == ["resume"]
+    assert fac.consume_command(serial, root=tmp_path) == "stop"
+
+
 def test_crash_recovery_revokes_stale_full_auto_command(tmp_path, monkeypatch):
     path = fac.write_command("emulator-5556", "resume", root=tmp_path)
     assert path.is_file()
@@ -344,6 +465,13 @@ def test_crash_recovery_revokes_stale_full_auto_command(tmp_path, monkeypatch):
     monkeypatch.setattr(type(path), "unlink",
                         lambda _self: (_ for _ in ()).throw(OSError("busy")))
     assert fac.revoke_pending_command("emulator-5556", root=tmp_path) is False
+
+
+def test_startup_revoke_never_consumes_pending_stop(tmp_path):
+    fac.write_command("emulator-5556", "stop", root=tmp_path)
+
+    assert fac.revoke_pending_command("emulator-5556", root=tmp_path) is True
+    assert fac.consume_command("emulator-5556", root=tmp_path) == "stop"
 
 
 def test_assist_resume_after_round(monkeypatch):
