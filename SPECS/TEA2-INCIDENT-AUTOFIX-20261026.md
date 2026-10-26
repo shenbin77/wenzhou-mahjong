@@ -16,7 +16,7 @@
 2. `external_advance_suspected`：可信本家牌河严格追加，期间没有 BOT action；只能证明外部推进，不能判断操作者。
 3. `human_action_likely`：在第 2 条基础上，推进前后 2.5 秒内还观察到同 serial、已核验雷电 HWND 内的鼠标左键按下。属于“高度疑似人工手点”，仍不冒充绝对真值。
 
-`human_input_monitor.py` 不记录键盘、不记录其它窗口；serial 只有通过官方 `ldconsole list2` 的实例 index 与 `emulator-<port>` 公式精确互证后才标记 `verified`，否则保持 `unknown`。
+`human_input_monitor.py` 不记录键盘、不记录其它窗口；serial 只有通过官方 `ldconsole list2` 的实例 index 与 `emulator-<port>` 公式精确互证后才标记 `verified`，否则保持 `unknown`。`list2` 由进程内单个后台刷新任务维护，两台共享同一快照；采点线程绝不等待该外部命令。可信旧快照仅在有界窗口内继续使用，首次无缓存或缓存超龄立即 fail-closed 为 `unknown`。
 
 ## 3. 故障包
 
