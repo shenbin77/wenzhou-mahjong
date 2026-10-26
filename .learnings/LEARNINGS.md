@@ -1,5 +1,24 @@
 # Learnings
 
+## [LRN-20261026-001] 完整场次事实与零人工验收必须分开
+
+**Priority**: high
+**Status**: promoted
+**Area**: validation
+
+### 内容
+用户纠正：昨晚代打实际已勉强走完整个16局场次。此前只写“16局未通过”容易被理解为从未打完；反过来把“打完”写成稳定通过也不成立。
+
+### 建议修复
+后续同时记录“是否完成过完整场次”和“是否满足当前SHA零人工稳定验收”。旧版本、停手、重拉、人工介入的完整场次只证明端到端可行，不能继承为N3通过。
+
+### 元数据
+- Source: correction
+- Pattern-Key: evidence-vs-acceptance
+- Promoted-To: AGENTS.md
+
+---
+
 ## [LRN-20261025-001] 点后验证使用相对变化和副露状态
 
 **Priority**: high

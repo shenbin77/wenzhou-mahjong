@@ -63,7 +63,14 @@ _backups/
 /_dtest/
 /_ds_test/
 /_acc_bt/
+/_acc_bt*/
 /_preflight/
+/.tmp_*/
+/_takeover/
+/采集/
+/_wt_*/
+/_incidents/*
+!/_incidents/README.md
 
 # 编辑器 / 系统
 .vscode/
