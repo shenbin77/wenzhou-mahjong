@@ -110,6 +110,7 @@ from lobby_autostart import (
 )
 from match_end import MatchEndState, read_match_end
 from promo_popup import PromoPopupState, read_promo_popup
+from timeout_dissolve import TimeoutDissolveState, read_timeout_dissolve
 from turn_gate import detect_settled_screen
 
 import panel_recovery
@@ -1027,6 +1028,117 @@ class TapExecutor:
             "verified": True,
             "reason": "牌局结束版式双帧确认，点击后连续两帧消失",
             "match_end_after": last_state.ledger() if last_state else None,
+        }
+        evidence.dump("verified", outcome["reason"])
+        return outcome
+
+    # ------------------------------------------------------------------
+    # 等待超时解散比赛：专用“确定”白名单，与所有其它确定按钮严格隔离
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_timeout_dissolve_confirm(
+        state: TimeoutDissolveState,
+        point: tuple[int, int] | None,
+    ) -> tuple[int, int, tuple[int, int, int, int]]:
+        if not isinstance(state, TimeoutDissolveState) or not state.complete:
+            raise TapRejected("本帧不是证据完整的超时解散弹窗，拒绝点击确定")
+        if state.confirm_center is None or state.confirm_box is None:
+            raise TapAborted("超时解散弹窗缺少唯一确定按钮落点，拒绝点击")
+        center = tuple(int(v) for v in state.confirm_center)
+        box = tuple(int(v) for v in state.confirm_box)
+        if point is not None:
+            requested = (int(point[0]), int(point[1]))
+            if not TapExecutor._claim_point_in_box(requested, box):
+                raise TapRejected(
+                    f"超时解散确定坐标 {requested} 不在 fresh 帧按钮框 "
+                    f"{list(box)} 内，拒绝点击")
+            if max(abs(requested[0] - center[0]),
+                   abs(requested[1] - center[1])) > 12:
+                raise TapRejected(
+                    f"超时解散确定按钮两帧中心漂移超过 12px：旧 {requested} / "
+                    f"新 {center}，拒绝点击")
+        return center[0], center[1], box
+
+    def execute_timeout_dissolve_confirm(
+        self,
+        point: tuple[int, int] | None = None,
+        *,
+        image: np.ndarray | None = None,
+        session_dir: str | Path | None = None,
+        verify_delay: float | None = None,
+        verify_frames: int = 3,
+    ) -> dict:
+        """只处理精确“等待时间过长解散比赛！”弹窗的唯一青色确定。
+
+        真点前重新截取原生帧并重过消息指纹、结算遮罩、唯一按钮和双字
+        几何；只发一击，点后要求连续两帧不再命中精确弹窗。其它“确定”
+        弹窗无法借用本通道，验证失败也绝不补点。
+        """
+        dump_dir = self._resolve_claim_session_dir(session_dir)
+        if not self._enabled:
+            if image is None:
+                raise TapAborted("超时解散 dry_run 必须显式传 image，拒绝盲点")
+            state = read_timeout_dissolve(image)
+            x, y, box = self._resolve_timeout_dissolve_confirm(state, point)
+            return {
+                "executed": False, "dry_run": True, "stage": "plan",
+                "action": "confirm_timeout_dissolve", "tap": [x, y],
+                "box": list(box), "timeout_dissolve": state.ledger(),
+            }
+
+        evidence = _TapEvidence(dump_dir, tile_label="timeout_dissolve")
+        try:
+            self._require_game_foreground()
+            before = self._screenshot()
+            evidence.before = before
+            state = read_timeout_dissolve(before)
+            x, y, box = self._resolve_timeout_dissolve_confirm(state, point)
+            evidence.tap = [x, y]
+            evidence.box = list(box)
+            evidence.claim = {
+                "action": "confirm_timeout_dissolve",
+                "control": "exact_timeout_dissolve_confirm",
+                "source": "timeout_dissolve.read_timeout_dissolve",
+                "timeout_dissolve_before": state.ledger(),
+                "discard_channel_reused": False,
+            }
+            self._require_game_foreground()
+            self._tap(x, y)
+            delay = self.verify_delay if verify_delay is None else max(
+                0.0, float(verify_delay))
+            if delay > 0:
+                time.sleep(delay)
+            clear_frames = 0
+            last_state = None
+            after = before
+            for _attempt in range(max(1, int(verify_frames))):
+                after = self._screenshot()
+                last_state = read_timeout_dissolve(after)
+                if last_state.present:
+                    clear_frames = 0
+                else:
+                    clear_frames += 1
+                    if clear_frames >= 2:
+                        break
+                time.sleep(max(0.25, delay or 0.0))
+            evidence.after = after
+            evidence.claim["timeout_dissolve_after"] = (
+                last_state.ledger() if last_state else None)
+            if clear_frames < 2:
+                raise TapUnverified(
+                    f"点超时解散确定 ({x},{y}) 后精确弹窗仍在/未见连续两帧消失，"
+                    "不补点，交人工确认")
+        except Exception as exc:  # noqa: BLE001 - 先落证据，原异常照抛
+            evidence.dump(type(exc).__name__, str(exc))
+            raise
+
+        outcome = {
+            "executed": True, "dry_run": False, "stage": "verified",
+            "action": "confirm_timeout_dissolve", "tap": [x, y],
+            "box": list(box), "verified": True,
+            "reason": "精确超时解散弹窗双帧确认，单击后连续两帧消失",
+            "timeout_dissolve_after": (
+                last_state.ledger() if last_state else None),
         }
         evidence.dump("verified", outcome["reason"])
         return outcome

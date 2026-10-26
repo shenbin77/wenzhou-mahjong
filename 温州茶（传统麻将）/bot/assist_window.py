@@ -4663,6 +4663,8 @@ class TeaAssistWindow:
             claim_auto_click=True,
             claim_policy=recommended_runner_config(
                 auto_click_enabled=True, include_chi=True),
+            player_name=account,
+            allow_return_lobby=True,
             event_callback=lambda event, analysis: self._auto_events.put(
                 (event, analysis)),
         )
@@ -4934,7 +4936,7 @@ class TeaAssistWindow:
             level, phase = "error", "安全停手"
         elif kind == "error":
             level, phase = "error", "异常复核"
-        elif kind in {"action", "invitation_declined"}:
+        elif kind in {"action", "invitation_declined", "left_table"}:
             level, phase = "ok", "动作已验证"
         elif kind == "round_reset":
             level, phase = "wait", "换局重建"
@@ -4942,7 +4944,6 @@ class TeaAssistWindow:
             level, phase = "wait", "观察/弃权"
         self._set_operational_status(
             phase, reason or f"事件：{kind}", level=level)
-
         frame = event.get("frame")
         if isinstance(analysis, dict) and frame and Path(frame).is_file():
             result = dict(analysis)
@@ -4973,6 +4974,12 @@ class TeaAssistWindow:
         # authoritative autoplay event status last.
         self._set_operational_status(
             phase, reason or f"事件：{kind}", level=level)
+        if kind == "left_table" and isinstance(event.get("player_score"), int):
+            summary = getattr(self, "match_summary", None)
+            if summary is not None:
+                summary.set(format_match_summary(
+                    round_no=16, round_total=16,
+                    score=int(event["player_score"])))
 
     # -- session flag / auto review / misc -------------------------------
     def _active_follow_session_dir(self) -> Path | None:

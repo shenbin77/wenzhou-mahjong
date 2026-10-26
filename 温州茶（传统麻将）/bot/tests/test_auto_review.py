@@ -307,7 +307,9 @@ def test_progress_suspicions_are_written_with_original_line_numbers(tmp_path):
     external = _by_category(summary, "external_advance_suspected")
     assert len(stuck) == 1 and len(external) == 1
     assert stuck[0]["excerpt"]["line_start"] == 2
-    assert stuck[0]["line"] == 4
+    assert stuck[0]["line"] == 2
+    assert stuck[0]["line_end"] == 4
+    assert stuck[0]["frame"] == "f3.png"
     assert external[0]["line"] == 5
     assert external[0]["excerpt"]["bot_action_between"] is False
     assert "仅标记" in external[0]["excerpt"]["reason"]
@@ -418,6 +420,83 @@ def test_later_distinct_failure_gets_open_incident_after_old_is_resolved(
     assert by_line[3]["status"] == "open"
     assert by_line[3]["incident_id"] != old_id
     assert rescanned["incident"] == by_line[3]
+
+
+def test_growing_same_stall_updates_one_incident_with_stable_id(tmp_path):
+    """同一 occurrence 增长尾行，只更新 occurrences/latest_failure。"""
+    rows = [
+        HEADER_CLEAN,
+        _stuck_candidate(0, "same-1.png"),
+        _stuck_candidate(2, "same-2.png"),
+        _stuck_candidate(5, "same-3.png"),
+    ]
+    session = _session(tmp_path, actions=rows)
+    inbox = tmp_path / "inbox"
+
+    initial = review_session(session, incident_root=inbox)
+    initial_stuck = [item for item in initial["incidents"]
+                     if item["category"] == "stuck_suspected"]
+    assert len(initial_stuck) == 1
+    incident_id = initial_stuck[0]["incident_id"]
+
+    with (session / "actions.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(
+            _stuck_candidate(8, "same-4.png"), ensure_ascii=False) + "\n")
+
+    rescanned = review_session(session, incident_root=inbox)
+    rescanned_stuck = [item for item in rescanned["incidents"]
+                       if item["category"] == "stuck_suspected"]
+    assert len(rescanned_stuck) == 1
+    assert rescanned_stuck[0]["incident_id"] == incident_id
+
+    index = json.loads((inbox / "index.json").read_text(encoding="utf-8"))
+    stuck_entries = [item for item in index["incidents"]
+                     if item["category"] == "stuck_suspected"]
+    assert len(stuck_entries) == 1
+    payload = json.loads(
+        (inbox / incident_id / "incident.json").read_text(encoding="utf-8"))
+    assert payload["occurrences"] == 2
+    assert payload["first_failure"]["line"] == 2
+    assert payload["latest_failure"]["line"] == 2
+    assert payload["latest_failure"]["line_end"] == 5
+    assert payload["latest_failure"]["frame"].endswith("same-4.png")
+
+
+def test_new_stall_after_action_or_stop_gets_distinct_incident(tmp_path):
+    """action/stop 都是 occurrence 边界；边界后的卡壳必须生成新 ID。"""
+    bot_action = {
+        "ts": "2026/10/26 17:37:08", "event": "action",
+        "verified": True, "action_id": "boundary", "action_source": "bot",
+        "frame": "frames/action.png",
+    }
+    rows = [
+        HEADER_CLEAN,
+        _stuck_candidate(0, "first-1.png"),
+        _stuck_candidate(2, "first-2.png"),
+        _stuck_candidate(5, "first-3.png"),
+        bot_action,
+        _stuck_candidate(10, "second-1.png"),
+        _stuck_candidate(12, "second-2.png"),
+        _stuck_candidate(15, "second-3.png"),
+        {
+            "ts": "2026/10/26 17:37:18", "event": "stop",
+            "gate": "user_stop", "reason": "boundary",
+            "frame": "frames/stop.png",
+        },
+        _stuck_candidate(20, "third-1.png"),
+        _stuck_candidate(22, "third-2.png"),
+        _stuck_candidate(25, "third-3.png"),
+    ]
+    inbox = tmp_path / "inbox"
+
+    summary = review_session(
+        _session(tmp_path, actions=rows), incident_root=inbox)
+    stuck = [item for item in summary["incidents"]
+             if item["category"] == "stuck_suspected"]
+
+    assert len(stuck) == 3
+    assert {item["line"] for item in stuck} == {2, 6, 10}
+    assert len({item["incident_id"] for item in stuck}) == 3
 
 
 # ---------------------------------------------------------------------------

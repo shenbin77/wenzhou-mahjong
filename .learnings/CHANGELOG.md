@@ -23,4 +23,17 @@
 {"ts":"2026-10-26T19:21:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-005","summary":"改用控制文件消费与follow_session stop事件验证停止"}
 {"ts":"2026-10-26T19:43:00+08:00","action":"add","type":"error","id":"ERR-20261026-006","summary":"嵌套pytest basetemp父目录不存在导致14项setup失败"}
 {"ts":"2026-10-26T19:44:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-006","summary":"创建已忽略父目录后同组58项通过"}
+{"ts":"2026-10-26T21:56:00+08:00","action":"add","type":"error","id":"ERR-20261026-007","summary":"OpenCV直接读取中文绝对路径失败，实机门禁零点击退出"}
+{"ts":"2026-10-26T21:58:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-007","summary":"改用Path.read_bytes加imdecode后双端门禁点击与点后复核通过"}
+{"ts":"2026-10-26T22:28:00+08:00","action":"add","type":"error","id":"ERR-20261026-008","summary":"超时解散TapExecutor测试未显式传证据目录，被安全门先行拒绝"}
+{"ts":"2026-10-26T22:29:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-008","summary":"测试统一传pytest tmp_path，保留生产证据目录安全门"}
+{"ts":"2026-10-26T22:34:00+08:00","action":"add","type":"error","id":"ERR-20261026-009","summary":"昵称模板排名的sorted生成器未显式分组导致py_compile失败"}
+{"ts":"2026-10-26T22:35:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-009","summary":"生成器加括号并由py_compile先行复核"}
+{"ts":"2026-10-26T22:41:00+08:00","action":"add","type":"error","id":"ERR-20261026-010","summary":"前端接线定向回归猜测了不存在的test_assist_window.py"}
+{"ts":"2026-10-26T22:42:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-010","summary":"先用rg --files核对，改跑真实的full_auto和hud测试"}
+{"ts":"2026-10-26T22:47:00+08:00","action":"add","type":"error","id":"ERR-20261026-011","summary":"已验证会话内_offline_probe_logs路径，但递归Remove-Item被执行策略拒绝"}
+{"ts":"2026-10-26T22:54:00+08:00","action":"add","type":"error","id":"ERR-20261026-012","summary":"独立majiang-bot回归唯一失败为Windows默认GBK读取UTF-8 manifest"}
+{"ts":"2026-10-26T22:56:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-012","summary":"PYTHONUTF8=1复跑487通过13跳过206子测试通过，确认为环境编码差异"}
+{"ts":"2026-10-26T22:58:00+08:00","action":"add","type":"error","id":"ERR-20261026-013","summary":"安全审查发现三按钮版式不能证明同帧顶部16/16局数"}
+{"ts":"2026-10-26T22:59:00+08:00","action":"resolve","type":"error","id":"ERR-20261026-013","summary":"删除调用方布尔门并补同帧16/16视觉门禁，对抗回归159项与独立复审通过"}
 ```

@@ -150,6 +150,8 @@ def test_full_auto_handoff_enables_guarded_loop(monkeypatch, tmp_path):
     assert created["enabled"] is True
     assert created["claim_auto_click"] is True
     assert created["claim_policy"][1]["include_chi"] is True
+    assert created["player_name"] == "玉姐"
+    assert created["allow_return_lobby"] is True
     assert window.start_button.config["text"] == "停止全部"
     assert window.auto_button.config["text"] == "关闭全自动（恢复只读推荐）"
     assert window.root.delay == 150

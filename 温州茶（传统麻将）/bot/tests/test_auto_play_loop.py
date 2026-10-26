@@ -47,9 +47,11 @@ from action_guard import ActionGuardResult  # noqa: E402
 from action_policy import ACTION_PASS, ActionDecision, BoardState  # noqa: E402
 from harvest_tea import EXPECTED_PACKAGE  # noqa: E402
 from invite_dialog import InvitationState  # noqa: E402
+from match_score import MatchScoreState, read_match_score  # noqa: E402
 from promo_popup import PromoPopupState  # noqa: E402
 from round_transition import TransitionResult  # noqa: E402
 from tap_executor import TapPlan, TapRejected  # noqa: E402
+from timeout_dissolve import TimeoutDissolveState  # noqa: E402
 
 HUD_A = b"hud-" + bytes(range(32))
 HUD_B = b"hud-" + bytes(range(1, 33))     # 同长度、全字节不同 → 必判换局
@@ -89,6 +91,32 @@ def test_direct_discard_redraw_proof_requires_exact_multiset_transition():
     wrong_caishen = dict(after, caishen_id=9)
     assert auto_play_loop.direct_discard_redraw_proof(
         before, wrong_caishen, 9)["discarded"] is False
+
+
+def test_direct_discard_proof_accepts_verified_n_to_n_minus_one_with_melds():
+    """实机 214616：裸框误把暗手前三张切成副露，完整分析仍读对 14→13。"""
+    before = {
+        "mode": "tea_2p", "caishen_id": 8,
+        "melds": [[3, 4, 5]],
+        "hand_ids": [7, 67, 9, 6, 67, 46, 48, 48, 26, 27, 27, 28, 29, 3],
+    }
+    after = {
+        "mode": "tea_2p", "caishen_id": 8,
+        "melds": [[3, 4, 5]],
+        "hand_ids": [7, 67, 9, 6, 67, 46, 48, 48, 26, 27, 27, 28, 29],
+    }
+
+    proof = auto_play_loop.direct_discard_redraw_proof(before, after, 3)
+
+    assert proof["discarded"] is True
+    assert proof["after_count"] == 13
+    assert proof["removed"] == [3]
+    assert proof["added"] == []
+    assert "禁止第二击" in proof["reason"]
+
+    changed_meld = dict(after, melds=[[3, 3, 3]])
+    assert auto_play_loop.direct_discard_redraw_proof(
+        before, changed_meld, 3)["discarded"] is False
 
 
 # ----------------------------------------------------------------------
@@ -221,6 +249,7 @@ class FakeTap:
         self.execute_invitation_calls: list[dict] = []
         self.execute_leave_calls: list[dict] = []
         self.execute_close_popup_calls: list[dict] = []
+        self.execute_timeout_dissolve_calls: list[dict] = []
 
     def plan(self, analysis):
         self.plan_calls.append(analysis)
@@ -259,6 +288,16 @@ class FakeTap:
                 "box": [1438, 160, 1495, 221], "verified": True,
                 "reason": "促销弹窗版式双帧确认，点击后连续两帧不再命中"}
 
+    def execute_timeout_dissolve_confirm(self, point=None, **kwargs):
+        self.execute_timeout_dissolve_calls.append({"point": point, **kwargs})
+        return {
+            "executed": True, "dry_run": False, "stage": "verified",
+            "action": "confirm_timeout_dissolve",
+            "tap": list(point or (800, 585)),
+            "box": [692, 541, 908, 630], "verified": True,
+            "reason": "精确超时解散弹窗双帧确认，单击后连续两帧消失",
+        }
+
 
 def increasing_clock(step: float = 0.01):
     state = {"now": 0.0}
@@ -289,6 +328,11 @@ def make_loop(tmp_path, *, enabled: bool = False, analyses=None, frames=None,
         lambda: {"chosen": sys.executable, "version": "adb-fake-1.0.41",
                  "servers": ["18368"], "devices": ["emulator-test"],
                  "found": [sys.executable], "notes": ["offline test double"]})
+    score_reader = kwargs.pop("match_score_fn", None) or (
+        lambda _image, **_kwargs: MatchScoreState(
+            True, left_player="玉姐", right_player="拾则",
+            left_score=-59, right_score=59, confidence=.99,
+            reason="离线假整场积分"))
     loop = AutoPlayLoop(
         enabled=enabled,
         adb_path=sys.executable,          # 只做 is_file() 检查，不会被执行
@@ -308,6 +352,8 @@ def make_loop(tmp_path, *, enabled: bool = False, analyses=None, frames=None,
         round_key_fn=hud_feeder,
         sleep_fn=lambda _seconds: None,
         clock_fn=increasing_clock(),
+        player_name=kwargs.pop("player_name", "玉姐"),
+        match_score_fn=score_reader,
         **kwargs,
     )
     return loop, shot, analyzer, fake_tap, foreman
@@ -396,6 +442,54 @@ def test_incomplete_invitation_stops_without_clicking_anywhere(monkeypatch,
     assert event["gate"] == "gate_invitation_unresolved"
     assert analyzer.calls == 0
     assert tap.execute_invitation_calls == []
+    assert tap.execute_calls == [] and tap.execute_claim_calls == []
+
+
+def _timeout_dissolve_state(*, complete: bool) -> TimeoutDissolveState:
+    return TimeoutDissolveState(
+        present=True,
+        complete=complete,
+        confirm_box=(692, 541, 908, 630) if complete else None,
+        confirm_center=(800, 585) if complete else None,
+        panel_box=(476, 222, 1151, 654),
+        reason=("精确证据完整" if complete else "按钮证据不完整"),
+        evidence={"checks": {"message": True, "panel": True,
+                             "overlay": True, "button": complete}},
+    )
+
+
+def test_timeout_dissolve_confirms_before_analysis_then_stops_match(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        auto_play_loop, "read_timeout_dissolve",
+        lambda _image: _timeout_dissolve_state(complete=True))
+    loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    event = loop.tick()
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "match_dissolved"
+    assert event["timeout_dissolve_confirm"]["verified"] is True
+    assert analyzer.calls == 0
+    assert len(tap.execute_timeout_dissolve_calls) == 1
+    assert tap.execute_timeout_dissolve_calls[0]["point"] == (800, 585)
+    assert tap.execute_calls == [] and tap.execute_claim_calls == []
+    assert loop.stopped is True
+
+
+def test_timeout_dissolve_incomplete_evidence_stops_without_click(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        auto_play_loop, "read_timeout_dissolve",
+        lambda _image: _timeout_dissolve_state(complete=False))
+    loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+
+    event = loop.tick()
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "gate_timeout_dissolve_unresolved"
+    assert analyzer.calls == 0
+    assert tap.execute_timeout_dissolve_calls == []
     assert tap.execute_calls == [] and tap.execute_claim_calls == []
 
 
@@ -2504,12 +2598,50 @@ def test_match_end_clicks_return_lobby_once(tmp_path):
     assert event is not None and event["event"] == "left_table"
     assert len(tap.execute_leave_calls) == 1
     assert event["match_end"]["present"] is True
+    assert event["player_name"] == "玉姐"
+    assert event["player_score"] == -59
+    assert event["match_result_record"]["round_no"] == 16
+    rows = [json.loads(line) for line in loop.match_result_path.read_text(
+        encoding="utf-8").splitlines()]
+    assert rows == [event["match_result_record"]]
+    assert rows[0]["left_player"] == "玉姐"
+    assert rows[0]["right_player"] == "拾则"
     assert loop._left_table is True
     assert loop._bright_subset_advice is None
     # 再调一次不许重复点
     assert loop._match_end_event(match_end_frame(), Path(tmp_path) / "f2.png",
                                  {}, 0.0) is None
     assert len(tap.execute_leave_calls) == 1
+
+
+def test_match_end_unknown_configured_player_does_not_persist_or_leave(
+        tmp_path):
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, allow_return_lobby=True,
+        player_name="未登记昵称")
+
+    event = loop._match_end_event(
+        match_end_frame(), Path(tmp_path) / "f.png", {}, 0.0)
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "match_score_player_unverified"
+    assert tap.execute_leave_calls == []
+    assert not loop.match_result_path.exists()
+
+
+def test_match_end_requires_verified_score_before_persist_or_leave(tmp_path):
+    rejected = MatchScoreState(False, reason="左右积分不守恒")
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, allow_return_lobby=True,
+        match_score_fn=lambda _image, **_kwargs: rejected)
+
+    event = loop._match_end_event(
+        match_end_frame(), Path(tmp_path) / "f.png", {}, 0.0)
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "match_score_unverified"
+    assert tap.execute_leave_calls == []
+    assert not loop.match_result_path.exists()
 
 
 # ---------------------------------------------------------------------------

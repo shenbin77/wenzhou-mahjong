@@ -92,6 +92,30 @@ def test_incident_is_atomic_idempotent_and_resolvable(tmp_path: Path) -> None:
     assert index["incidents"][0]["status"] == "resolved"
 
 
+def test_stuck_fingerprint_ignores_growing_tail_line(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    root = tmp_path / "inbox"
+    first_issue = _issue()
+    first_issue["excerpt"]["line_start"] = 10
+    first_issue["excerpt"]["line_end"] = 13
+    later_issue = json.loads(json.dumps(first_issue))
+    later_issue["line"] = 20
+    later_issue["line_end"] = 20
+    later_issue["frame"] = "frames/later.png"
+    later_issue["excerpt"]["line_end"] = 20
+
+    first = create_incident(first_issue, session, [], incident_root=root)
+    later = create_incident(later_issue, session, [], incident_root=root)
+
+    assert later["incident_id"] == first["incident_id"]
+    assert later["occurrences"] == 2
+    assert later["first_failure"]["line_end"] == 13
+    assert later["latest_failure"]["line_end"] == 20
+    index = json.loads((root / "index.json").read_text(encoding="utf-8"))
+    assert len(index["incidents"]) == 1
+
+
 def test_verification_pending_is_preserved_until_live_retest(
         tmp_path: Path) -> None:
     session = tmp_path / "session"

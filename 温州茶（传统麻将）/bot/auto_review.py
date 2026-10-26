@@ -329,9 +329,15 @@ def _screen_progress_suspicions(rows, source: str, *, clicks=(),
             start_index = event.get("start_index")
             end_index = event.get("end_index")
             if isinstance(start_index, int) and 0 <= start_index < len(rows):
-                excerpt["line_start"] = rows[start_index][0]
+                # 同一持续卡壳的主行固定锚定 occurrence 起点；否则
+                # session_watch 随新帧更新 event_index 会令 incident 指纹漂移。
+                line_no = rows[start_index][0]
+                excerpt["line_start"] = line_no
             if isinstance(end_index, int) and 0 <= end_index < len(rows):
+                # 末行与末帧仍作为 latest_failure 的动态证据保留，但不参与
+                # stuck_suspected 的稳定指纹。
                 excerpt["line_end"] = rows[end_index][0]
+                item = rows[end_index][1]
         issue = _issue(str(event.get("type")), DECISION, source,
                        line_no, item, excerpt)
         if "line_end" in excerpt:

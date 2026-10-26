@@ -123,11 +123,21 @@ def read_repo_version(project_root: str | Path) -> Optional[str]:
 def _issue_fingerprint(issue: Mapping[str, Any], session_dir: Path) -> str:
     excerpt = issue.get("excerpt")
     excerpt = excerpt if isinstance(excerpt, Mapping) else {}
+    category = issue.get("category")
+    # ``stuck_suspected`` 表示一段持续中的同一 occurrence。监控器会随着
+    # 新帧到来更新 event_index / line_end；若把动态尾行放进指纹，同一段
+    # 卡壳每增长一帧就会生成一个新 incident。它的稳定身份应由起始行和
+    # 起始时间决定，尾行只属于 latest_failure 证据。
+    stuck = category == "stuck_suspected"
+    line = (excerpt.get("line_start") if stuck
+            else issue.get("line"))
+    if line is None:
+        line = issue.get("line")
     material = {
         "session": str(session_dir.resolve()),
-        "category": issue.get("category"),
-        "line": issue.get("line"),
-        "line_end": issue.get("line_end"),
+        "category": category,
+        "line": line,
+        "line_end": None if stuck else issue.get("line_end"),
         "gate": excerpt.get("gate"),
         "stall_class": excerpt.get("stall_class"),
         "ts_start": excerpt.get("ts_start") or issue.get("ts"),

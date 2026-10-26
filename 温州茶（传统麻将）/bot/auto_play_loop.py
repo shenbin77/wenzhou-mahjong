@@ -82,7 +82,9 @@ from hand_ledger import HandLedger
 from invite_dialog import read_invitation
 from lobby_autostart import plan_start, read_lobby_room
 from match_end import read_match_end
+from match_score import read_match_score
 from promo_popup import read_promo_popup
+from timeout_dissolve import read_timeout_dissolve
 from harvest_tea import DEFAULT_SERIAL, EXPECTED_PACKAGE
 from round_transition import RoundTransitionExecutor
 from single_bright_cut import (
@@ -293,10 +295,17 @@ def direct_discard_redraw_proof(
     after_result: dict,
     expected_tile: int,
 ) -> dict:
-    """证明第一击已直接出牌，随后又摸入一张牌。
+    """用前后完整牌集合证明第一击已经完成出牌。
 
-    必须同时满足：前后完整手牌、玩法/财神一致、暗手张数不变、
-    目标牌恰好少 1 张、同时恰好多 1 张新牌。任一条件不满足都拒绝。
+    接受两种真实时序：
+
+    * 目标牌直接离手，暗手 ``N -> N-1``；
+    * 目标牌离手后游戏已立即补摸，暗手仍为 ``N``。
+
+    两种都必须满足玩法/财神一致、目标牌恰好少一张、没有其它旧牌
+    消失；若前后都提供副露，副露还必须完全一致。任一条件不满足都拒绝。
+    这层是对裸 ``count_tiles`` 的语义复核，专门避免副露布局把一段暗手
+    误切成第二组副露后，将已经成功的第一击误报为 ``tap_aborted``。
     """
     out = {
         "discarded": False, "after_count": None, "reason": "",
@@ -317,8 +326,9 @@ def direct_discard_redraw_proof(
         out["reason"] = "hand_ids 含非法值"
         return out
     out["after_count"] = len(after)
-    if not before or len(before) != len(after):
-        out["reason"] = f"前后暗手张数不等（{len(before)}→{len(after)}）"
+    if not before or len(after) not in (len(before), len(before) - 1):
+        out["reason"] = (
+            f"前后暗手张数不是直接离手或离手后补摸（{len(before)}→{len(after)}）")
         return out
     if before_result.get("mode") and after_result.get("mode"):
         if before_result.get("mode") != after_result.get("mode"):
@@ -329,6 +339,12 @@ def direct_discard_redraw_proof(
     if before_cs is None or after_cs is None or before_cs != after_cs:
         out["reason"] = "前后财神未知或不一致"
         return out
+    before_melds = before_result.get("melds")
+    after_melds = after_result.get("melds")
+    if before_melds is not None and after_melds is not None:
+        if before_melds != after_melds:
+            out["reason"] = "前后副露不一致"
+            return out
     removed = list((Counter(before) - Counter(after)).elements())
     added = list((Counter(after) - Counter(before)).elements())
     out["removed"] = removed
@@ -336,6 +352,16 @@ def direct_discard_redraw_proof(
     if removed != [int(expected_tile)]:
         out["reason"] = (
             f"目标牌变化不唯一：期望移除 {expected_tile}，实际移除 {removed}")
+        return out
+    if len(after) == len(before) - 1:
+        if added:
+            out["reason"] = f"直接离手态不应新增牌：实际新增 {added}"
+            return out
+        out["discarded"] = True
+        out["reason"] = (
+            f"第一击后目标牌 {expected_tile} 已从完整手牌移除，暗手 "
+            f"{len(before)}→{len(after)} 且副露保持；判定第一击已完成出牌，"
+            "禁止第二击")
         return out
     if len(added) != 1:
         out["reason"] = f"补摸变化不唯一：新增 {added}"
@@ -493,10 +519,10 @@ class AutoPlayLoop:
         adb_inventory_fn: Callable[[], dict] | None = None,
         rss_sampler_fn: Callable[[], dict] | None = None,
         lobby_open_enabled: bool = LOBBY_OPEN_ENABLED_DEFAULT,
-        # 生产 CLI 不提供该开关，恒为 False；True 仅供离线测试验证授权后的
-        # 原行为，任何自动离桌路径不得接线。（项目红线 AGENTS.md 把「返回
-        # 大厅」与充值/洗切/分享战绩/游戏中心同列，永久禁止自动点击；牌局
-        # 结束时必须停在牌桌留证，由人工决定去向。）
+        player_name: str = "",
+        match_score_fn: Callable[..., Any] | None = None,
+        # 只对白名单 16/16 总结页开放：必须先按昵称识别并持久化双方整场
+        # 总分，才允许点返回大厅；提前解散、未知昵称、积分不守恒都不接线。
         allow_return_lobby: bool = False,
     ) -> None:
         if not isinstance(enabled, bool):
@@ -547,6 +573,7 @@ class AutoPlayLoop:
         # Structured follow-session debug log (vision/gates/caishen/decisions).
         # Never flips CLAIM_TAP_CHANNEL_READY; dual-writes beside actions.jsonl.
         self.follow_log_path = self.session_dir / "follow_session.jsonl"
+        self.match_result_path = self.session_dir / "match_results.jsonl"
         self._follow_log = SessionLogger(self.session_dir)
         # session_dir 在 self._tap（161 行）之后才确定，所以只能在这里回填：
         # 让 tap 证据落进本局会话目录而不是 TapExecutor 的默认目录。
@@ -626,8 +653,10 @@ class AutoPlayLoop:
         # ---- 开新场通道的状态（G5 预算 / G6 告警节流，离桌与换局都清零）----
         # G7 授权门：默认关。关着时只把「该点哪个空座」算出来记进台账，零点击。
         self.lobby_open_enabled = bool(lobby_open_enabled)
-        # 返回大厅授权门（2026-10-26 Codex P0）：牌局结束时**不许**自动把
-        # 用户带离牌桌。只认显式 True——字符串/"1"/1 一律按未授权处理。
+        self.player_name = str(player_name or "").strip()
+        self._match_score = match_score_fn or read_match_score
+        self._match_result_recorded = False
+        # 返回大厅授权门：只认显式 True——字符串/"1"/1 一律未授权。
         self.allow_return_lobby = allow_return_lobby is True
         # ---- adb 单点治理现场（只读枚举，供故障定性） -------------------
         # ``adb_inventory()`` 只做只读枚举（adb devices / 进程列表），不发任何
@@ -1173,6 +1202,12 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001 - 截图失败计入异常预算
             return self._anomaly("capture_failed", f"{exc}", started)
         image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        # “等待时间过长解散比赛！”是独立终态，必须在邀请、换局、牌河和
+        # 识牌之前处理。弹窗覆盖牌桌时继续走下层像素会污染所有状态。
+        timeout_event = self._timeout_dissolve_event(
+            image, frame_path, started)
+        if timeout_event is not None:
+            return timeout_event
         # 入桌邀请优先级高于行动行、换局和识牌：弹窗盖住牌桌时继续分析会把
         # 弹窗元素误读成游戏状态。只允许“邀请您进入”文案 + 矩形“取消”按钮
         # 同帧完整命中后拒绝；这条通道绝不复用吃牌面板的蓝色圆形取消。
@@ -1368,6 +1403,7 @@ class AutoPlayLoop:
             # 跨局污染），所以只清不留。
             self._hand_ledger.reset()
             self._left_table = False
+            self._match_result_recorded = False
             self._promo_close_count = 0
             # 换局 = 新的一局已经开始，开新场通道的整屏预算随之作废。
             self._reset_lobby_open_budget()
@@ -1751,6 +1787,74 @@ class AutoPlayLoop:
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
         })
 
+    def _timeout_dissolve_event(self, image: np.ndarray, frame_path: Path,
+                                started: float) -> dict | None:
+        """精确超时解散弹窗 → 单击唯一“确定”，随后终止本场。
+
+        这不是通用“确定”通道。只有 :mod:`timeout_dissolve` 的文案指纹、
+        面板、暗遮罩、唯一青色按钮与双字形同帧通过才可能点击。处理后本场
+        已解散，N1/N2/N3 必须从新场重算，因此成功后也立即停掉本次循环。
+        """
+        try:
+            state = read_timeout_dissolve(image)
+        except Exception as exc:  # noqa: BLE001 - 无法排除遮挡时必须停手
+            return self._stop(
+                "timeout_dissolve_detect_failed",
+                f"超时解散弹窗检测异常，无法安全继续：{exc}",
+                {"frame": str(frame_path)},
+            )
+        if not state.present:
+            return None
+        base = {
+            "ts": datetime.now().astimezone().isoformat(),
+            "round_seq": self.round.seq,
+            "frame": str(frame_path),
+            "timeout_dissolve": state.ledger(),
+        }
+        if not state.complete or state.confirm_center is None:
+            return self._stop(
+                "gate_timeout_dissolve_unresolved",
+                "命中超时解散文案，但专用确定按钮证据不完整；本帧零点击",
+                base,
+            )
+        try:
+            outcome = self._tap.execute_timeout_dissolve_confirm(
+                state.confirm_center,
+                image=image,
+                session_dir=self.session_dir,
+            )
+        except TapUnverified as exc:
+            return self._stop(
+                "timeout_dissolve_unverified",
+                f"点超时解散确定后无法证明弹窗消失，停手不补点：{exc}",
+                base,
+            )
+        except TapAborted as exc:
+            return self._stop(
+                "timeout_dissolve_aborted",
+                f"超时解散确定被安全门拒绝：{exc}",
+                base,
+            )
+        except Exception as exc:  # noqa: BLE001 - 结果未知一律停手
+            return self._stop(
+                "timeout_dissolve_failed",
+                f"超时解散确定结果未知：{exc}",
+                base,
+            )
+        if self.dry_run:
+            return self._event({
+                **base,
+                "event": "dry_run_plan",
+                "timeout_dissolve_confirm": outcome,
+                "reason": "dry_run 只记录精确超时解散确定计划，不点击",
+                "elapsed_ms": round((self._clock() - started) * 1000, 1),
+            })
+        return self._stop(
+            "match_dissolved",
+            "已单击精确超时解散确定并验证弹窗消失；本场提前解散，不计16把总分，验收从新场重算",
+            {**base, "timeout_dissolve_confirm": outcome},
+        )
+
     def _promo_dismiss_event(self, image: np.ndarray, frame_path: Path,
                              base: dict, started: float) -> dict | None:
         """促销弹窗（「限时优惠」）→ 关掉右上角菱形 ❌。
@@ -1869,6 +1973,34 @@ class AutoPlayLoop:
                 "本帧零点击，停在牌桌留证等人工处理",
                 base,
             )
+        # ---- 16/16 整场积分门：先按昵称落账，后返回大厅 -----------------
+        # read_match_score 会再次复核三按钮版式、两侧正负颜色、数字模板、
+        # 零和守恒与双方昵称。任何一步不确定都留在总结页，绝不先离桌再补账。
+        try:
+            # 积分识别器必须在同一原生帧自行确认顶部 16/16 与三按钮总结
+            # 版式；调用方不再传可绕过局数证据的布尔值。
+            score_state = self._match_score(image)
+        except Exception as exc:  # noqa: BLE001 - 未落账绝不离桌
+            return self._stop(
+                "match_score_failed",
+                f"16/16 整场积分识别异常，未返回大厅：{exc}", base)
+        base["match_result"] = score_state.ledger()
+        if not score_state.ok:
+            return self._stop(
+                "match_score_unverified",
+                f"16/16 整场积分未通过门禁，未返回大厅：{score_state.reason}",
+                base,
+            )
+        player_score = score_state.score_for(self.player_name)
+        base["player_name"] = self.player_name or None
+        base["player_score"] = player_score
+        if not self.player_name or player_score is None:
+            return self._stop(
+                "match_score_player_unverified",
+                (f"16/16 积分已读出，但当前昵称 {self.player_name!r} 无法与"
+                 "左右总结栏唯一对应；未落账、未返回大厅"),
+                base,
+            )
         if self.dry_run:
             try:
                 plan = self._tap.execute_leave_table(image=image)
@@ -1877,9 +2009,41 @@ class AutoPlayLoop:
             return self._event({
                 **base, "event": "dry_run_plan", "tap": plan.get("tap"),
                 "box": plan.get("box"), "verified": None,
-                "reason": "dry_run 已识别牌局结束画面；只记录返回大厅计划，不点击",
+                "reason": ("dry_run 已识别 16/16 整场积分与返回大厅；"
+                           "只记录计划，不写正式积分、不点击"),
                 "elapsed_ms": round((self._clock() - started) * 1000, 1),
             })
+        result_row = {
+            "ts": datetime.now().astimezone().isoformat(),
+            "event": "match_result",
+            "mode": self.mode,
+            "serial": self.serial,
+            "round_no": 16,
+            "round_total": 16,
+            "player_name": self.player_name,
+            "player_score": int(player_score),
+            "left_player": score_state.left_player,
+            "left_score": score_state.left_score,
+            "right_player": score_state.right_player,
+            "right_score": score_state.right_score,
+            "confidence": score_state.confidence,
+            "frame": str(frame_path),
+            "source": "verified_16_of_16_summary",
+        }
+        if not self._match_result_recorded:
+            try:
+                self._ensure_dirs()
+                self._append_line(
+                    self.match_result_path,
+                    json.dumps(result_row, ensure_ascii=False),
+                )
+            except Exception as exc:  # noqa: BLE001 - 未持久化绝不离桌
+                return self._stop(
+                    "match_score_persist_failed",
+                    f"16/16 积分持久化失败，未返回大厅：{exc}", base)
+            self._match_result_recorded = True
+        base["match_result_record"] = result_row
+        base["match_result_path"] = str(self.match_result_path)
         try:
             outcome = self._tap.execute_leave_table(
                 image=image, session_dir=self.session_dir)
@@ -1907,8 +2071,9 @@ class AutoPlayLoop:
         panel_recovery.clear_state(self._panel_recovery_path)
         return self._event({
             **base, "event": "left_table", "leave_table": outcome,
-            "reason": ("牌局结束：已点「返回大厅」并验证版式连续两帧消失；"
-                       "本局状态已全部作废"),
+            "reason": (f"16/16 整场积分已按昵称落账：{self.player_name} "
+                       f"{player_score:+d}；已点「返回大厅」并验证版式连续"
+                       "两帧消失，本局状态已全部作废"),
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
         })
 

@@ -26,6 +26,148 @@ OSError: [Errno 28] No space left on device
 - Reproducible: yes
 
 ---
+
+## [ERR-20261026-008] TapExecutor 专用通道测试未传证据目录
+
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### 摘要
+新增超时解散 dry-run 测试直接构造 `TapExecutor`，未显式传 `session_dir`，先被既有证据目录安全门拒绝，尚未进入被测视觉门禁。
+
+### 错误信息
+```
+TapAborted: execute_claim 必须显式传 session_dir，或先赋值 executor.session_dir
+```
+
+### 建议修复
+所有独立构造 `TapExecutor` 的专用通道测试都传入 pytest `tmp_path`，不使用生产会话根目录。
+
+### 解决结果
+两项测试均改为传 `session_dir=tmp_path`；既有证据目录安全门保持不变。
+
+### 元数据
+- Reproducible: yes
+
+---
+
+## [ERR-20261026-009] sorted 生成器与关键字参数缺少分组
+
+**Priority**: low
+**Status**: resolved
+**Area**: code
+
+### 摘要
+昵称模板排名首次实现把生成器表达式与 `reverse=True` 直接并列传给 `sorted`，Python 要求显式包住生成器，`py_compile` 在测试前即阻断。
+
+### 错误信息
+```
+SyntaxError: Generator expression must be parenthesized
+```
+
+### 建议修复
+多行 `sorted(generator, keyword=...)` 始终给生成器额外一层圆括号，并先跑 `py_compile`。
+
+### 解决结果
+生成器已显式分组，随后重新执行编译与定向测试。
+
+### 元数据
+- Reproducible: yes
+
+---
+
+## [ERR-20261026-010] 猜测了不存在的前端测试文件名
+
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### 摘要
+积分前端接线后定向回归时直接写了不存在的 `tests/test_assist_window.py`，pytest 在收集前退出；未影响另一条并行测试。
+
+### 错误信息
+```
+ERROR: file or directory not found: tests/test_assist_window.py
+```
+
+### 建议修复
+运行前先用 `rg --files tests` 核对真实测试文件名，再选与改动对应的 `test_assist_full_auto.py` 和 `test_assist_hud.py`。
+
+### 解决结果
+已按真实文件清单改跑相关前端测试。
+
+### 元数据
+- Reproducible: yes
+
+---
+
+## [ERR-20261026-011] 递归清理已验证临时目录被执行策略拒绝
+
+**Priority**: low
+**Status**: resolved
+**Area**: tools
+
+### 摘要
+离线分析生成的 `_offline_probe_logs` 已先解析并确认位于目标实盘会话目录内，但当前命令执行策略仍拒绝 `Remove-Item -Recurse`；未改用跨 shell 或其它绕过方式。
+
+### 错误信息
+```
+exec_command failed: ... Remove-Item ... -Recurse -Force ... rejected: blocked by policy
+```
+
+### 建议修复
+由允许的文件清理能力删除该精确临时目录，或保留为已忽略的离线探针日志；不得扩大删除范围。
+
+### 元数据
+- Reproducible: yes
+
+---
+
+## [ERR-20261026-012] 独立 majiang-bot 全量测试受 Windows 默认 GBK 读取影响
+
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### 摘要
+按项目根命令运行独立 `代打BOT/majiang-bot` 回归时，486 项已通过、13 项跳过，唯一失败来自测试用 `Path.read_text()` 未指定编码，系统默认 GBK 无法读取导出的 UTF-8 manifest；与本次茶2主线改动文件无交集。
+
+### 错误信息
+```
+UnicodeDecodeError: 'gbk' codec can't decode byte 0xbe ...
+pc_bot/tests/test_export_tile_samples.py:181
+```
+
+### 建议修复
+先以 `PYTHONUTF8=1` 复跑确认环境归因；后续在独立子仓库把测试读取显式改为 `encoding='utf-8'`，但本轮茶2收口不跨边界修改。
+
+### 处理结果
+设置 `PYTHONUTF8=1` 后同一套件复跑为 `487 passed, 13 skipped, 206 subtests passed`，确认是 Windows 默认文本编码的测试环境差异，不是本轮茶2运行时代码回归。独立子仓库源码未在本轮跨边界修改。
+
+### 元数据
+- Reproducible: yes
+
+---
+
+## [ERR-20261026-013] 三按钮总结版式被错误当作 16/16 局数证据
+
+**Priority**: high
+**Status**: resolved
+**Area**: safety-gate
+
+### 摘要
+独立安全审查发现 `read_match_end().present` 只证明底部三按钮几何，不证明顶部局数为 `16/16`；旧接线却把它作为 `full_match_verified=True` 传给积分识别器。若未来出现三按钮的提前或异常结算，存在误记整场总分并返回大厅的风险。
+
+### 处理
+删除调用方布尔门；`read_match_score()` 改为在同一1600×900原生帧自行复核三按钮版式与顶部 `16/16` 固定局数字形。新增对抗用例，把真实 `4/16` HUD 粘到真实三按钮整场总结帧，必须拒绝读取积分。
+
+独立复审结论为 PASS：验证失败只会停手，不持久化积分、不点击返回大厅；固定 ROI 漂移最多造成安全假阴性。
+
+### 元数据
+- Reproducible: yes
+
+---
 ## [ERR-20261025-001] AgentDock context internal error
 
 **Priority**: medium
@@ -217,6 +359,32 @@ faulthandler：psutil._pswindows.cmdline -> app_entry.verified_window_argv
 
 ### 建议修复
 使用嵌套 basetemp 前先创建已忽略的父目录，或直接使用一级唯一目录。创建父目录后同一组 58 项通过。
+
+### 元数据
+- Reproducible: yes
+
+---
+
+## [ERR-20261026-007] Python OpenCV 直接读取中文绝对路径失败
+
+**Priority**: medium
+**Status**: resolved
+**Area**: tools
+
+### 摘要
+一次性实机弹窗门禁脚本把含中文的绝对路径直接交给 `cv2.imread`，当前 Windows Python/OpenCV 组合未能打开文件；脚本在任何 ADB 点击前安全退出。
+
+### 错误信息
+```
+imread_('D:\温州麻将\_takeover\...\emulator-5554_before.png'): can't open/read file
+reference missing/bad size
+```
+
+### 建议修复
+让 Python 从已设置为项目根的工作目录使用纯 ASCII 相对路径，或用 `Path.read_bytes` 加 `cv2.imdecode` 读取；实机操作脚本必须继续保持“读图失败即零点击”。
+
+### 解决结果
+改用 `Path.read_bytes` + `cv2.imdecode` 后，两台原生帧均以消息区像素差与唯一青色按钮双门禁通过；分别点击一次并验证弹窗消失。
 
 ### 元数据
 - Reproducible: yes
