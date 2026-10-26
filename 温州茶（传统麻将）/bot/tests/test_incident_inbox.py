@@ -5,6 +5,7 @@ from pathlib import Path
 
 from incident_inbox import (
     create_incident,
+    mark_incident_verification_pending,
     mark_incident_resolved,
     sanitize_event,
 )
@@ -68,6 +69,31 @@ def test_incident_is_atomic_idempotent_and_resolvable(tmp_path: Path) -> None:
     assert "reopened_at" not in rescanned
     index = json.loads((root / "index.json").read_text(encoding="utf-8"))
     assert index["incidents"][0]["status"] == "resolved"
+
+
+def test_verification_pending_is_preserved_until_live_retest(
+        tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    root = tmp_path / "inbox"
+    created = create_incident(
+        _issue(), session, [], incident_root=root,
+        serial="emulator-5554")
+    pending = mark_incident_verification_pending(
+        root, created["incident_id"], note="patched; N1 pending")
+
+    assert pending["status"] == "verification_pending"
+    assert pending["verification_note"] == "patched; N1 pending"
+    assert "resolved_at" not in pending
+    readme = (root / created["incident_id"] / "README.md").read_text(
+        encoding="utf-8")
+    assert "patched; N1 pending" in readme
+    rescanned = create_incident(
+        _issue(), session, [], incident_root=root,
+        serial="emulator-5554")
+    assert rescanned["status"] == "verification_pending"
+    index = json.loads((root / "index.json").read_text(encoding="utf-8"))
+    assert index["incidents"][0]["status"] == "verification_pending"
 
 
 def test_incident_redacts_absolute_paths_nickname_and_screen_metadata(

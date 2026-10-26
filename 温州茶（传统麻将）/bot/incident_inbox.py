@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 __all__ = [
     "create_incident",
+    "mark_incident_verification_pending",
     "mark_incident_resolved",
     "read_repo_version",
     "sanitize_event",
@@ -213,7 +214,7 @@ def _evidence_paths(
 
 def _render_readme(payload: Mapping[str, Any]) -> str:
     issue = payload.get("first_failure") or {}
-    return "\n".join([
+    lines = [
         f"# Incident {payload.get('incident_id')}",
         "",
         f"- 状态：{payload.get('status')}",
@@ -223,10 +224,17 @@ def _render_readme(payload: Mapping[str, Any]) -> str:
         f"- 首次发现：{payload.get('created_at')}",
         f"- 最近发现：{payload.get('last_seen_at')}",
         f"- 原因：{issue.get('reason') or issue.get('excerpt', {}).get('reason') or ''}",
+    ]
+    if payload.get("verification_note"):
+        lines.append(f"- 待复验说明：{payload.get('verification_note')}")
+    if payload.get("resolution"):
+        lines.append(f"- 解决说明：{payload.get('resolution')}")
+    lines.extend([
         "",
         "此包只含白名单结构化事件和证据路径，不复制密钥、Cookie、聊天或原始无关日志。",
         "",
     ])
+    return "\n".join(lines)
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -336,6 +344,35 @@ def mark_incident_resolved(
     payload["status"] = "resolved"
     payload["resolved_at"] = _now()
     payload["resolution"] = str(resolution)[:1000]
+    _atomic_text(path, json.dumps(payload, ensure_ascii=False,
+                                  indent=2, sort_keys=True) + "\n")
+    _atomic_text(path.parent / "README.md", _render_readme(payload))
+    _update_index(root, payload)
+    return payload
+
+
+def mark_incident_verification_pending(
+    incident_root: str | Path,
+    incident_id: str,
+    *,
+    note: str,
+) -> dict:
+    """Acknowledge a historical incident without claiming it is resolved.
+
+    Use this after a code fix and offline regression when the same live path
+    has not yet passed.  Rescans preserve this status; a distinct later
+    session/fingerprint still creates a new ``open`` incident.
+    """
+    root = Path(incident_root)
+    path = root / incident_id / "incident.json"
+    payload = _read_json(path)
+    if payload is None:
+        raise FileNotFoundError(path)
+    payload["status"] = "verification_pending"
+    payload["verification_pending_at"] = _now()
+    payload["verification_note"] = str(note)[:1000]
+    payload.pop("resolved_at", None)
+    payload.pop("resolution", None)
     _atomic_text(path, json.dumps(payload, ensure_ascii=False,
                                   indent=2, sort_keys=True) + "\n")
     _atomic_text(path.parent / "README.md", _render_readme(payload))
