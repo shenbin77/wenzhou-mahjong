@@ -19,6 +19,7 @@ from lobby_seat import SeatExecution, execute_auto_seat
 from lobby_start import (
     StartExecution,
     execute_auto_start,
+    game_started_evidence,
     waiting_room_visual_evidence,
 )
 from live_capture import capture_frame, read_foreground
@@ -120,11 +121,19 @@ def advance(
     save_evidence = _evidence_writer(Path(session_dir))
 
     if state == "in_game":
-        return LobbyProgress(
-            state, "已进入牌局，转交现有跟随/代打引擎。",
-            known_cards, card_status,
-            seated=True, started=True,
-        )
+        # The green ready animation shown after a player presses Start is also
+        # classified as ``in_game`` by the broad scene classifier.  Never hand
+        # that frame to AutoPlayLoop: only a real 16/17-tile dealt hand proves
+        # the game has started.  Otherwise keep the dedicated lobby executor
+        # alive so the other local player can still press its own Start button.
+        dealt, _dealt_evidence = game_started_evidence(image)
+        if dealt:
+            return LobbyProgress(
+                state, "已确认真实发牌，转交现有跟随/代打引擎。",
+                known_cards, card_status,
+                seated=True, started=True,
+            )
+        state = "waiting_room"
     if state == "waiting_room":
         if not allow_start:
             return LobbyProgress(
@@ -189,8 +198,20 @@ def advance(
         final_waiting = (
             execution.final_image is not None
             and waiting_room_visual_evidence(execution.final_image)["matched"])
+        final_started = False
+        if (execution.final_state == "in_game"
+                and execution.final_image is not None):
+            final_started, _final_evidence = game_started_evidence(
+                execution.final_image)
+        if final_started:
+            return LobbyProgress(
+                "in_game", "已自动坐下并确认真实发牌，转交现有跟随/代打引擎。",
+                known_cards, card_status,
+                clicked=execution.clicked, seated=True, started=True,
+            )
         if (allow_start and execution.final_image is not None
-                and (execution.final_state == "waiting_room" or final_waiting)):
+                and (execution.final_state in ("waiting_room", "in_game")
+                     or final_waiting)):
             return advance(
                 serial, adb_path, session_dir,
                 allow_seat=False, allow_start=True,
@@ -198,7 +219,8 @@ def advance(
                 room_cards_snapshot=known_cards,
                 runner=runner, sleep_fn=sleep_fn)
         return LobbyProgress(
-            execution.final_state,
+            ("waiting_room" if execution.final_state == "in_game"
+             else execution.final_state),
             execution.detail,
             known_cards,
             card_status,

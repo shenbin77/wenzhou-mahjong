@@ -170,6 +170,77 @@ def test_member_overlay_waiting_room_cannot_be_handed_to_in_game(monkeypatch,tmp
     assert seen
 
 
+def test_ready_animation_without_dealt_hand_stays_in_waiting_room(monkeypatch,tmp_path):
+    """Generic green-table IN_GAME is not enough to hand off to autoplay."""
+    image=np.zeros((900,1600,3),np.uint8)
+    monkeypatch.setattr(lobby_follow,"_capture_image",lambda *a,**k:image)
+    monkeypatch.setattr(lobby_follow,"assess_frame",lambda _img:
+        LobbyAssessment("in_game",None,"not_visible","generic green",False))
+    monkeypatch.setattr(lobby_follow,"waiting_room_visual_evidence",lambda _img:
+        {"matched":False,"member_overlay":False})
+    monkeypatch.setattr(lobby_follow,"game_started_evidence",lambda _img:
+        (False,{"watch":"in_game","start_button":False,
+                "hand_count":0,"reason":"not_dealt"}))
+    seen=[]
+    monkeypatch.setattr(lobby_follow,"execute_auto_start",lambda *a,**k:
+        (seen.append(k) or lobby_follow.StartExecution(
+            "wait","已准备，等待另一端开始并发牌",False,"waiting_room",image)))
+    out=lobby_follow.advance(
+        "emulator-5556","adb.exe",tmp_path,
+        allow_start=True,expected_account="烘熊瞎")
+    assert out.state=="waiting_room"
+    assert out.started is False
+    assert out.terminal is False
+    assert seen
+
+
+def test_generic_in_game_handoffs_only_with_dealt_hand(monkeypatch,tmp_path):
+    image=np.zeros((900,1600,3),np.uint8)
+    monkeypatch.setattr(lobby_follow,"_capture_image",lambda *a,**k:image)
+    monkeypatch.setattr(lobby_follow,"assess_frame",lambda _img:
+        LobbyAssessment("in_game",None,"not_visible","generic green",False))
+    monkeypatch.setattr(lobby_follow,"waiting_room_visual_evidence",lambda _img:
+        {"matched":False,"member_overlay":False})
+    monkeypatch.setattr(lobby_follow,"game_started_evidence",lambda _img:
+        (True,{"watch":"in_game","start_button":False,
+               "hand_count":17,"reason":"dealt_hand"}))
+    monkeypatch.setattr(lobby_follow,"execute_auto_start",lambda *a,**k:
+        (_ for _ in ()).throw(AssertionError("already dealt")))
+    out=lobby_follow.advance(
+        "emulator-5556","adb.exe",tmp_path,
+        allow_start=True,expected_account="烘熊瞎")
+    assert out.state=="in_game"
+    assert out.started is True
+
+
+def test_post_seat_ready_animation_reenters_guarded_start(monkeypatch,tmp_path):
+    image=np.zeros((900,1600,3),np.uint8)
+    monkeypatch.setattr(lobby_follow,"_capture_image",lambda *a,**k:image)
+    assessments=iter([
+        LobbyAssessment("lobby",8,"ok","房卡8",True),
+        LobbyAssessment("in_game",None,"not_visible","generic green",False),
+    ])
+    monkeypatch.setattr(lobby_follow,"assess_frame",lambda _img:next(assessments))
+    monkeypatch.setattr(lobby_follow,"waiting_room_visual_evidence",lambda _img:
+        {"matched":False,"member_overlay":False})
+    monkeypatch.setattr(lobby_follow,"game_started_evidence",lambda _img:
+        (False,{"watch":"in_game","start_button":False,
+                "hand_count":0,"reason":"not_dealt"}))
+    monkeypatch.setattr(lobby_follow,"execute_auto_seat",lambda *a,**k:
+        lobby_follow.SeatExecution("seated","已坐下",True,"in_game",image))
+    starts=[]
+    monkeypatch.setattr(lobby_follow,"execute_auto_start",lambda *a,**k:
+        (starts.append(k) or lobby_follow.StartExecution(
+            "wait","等待本端开始按钮",False,"waiting_room",image)))
+    out=lobby_follow.advance(
+        "emulator-5556","adb.exe",tmp_path,
+        allow_start=True,expected_account="烘熊瞎",sleep_fn=lambda _s:None)
+    assert out.state=="waiting_room"
+    assert out.started is False
+    assert out.terminal is False
+    assert len(starts)==1
+
+
 def test_advance_can_seat_even_when_room_card_ocr_is_unknown(monkeypatch,tmp_path):
     image=np.zeros((900,1600,3),np.uint8)
     monkeypatch.setattr(lobby_follow,"_capture_image",lambda *a,**k:image)
