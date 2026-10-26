@@ -650,9 +650,9 @@ def render_review_md(summary: dict) -> str:
     lines.append(f"- serial：{summary.get('serial')} · mode："
                  f"{summary.get('mode')} · dev：{summary.get('dev')}")
     if summary["corpus_eligible"]:
-        lines.append("- 训练语料准入：✅ 可进语料（无拦截项）")
+        lines.append("- 人工候选复核池：✅ 可进入（尚未成为训练金标）")
     else:
-        lines.append("- 训练语料准入：❌ 不可进语料")
+        lines.append("- 人工候选复核池：❌ 不可进入")
         for blocker in summary["corpus_blockers"]:
             lines.append(f"  - 拦截：{blocker}")
     src = summary["sources"]

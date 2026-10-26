@@ -653,7 +653,8 @@ def test_by_class_aggregation_and_report_files(tmp_path):
     assert on_disk["mode"] == "tea_2p" and on_disk["dev"] is True
     assert on_disk["corpus_eligible"] is False
     md = Path(summary["report_md"]).read_text(encoding="utf-8")
-    assert "训练语料准入：❌ 不可进语料" in md
+    assert "人工候选复核池：❌ 不可进入" in md
+    assert "可进语料" not in md
     assert "## 候选后续（仅供人工审核）" in md
     assert "claim 验证在压暗帧误杀" not in md  # 只描述模式，不下断言式结论
     assert "硬停手" in md
@@ -707,5 +708,7 @@ def test_cli_batch_smoke(tmp_path):
         errors="replace", cwd=str(BOT_DIR))
     assert proc.returncode == 0
     assert "共 2 个会话" in proc.stdout
+    assert "人工候选复核池" in proc.stdout
+    assert "可进语料" not in proc.stdout
     assert (root / "s1" / "auto_review.md").exists()
     assert (root / "s2" / "auto_review.json").exists()

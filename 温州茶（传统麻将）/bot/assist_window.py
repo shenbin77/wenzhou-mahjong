@@ -48,6 +48,7 @@ from recognition_review import FLAG_NAMES, draw_recognition_boxes
 from recorder import AssistRecorder
 from tea_bot import tile_name, vision_to_engine
 from mode_vision import detect_shu_rule_text, score_tea_player_count
+from room_round_vision import read_room_round
 from tile_vision import TARGET_IDS, TILE_IDS
 from tile_render import render_advice, render_candidates, render_hand
 from instance_profile import (atomic_write_json, profile_paths,
@@ -305,6 +306,51 @@ def detect_table_mode(image) -> tuple[str | None, str]:
     if players == 4:
         return "tea_4p", f"识别到温州茶 · 4人（分数 {score:.2f}／差 {margin:.2f}）"
     return None, f"规则文字未确认（最佳分数 {score:.2f}／差 {margin:.2f}）"
+
+
+def direct_audit_context(raw: bytes, *, mode: str, serial: str) -> dict:
+    """Extract corpus provenance from this exact native frame.
+
+    The partition id deliberately over-groups every match ever observed under
+    one room id.  This reduces split flexibility but prevents same-room
+    evidence (including a match crossing midnight) from leaking across
+    train/validation.  No UI cache, manual value, or sticky mode latch is
+    accepted as Tea-2 ground truth.
+    """
+    context: dict = {"device_serial": serial}
+    try:
+        image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        image = None
+    if image is not None and mode == "tea_2p":
+        try:
+            players, score, margin = score_tea_player_count(image)
+        except Exception:
+            players, score, margin = None, 0.0, 0.0
+        if players == 2:
+            context["mode_evidence"] = {
+                "player_count": 2,
+                "source": "screen_rule_text",
+                "verified": True,
+                "score": float(score),
+                "margin": float(margin),
+            }
+    reading = None
+    if image is not None:
+        try:
+            reading = read_room_round(image)
+        except Exception:
+            reading = None
+    room_id = str(getattr(reading, "room_id", "") or "").strip()
+    round_seq = getattr(reading, "round_no", None)
+    if type(round_seq) is not int or round_seq < 1:
+        round_seq = None
+    if room_id:
+        context["room_id"] = room_id
+        context["match_id"] = f"tea2-room-scope:{room_id}"
+    if round_seq is not None:
+        context["round_seq"] = round_seq
+    return context
 
 
 def read_table_mode(serial: str) -> tuple[str | None, str]:
@@ -3750,6 +3796,7 @@ class TeaAssistWindow:
             capture = LiveCapture(get_adb_path(), serial)
             self._capture = capture
         raw = capture.grab()
+        audit_context = direct_audit_context(raw, mode=mode, serial=serial)
         capture_ms = (time.perf_counter() - started) * 1000
         path = save_frame(folder, raw)
         try:
@@ -3759,10 +3806,11 @@ class TeaAssistWindow:
                 manual_caishen=manual_caishen,
             )
         except Exception as exc:
-            event = build_frame_event(raw, path, {"status": "error", "reason": str(exc)},
-                                      mode=mode)
+            failed = {"status": "error", "reason": str(exc), **audit_context}
+            event = build_frame_event(raw, path, failed, mode=mode)
             append_frame_event(session_dir, event)
             raise
+        result.update(audit_context)
         result["frame_path"] = str(path)
         result["record_frame"] = record
         event = build_frame_event(raw, path, result, mode=mode)

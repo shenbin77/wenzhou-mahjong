@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
-from tkinter import simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
@@ -125,9 +125,15 @@ class RecognitionReview:
             if answer is None:
                 return
             corrected = answer
-        append_review(self.session_dir, self.events[self.index], verdict, corrected)
-        self.reviews[self.events[self.index]["frame"]] = {
-            "verdict": verdict, "corrected_hand": corrected}
+        try:
+            append_review(self.session_dir, self.events[self.index], verdict, corrected)
+        except ValueError as exc:
+            messagebox.showerror("纠错格式无效", str(exc), parent=self.window)
+            return
+        reviewed, new_offset = read_appended_events(
+            self.session_dir / "recognition_reviews.jsonl", self.review_offset)
+        self.review_offset = new_offset
+        self.reviews.update({row["frame"]: row for row in reviewed})
         self.show()
         if self.index + 1 < len(self.events):
             self.move(1)
@@ -140,8 +146,12 @@ class RecognitionReview:
         event = self.events[self.index]
         reviewed = self.reviews.get(event["frame"], {})
         flags = "、".join(FLAG_NAMES.get(flag, flag) for flag in event.get("flags", [])) or "无自动疑点"
-        verdict = {"correct": "人工确认正确", "wrong": "人工标记错误"}.get(
-            reviewed.get("verdict"), "尚未人工复核")
+        verdict = {
+            "correct": "人工确认正确",
+            "corrected": "人工纠错完成",
+            "rejected": "人工拒绝为金标",
+            "wrong": "旧版人工标记错误",
+        }.get(reviewed.get("verdict"), "尚未人工复核")
         self.summary.set(
             f"{self.index + 1}/{len(self.events)}  {event.get('at', '')}  "
             f"{event.get('mode', '')}  {event.get('status', '')}  {verdict}  "

@@ -12,7 +12,8 @@ if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
 from recognition_audit import (append_frame_event, append_review,
-                               build_frame_event, read_appended_events, read_events)
+                               build_frame_event, parse_corrected_hand,
+                               read_appended_events, read_events)
 
 
 def _diagnostic(tile_id, *, accepted=True, reason="accepted"):
@@ -67,12 +68,34 @@ def test_every_prediction_is_unreviewed_until_a_human_checks(tmp_path):
     assert "more_than_four" in event["flags"]
     assert len(event["diagnostics"]) == 16
     append_frame_event(tmp_path, event)
-    append_review(tmp_path, event, "wrong", "actual hand")
+    correction = "1万 2万 3万 4万 5万 6万 7万 8万 9万 1筒 2筒 3筒 4筒 5筒 6筒 7筒"
+    append_review(tmp_path, event, "wrong", correction, reviewer="operator-1")
     assert read_events(tmp_path / "recognition_audit.jsonl")[0] == event
     review = read_events(tmp_path / "recognition_reviews.jsonl")[0]
-    assert review["verdict"] == "wrong"
-    assert review["corrected_hand"] == "actual hand"
+    assert review["schema"] == "recognition_review/v2"
+    assert review["verdict"] == "corrected"
+    assert review["corrected_hand"] == list(range(1, 10)) + list(range(21, 28))
+    assert review["reviewer"] == "operator-1"
+    assert review["source"] == "review_ui"
     assert frame.read_bytes() == b"raw frame"
+
+
+def test_review_parser_accepts_canonical_and_chinese_names_but_rejects_unknown():
+    assert parse_corrected_hand("w1,t2 s3 东 南 西 北 白") == [1, 22, 43, 61, 62, 63, 64, 67]
+    assert parse_corrected_hand("一万 2筒 三条") == [1, 22, 43]
+    assert parse_corrected_hand("[1, 21, 41, 67]") == [1, 21, 41, 67]
+    with pytest.raises(ValueError, match="无法识别"):
+        parse_corrected_hand("一万 火箭")
+    with pytest.raises(ValueError, match="超过 4 张"):
+        parse_corrected_hand("1万 1万 1万 1万 1万")
+
+
+def test_empty_wrong_review_is_explicitly_rejected(tmp_path):
+    event = {"frame": str(tmp_path / "frame.png"), "sha256": "a" * 64}
+    append_review(tmp_path, event, "wrong", "", reviewer="operator-1")
+    review = read_events(tmp_path / "recognition_reviews.jsonl")[0]
+    assert review["verdict"] == "rejected"
+    assert "corrected_hand" not in review
 
 
 def test_flags_incomplete_and_missing_evidence_without_claiming_error(tmp_path):
@@ -88,6 +111,55 @@ def test_flags_incomplete_and_missing_evidence_without_claiming_error(tmp_path):
     assert {"abstain", "unrecognized_tile", "unexpected_hand_count"} <= set(
         incomplete["flags"])
     assert incomplete["diagnostics"][0]["reason"] == "ambiguous"
+
+
+def test_frame_event_carries_only_explicit_manifest_provenance(tmp_path):
+    evidence = {"player_count": 2, "source": "screen_rule_text",
+                "verified": True, "score": 0.97}
+    event = build_frame_event(b"x", tmp_path / "x.png", {
+        "status": "advise", "device_serial": "emulator-5554",
+        "room_id": "228087", "match_id": "tea2-room-scope:228087",
+        "round_seq": 3, "mode_evidence": evidence,
+        "meld_count": 1, "melds": [[1, 2, 3]],
+    }, mode="tea_2p")
+    assert event["schema"] == "recognition_audit/v2"
+    assert event["device_serial"] == "emulator-5554"
+    assert event["room_id"] == "228087"
+    assert event["round_seq"] == 3
+    assert event["mode_evidence"] == evidence
+    assert event["melds"] == [[1, 2, 3]]
+
+
+def test_direct_audit_context_uses_only_current_frame_and_permanent_room_scope(monkeypatch):
+    import cv2
+    import numpy as np
+    import assist_window
+    from types import SimpleNamespace
+
+    ok, encoded = cv2.imencode(".png", np.zeros((900, 1600, 3), np.uint8))
+    assert ok
+    monkeypatch.setattr(assist_window, "score_tea_player_count",
+                        lambda _image: (2, 0.98, 0.19))
+    monkeypatch.setattr(assist_window, "read_room_round",
+                        lambda _image: SimpleNamespace(room_id="228087", round_no=4))
+    context = assist_window.direct_audit_context(
+        encoded.tobytes(), mode="tea_2p", serial="emulator-5554")
+    assert context["device_serial"] == "emulator-5554"
+    assert context["mode_evidence"] == {
+        "player_count": 2, "source": "screen_rule_text", "verified": True,
+        "score": 0.98, "margin": 0.19,
+    }
+    assert context["room_id"] == "228087"
+    assert context["match_id"] == "tea2-room-scope:228087"
+    assert context["round_seq"] == 4
+
+    monkeypatch.setattr(assist_window, "read_room_round",
+                        lambda _image: SimpleNamespace(room_id=None, round_no=None))
+    missing = assist_window.direct_audit_context(
+        encoded.tobytes(), mode="tea_2p", serial="emulator-5554")
+    assert "room_id" not in missing
+    assert "match_id" not in missing
+    assert "round_seq" not in missing
 
 
 def test_near_boundary_is_review_hint_and_live_tail_is_incremental(tmp_path):

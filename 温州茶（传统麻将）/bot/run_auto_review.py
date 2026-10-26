@@ -33,7 +33,8 @@ def main(argv: list[str]) -> int:
         total += summary["issue_count"]
         cats = ", ".join(f"{k}×{v}" for k, v in
                          sorted(summary["by_category"].items())) or "无"
-        corpus = "可进语料" if summary["corpus_eligible"] else "不可进语料"
+        corpus = ("可进入人工候选复核池" if summary["corpus_eligible"]
+                  else "不可进入人工候选复核池")
         print(f"{summary['session_dir']}")
         print(f"  mode={summary['mode']} dev={summary['dev']} "
               f"serial={summary['serial']} · 疑似问题 "

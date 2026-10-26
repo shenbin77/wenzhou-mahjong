@@ -13,10 +13,13 @@ from PIL import Image, ImageDraw
 
 BOT_DIR = Path(__file__).resolve().parents[1]
 TOOLS_DIR = BOT_DIR / "tools"
+if str(BOT_DIR) not in sys.path:
+    sys.path.insert(0, str(BOT_DIR))
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import build_tea2_evidence_manifest as manifest  # noqa: E402
+from recognition_audit import append_frame_event, append_review, build_frame_event  # noqa: E402
 
 
 def _png(path: Path, marker: int = 1, *, size=(1600, 900)) -> str:
@@ -87,6 +90,29 @@ def test_recognition_gold_requires_all_provenance_and_physical_label(tmp_path):
     assert row["image"]["declared_hash_verified"] is True
     assert row["label_usability"]["recognition"] is True
     assert row["strategy_label_usable"] is False
+
+
+def test_live_producer_review_and_manifest_consumer_are_schema_compatible(tmp_path):
+    session = tmp_path / "session"
+    frame = session / "frame.png"
+    digest = _png(frame, 41)
+    result = {
+        "status": "advise", "hand_ids": _hand(), "hand": [],
+        "device_serial": "emulator-5554", **_identity(round_seq=4),
+    }
+    event = build_frame_event(frame.read_bytes(), frame, result, mode="tea_2p")
+    assert event["sha256"] == digest
+    append_frame_event(session, event)
+    append_review(session, event, "correct", reviewer="operator-1")
+
+    built = manifest.build(tmp_path)
+
+    assert len(built["evidence"]) == 1
+    evidence = built["evidence"][0]
+    assert evidence["human_review"] == "correct"
+    assert evidence["recognition_label"] == _hand()
+    assert evidence["split_group"] == "228087|table-228087-game-1"
+    assert evidence["strategy_label_usable"] is False
 
 
 @pytest.mark.parametrize(("mode", "label", "review_kwargs", "reason"), [
