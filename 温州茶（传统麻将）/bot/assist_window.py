@@ -192,7 +192,11 @@ def tea_round_fingerprint(image_path: str | Path | None) -> bytes | None:
             and avatar[i] > avatar[i + 2] * 1.4
             for i in range(0, len(avatar), 3)
         )
-        if red_pixels > 100:
+        bright_pixels = sum(
+            max(avatar[i], avatar[i + 1], avatar[i + 2]) > 160
+            for i in range(0, len(avatar), 3)
+        )
+        if red_pixels > 100 or bright_pixels > 900:
             return None
         hud = image.convert("L").crop((15, 55, 225, 140))
         compact = bytes(pixel // 8 for pixel in hud.tobytes())

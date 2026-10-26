@@ -217,6 +217,8 @@ _AVATAR_CROP = (35, 95, 115, 140)       # 会把房号挡住的红色视频头�
 _AVATAR_RED_PIXELS_MAX = 100
 _AVATAR_RED_MIN = 90
 _AVATAR_RED_DOMINANCE = 1.4
+_AVATAR_BRIGHT_PIXELS_MAX = 900
+_AVATAR_BRIGHT_MIN = 160
 _HUD_SAME_MAX_DIFF = 8                  # 与 assist_window.same_tea_round 同容差
 
 #: Read-only pixel ROI that carries the 财神 signal (documentation only; see
@@ -243,7 +245,16 @@ def hud_fingerprint(image: np.ndarray) -> bytes | None:
     red_pixels = int(((red > _AVATAR_RED_MIN)
                       & (red > green * _AVATAR_RED_DOMINANCE)
                       & (red > blue * _AVATAR_RED_DOMINANCE)).sum())
-    if red_pixels > _AVATAR_RED_PIXELS_MAX:
+    # The animated "请神" portrait is not always red: several animation frames
+    # are mostly pale skin/white highlights.  Those frames used to slip past the
+    # red-only guard, mutate the room HUD fingerprint every refresh, and reset
+    # the already-confirmed 2-player latch indefinitely.  A clean HUD has far
+    # fewer bright pixels in this crop; treat either avatar signature as an
+    # unreadable HUD, never as evidence of a room change.
+    bright_pixels = int((np.maximum.reduce((red, green, blue))
+                         > _AVATAR_BRIGHT_MIN).sum())
+    if (red_pixels > _AVATAR_RED_PIXELS_MAX
+            or bright_pixels > _AVATAR_BRIGHT_PIXELS_MAX):
         return None
     x0, y0, x1, y1 = _HUD_CROP
     gray = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)

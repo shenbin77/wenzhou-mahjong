@@ -454,6 +454,31 @@ def test_hud_fingerprint_matches_assist_window_on_real_frames(two_p_frame,
         assert same_hud_fingerprint(theirs, mine)
 
 
+def test_bright_low_red_avatar_is_unknown_and_preserves_latch(
+        tmp_path, clear_two_p, blind_two_p):
+    """浅色动画头像也会遮住 HUD；它不能伪造换房并清空玩法锁。"""
+    from assist_window import tea_round_fingerprint
+
+    obscured = blind_two_p.copy()
+    # BGR cyan: deliberately bright but not red-dominant.  This reproduces the
+    # live animation phase that defeated the old red-only occlusion test.
+    obscured[100:131, 40:71] = (255, 255, 0)
+    assert hud_fingerprint(obscured) is None
+
+    path = tmp_path / "bright_low_red_avatar.png"
+    ok, encoded = cv2.imencode(".png", obscured)
+    assert ok
+    encoded.tofile(str(path))
+    assert tea_round_fingerprint(path) is None
+
+    latch = TeaModeLatch()
+    assert latch.observe(clear_two_p).players == 2
+    reading = latch.observe(obscured)
+    assert reading.players == 2
+    assert reading.source == mode_vision.LATCH_SOURCE_LATCHED
+    assert latch.snapshot()["resets"] == 0
+
+
 def test_unreadable_signals_are_treated_as_unknown_not_mismatch():
     """读不到的信号不许自己产生重置 —— 与 auto_play_loop.same_round 同口径。"""
     assert same_hud_fingerprint(None, b"anything") is True
