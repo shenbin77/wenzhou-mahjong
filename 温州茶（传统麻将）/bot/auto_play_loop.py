@@ -65,7 +65,10 @@ from action_guard import ActionGuardResult, detect_action_ui
 from action_policy import (
     CLAIM_TAP_CHANNEL_READY,
     ACTION_CHI,
+    ACTION_HU,
+    ACTION_KONG,
     ACTION_PASS,
+    ACTION_PENG,
     ActionPolicyConfig,
     BoardState,
     HandState,
@@ -207,6 +210,11 @@ CHI_DIMMED_BRIGHT_RATIO_MAX = 0.15
 # 一致（落定）或 ATTEMPTS 耗尽（fail-closed）。
 CLAIM_SETTLE_ATTEMPTS = 8
 CLAIM_SETTLE_INTERVAL_S = 0.4
+# 吃/碰/杠成功后不是事务终点：必须在同局内用 fresh 帧重新算牌并再出一张。
+# 两个预算同时约束，避免进程调度异常时只靠 tick 或只靠时钟无限等待。
+POST_CLAIM_DISCARD_ACTIONS = frozenset({ACTION_CHI, ACTION_PENG, ACTION_KONG})
+POST_CLAIM_DISCARD_MAX_TICKS = 15
+POST_CLAIM_DISCARD_TIMEOUT_S = 20.0
 # 同屏促销弹窗的关闭预算：连续这么多次关闭之后弹窗仍在，说明点的不是它
 # （或弹窗会立刻重弹），停手留证，绝不无限重试。计数在换局/离桌时清零。
 PROMO_CLOSE_BUDGET = 3
@@ -393,6 +401,33 @@ class RoundState:
         if caishen and self.caishen and caishen != self.caishen:
             return False
         return True
+
+
+@dataclass
+class PostClaimContinuation:
+    """一次已验证鸣牌之后，尚未完成的“重新算牌并出一张”事务。"""
+
+    action: str
+    action_id: str
+    target_tile: int | None
+    round_seq: int
+    started_tick: int
+    started_at: float
+    supplement_required: bool = False
+    observed_ticks: int = 0
+
+    def ledger(self, now: float) -> dict:
+        return {
+            "action": self.action,
+            "action_id": self.action_id,
+            "target_tile": self.target_tile,
+            "round_seq": self.round_seq,
+            "started_tick": self.started_tick,
+            "observed_ticks": self.observed_ticks,
+            "age_s": round(max(0.0, float(now) - self.started_at), 3),
+            "supplement_required": self.supplement_required,
+            "status": "awaiting_recomputed_discard",
+        }
 
 
 def _same_hud(first: bytes, second: bytes) -> bool:
@@ -684,6 +719,9 @@ class AutoPlayLoop:
         self._bright_subset_advice: tuple[int, object, int] | None = None
         # 吃链在本行动窗弃权过的标记（局序+来牌+闭手），防重复点吃。
         self._chi_abstain_key: tuple | None = None
+        # 吃/碰/杠经 L3 证实后必须继续到“fresh 重算→出牌→离手验证”。
+        # 该状态只存在于内存，进程重启不恢复点击授权，也不猜中间事务。
+        self._post_claim_pending: PostClaimContinuation | None = None
         self._round_candidate: tuple[bytes | None, str | None] | None = None
         self._round_candidate_ticks = 0
         self._round_identity_unknown_ticks = 0
@@ -1146,6 +1184,13 @@ class AutoPlayLoop:
             "frame": str(frame_path),
             "round_transition_probe": probe,
         }
+        if self._post_claim_pending is not None:
+            return self._stop(
+                "post_claim_round_transition",
+                "鸣牌后的必出牌事务尚未完成却出现下一局页；本帧禁止点击",
+                {**base,
+                 "post_claim_continuation": self._post_claim_ledger()},
+            )
         if self.dry_run:
             return self._event({
                 **base, "event": "idle",
@@ -1256,6 +1301,11 @@ class AutoPlayLoop:
             "event": "idle", "round_seq": self.round.seq,
             "frame": str(frame_path),
         }
+        # 鸣牌后必出牌事务先推进 watchdog：促销若持续遮挡且 X 不可靠，
+        # 也必须在 20 秒内显式停手，不能被 promo 的早退无限挂起。
+        post_claim_timeout = self._post_claim_watchdog(frame_path, started)
+        if post_claim_timeout is not None:
+            return post_claim_timeout
         promo_event = self._promo_dismiss_event(
             image, frame_path, promo_base, started)
         if promo_event is not None:
@@ -1399,6 +1449,13 @@ class AutoPlayLoop:
             })
         changed_round = round_signal["state"] == "round_changed"
         if changed_round:
+            if self._post_claim_pending is not None:
+                return self._stop(
+                    "post_claim_round_changed",
+                    "鸣牌后的必出牌事务尚未完成就检测到换局，停止且不沿用旧状态",
+                    {"frame": str(frame_path),
+                     "post_claim_continuation": self._post_claim_ledger()},
+                )
             self.round.seq += 1
             self.round.hud_key = hud_key
             self.round.caishen = caishen
@@ -1441,6 +1498,8 @@ class AutoPlayLoop:
             "caishen": result.get("caishen"),
             "round_signal": round_signal,
         }
+        if self._post_claim_pending is not None:
+            base["post_claim_continuation"] = self._post_claim_ledger()
         # P0-5: refresh unified TableState from THIS frame before decide/discard.
         incoming_tile = None
         incoming_source = None
@@ -1670,7 +1729,7 @@ class AutoPlayLoop:
             after_path = str(self._save_frame(after_raw, "after"))
         except Exception as exc:  # noqa: BLE001 - 台阶账不影响已验证的点击
             after_path = f"<截图失败: {exc}>"
-        event = self._event({
+        event_data = {
             **base, "event": "action", "after_frame": after_path,
             "tap": outcome.get("tap"), "box": outcome.get("box"),
             "before_count": outcome.get("before_count"),
@@ -1680,11 +1739,20 @@ class AutoPlayLoop:
                 outcome.get("executed") and outcome.get("after_count")
                 == (outcome.get("before_count") or 0) - 1)),
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
-        })
+        }
         panel_recovery.clear_state(self._panel_recovery_path)
-        if not event["verified"]:
+        if event_data["verified"]:
+            # 普通直出也必须同步手牌账本。单亮/多亮路径已经这样做；若漏掉
+            # 常规路径，下一次摸牌后旧账本会在张数上重新“看似成立”，把已
+            # 打出的牌带回行动决策。扣不准时 HandLedger 会主动清空。
+            event_data["hand_ledger_discard"] = {
+                "tile_id": expected_tile,
+                "applied": self._hand_ledger.forget_tile(expected_tile),
+            }
+            event_data = self._complete_post_claim_after_discard(event_data)
+        else:
             self._stop("tap_unverified", "点击后手牌数量未验证，停止自动点击", base)
-        return event
+        return self._event(event_data)
 
     def _analyze_fresh_image(self, image: np.ndarray, tag: str) -> dict:
         """把 TapExecutor 的 fresh 帧送回同一分析链，且保留可审计原图。"""
@@ -1775,10 +1843,10 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001
             return self._stop("tap_failed", f"单亮摸切结果未知：{exc}", base)
         self.actions_done += 1
-        self._hand_ledger.forget_tile(expected_tile)
+        ledger_applied = self._hand_ledger.forget_tile(expected_tile)
         self._single_bright.reset()
         marker["outcome"] = "verified"
-        return self._event({
+        event_data = {
             **base, "event": "action", "tap": outcome.get("tap"),
             "box": outcome.get("box"),
             "before_count": outcome.get("before_count"),
@@ -1786,8 +1854,13 @@ class AutoPlayLoop:
             "verified": bool(outcome.get("executed") and
                              outcome.get("after_count") ==
                              (outcome.get("before_count") or 0) - 1),
+            "hand_ledger_discard": {
+                "tile_id": expected_tile, "applied": ledger_applied},
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
-        })
+        }
+        if event_data["verified"]:
+            event_data = self._complete_post_claim_after_discard(event_data)
+        return self._event(event_data)
 
     def _timeout_dissolve_event(self, image: np.ndarray, frame_path: Path,
                                 started: float) -> dict | None:
@@ -2661,13 +2734,13 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001
             return self._stop("tap_failed", f"多亮白名单点击结果未知：{exc}", base)
         self.actions_done += 1
-        self._hand_ledger.forget_tile(expected_tile)
+        ledger_applied = self._hand_ledger.forget_tile(expected_tile)
         self._bright_subset.reset()
         self._bright_subset_advice = None
         self._dim_gain_snapshot = None
         self._dim_gain_evidence = None
         marker["outcome"] = "verified"
-        return self._event({
+        event_data = {
             **base, "event": "action", "tap": outcome.get("tap"),
             "box": outcome.get("box"),
             "before_count": outcome.get("before_count"),
@@ -2675,8 +2748,13 @@ class AutoPlayLoop:
             "verified": bool(outcome.get("executed") and
                              outcome.get("after_count") ==
                              (outcome.get("before_count") or 0) - 1),
+            "hand_ledger_discard": {
+                "tile_id": expected_tile, "applied": ledger_applied},
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
-        })
+        }
+        if event_data["verified"]:
+            event_data = self._complete_post_claim_after_discard(event_data)
+        return self._event(event_data)
 
     # ------------------------------------------------------------------
     # 牌河/来牌读取（供行动决策取"别家刚打出的那张"）
@@ -2847,7 +2925,7 @@ class AutoPlayLoop:
             after_path = str(self._save_frame(after_raw, "after"))
         except Exception as exc:  # noqa: BLE001 - 台账不影响已验证的点击
             after_path = f"<截图失败: {exc}>"
-        event = self._event({
+        event_data = {
             **base, "event": "action", "after_frame": after_path,
             "tap": outcome.get("tap"), "box": outcome.get("box"),
             "before_count": outcome.get("before_count"),
@@ -2856,11 +2934,17 @@ class AutoPlayLoop:
                              and outcome.get("after_count")
                              == (outcome.get("before_count") or 0) - 1),
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
-        })
-        if not event["verified"]:
+        }
+        if event_data["verified"]:
+            event_data["hand_ledger_discard"] = {
+                "tile_id": expected_tile,
+                "applied": self._hand_ledger.forget_tile(expected_tile),
+            }
+            event_data = self._complete_post_claim_after_discard(event_data)
+        else:
             self._stop("tap_unverified",
                        "恢复第二击后手牌数量未验证，停止自动点击", base)
-        return event
+        return self._event(event_data)
 
     def _hint_panel_fallback(self, result: dict, verdict: TurnVerdict,
                              base: dict, started: float) -> dict | None:
@@ -2986,7 +3070,7 @@ class AutoPlayLoop:
             after_path = str(self._save_frame(after_raw, "after"))
         except Exception as exc:  # noqa: BLE001 - 台阶账不影响已验证的点击
             after_path = f"<截图失败: {exc}>"
-        event = self._event({
+        event_data = {
             **base, "event": "action", "after_frame": after_path,
             "tap": outcome.get("tap"), "box": outcome.get("box"),
             "before_count": outcome.get("before_count"),
@@ -2994,12 +3078,18 @@ class AutoPlayLoop:
             "verified": bool(outcome.get("executed") and outcome.get("after_count")
                              == (outcome.get("before_count") or 0) - 1),
             "elapsed_ms": round((self._clock() - started) * 1000, 1),
-        })
+        }
         self._last_advise_read = None
         self._hint_panel_streak = 0
-        if not event["verified"]:
+        if event_data["verified"]:
+            event_data["hand_ledger_discard"] = {
+                "tile_id": expected_tile,
+                "applied": self._hand_ledger.forget_tile(expected_tile),
+            }
+            event_data = self._complete_post_claim_after_discard(event_data)
+        else:
             self._stop("tap_unverified", "点击后手牌数量未验证，停止自动点击", base)
-        return event
+        return self._event(event_data)
 
     def _probe_round_key(self, frame_path: Path) -> tuple[bytes | None, str | None]:
         """算本帧的换局指纹；识别失败按未知处理（fail closed）。"""
@@ -3243,6 +3333,8 @@ class AutoPlayLoop:
         *,
         tag: str,
         note: str,
+        target_tile: int | None = None,
+        kong_kind: str | None = None,
         extra_check=None,
         accept_new_window: bool = False,
     ) -> tuple[bool, str, "BoardState | None", list]:
@@ -3283,7 +3375,9 @@ class AutoPlayLoop:
                 image = cv2.imdecode(
                     np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
                 board = self._board_from_frame(raw, path, image, note=note)
-                verified, reason = verify_after_click(before, board, action)
+                verified, reason = verify_after_click(
+                    before, board, action,
+                    target_tile=target_tile, kong_kind=kong_kind)
                 if action == ACTION_PASS and not verified:
                     recovered, recovery_reason = (
                         self._verify_pass_after_overlay_underread(before, board))
@@ -3338,6 +3432,215 @@ class AutoPlayLoop:
     # ------------------------------------------------------------------
     # 行动（吃/碰/杠/胡/过）决策闸门
     # ------------------------------------------------------------------
+    def _new_action_id(self, kind: str) -> str:
+        return (
+            f"{self.serial}:r{self.round.seq}:t{self.tick_index}:"
+            f"{kind}:{uuid.uuid4().hex[:12]}"
+        )
+
+    def _post_claim_ledger(self) -> dict | None:
+        pending = self._post_claim_pending
+        return None if pending is None else pending.ledger(self._clock())
+
+    def _post_claim_watchdog(
+        self,
+        frame_path: Path,
+        started: float,
+    ) -> dict | None:
+        """鸣牌已成但尚未出牌：有界等待，超时必须显式停手。"""
+        pending = self._post_claim_pending
+        if pending is None:
+            return None
+        pending.observed_ticks += 1
+        now = self._clock()
+        evidence = pending.ledger(now)
+        evidence["frame"] = str(frame_path)
+        if pending.round_seq != self.round.seq:
+            return self._stop(
+                "post_claim_round_mismatch",
+                "鸣牌后续出牌事务跨局，拒绝沿用",
+                {"post_claim_continuation": evidence},
+            )
+        if (pending.observed_ticks > POST_CLAIM_DISCARD_MAX_TICKS
+                or now - pending.started_at > POST_CLAIM_DISCARD_TIMEOUT_S):
+            return self._stop(
+                "post_claim_discard_timeout",
+                (f"{pending.action} 已验证但未在有界时间内完成后续出牌；"
+                 "停止自动点击，避免静默卡到被踢"),
+                {"post_claim_continuation": evidence,
+                 "elapsed_ms": round((now - started) * 1000, 1)},
+            )
+        return None
+
+    def _begin_post_claim_continuation(
+        self,
+        action: str,
+        action_id: str,
+        target_tile: int | None,
+    ) -> PostClaimContinuation:
+        """鸣牌 L3 通过后清掉旧回合证据，只保留待 fresh 重算的事务。"""
+        pending = PostClaimContinuation(
+            action=action,
+            action_id=action_id,
+            target_tile=target_tile,
+            round_seq=self.round.seq,
+            started_tick=self.tick_index,
+            started_at=self._clock(),
+            supplement_required=(action == ACTION_KONG),
+        )
+        self._post_claim_pending = pending
+        self.turn_history.clear()
+        self._last_result = None
+        self._last_advise_read = None
+        self._hint_panel_streak = 0
+        self._hint_panel_round = None
+        self._single_bright.reset()
+        self._bright_subset.reset()
+        self._bright_subset_advice = None
+        self._dim_gain_snapshot = None
+        self._dim_gain_evidence = None
+        self._hand_ledger.reset()
+        self._forget_discards()
+        self._chi_abstain_key = None
+        panel_recovery.clear_state(self._panel_recovery_path)
+        return pending
+
+    def _verified_claim_action_event(
+        self,
+        payload: dict,
+        *,
+        action: str,
+        target_tile: int | None,
+    ) -> dict:
+        """给已验证的行动点击落统一 action_id，并启动/闭合后续事务。"""
+        action_id = self._new_action_id(f"claim-{action}")
+        event: dict[str, Any] = {
+            "event": "action",
+            "action_id": action_id,
+            "action_source": "bot",
+            "action_kind": "claim",
+            "claim": payload,
+        }
+        self.actions_done += 1
+        if action in POST_CLAIM_DISCARD_ACTIONS:
+            pending = self._begin_post_claim_continuation(
+                action, action_id, target_tile)
+            event["post_claim_continuation"] = pending.ledger(self._clock())
+        elif action == ACTION_HU and self._post_claim_pending is not None:
+            pending = self._post_claim_pending
+            event["continuation_of"] = pending.action_id
+            event["post_claim_completed_by"] = "verified_hu"
+            event["post_claim_continuation"] = {
+                **pending.ledger(self._clock()), "status": "completed_by_hu"}
+            self._post_claim_pending = None
+        return event
+
+    def _complete_post_claim_after_discard(self, event: dict) -> dict:
+        """把已验证的出牌与先前鸣牌关联；只有这一步后整链才算完成。"""
+        pending = self._post_claim_pending
+        if pending is None or event.get("verified") is not True:
+            return event
+        event["continuation_of"] = pending.action_id
+        event["post_claim_continuation"] = {
+            **pending.ledger(self._clock()),
+            "status": "completed_by_verified_discard",
+        }
+        self._post_claim_pending = None
+        return event
+
+    def _claim_payload_from_ledger(
+        self,
+        analysis: dict | None,
+        frame_path: Path,
+    ) -> tuple[dict, dict]:
+        """行动动画少读暗手时，按严格同局证据恢复上一帧完整手牌。
+
+        账本只补 ``hand_ids``，绝不补来牌；吃碰杠胡仍必须使用当前帧的
+        圆盘模板和当前牌河/闪光证据。允许恢复必须同时满足：茶2、当前帧
+        确有非空残读、少于等待态张数、账本来自另一帧、同局、同财神、
+        账本张数恰为等待态、当前残读是账本的多重集子集、副露完全一致。
+        """
+        payload = dict(analysis) if isinstance(analysis, dict) else {}
+        evidence: dict[str, Any] = {
+            "applied": False,
+            "reason": "analysis_missing",
+            "current_frame": str(frame_path),
+        }
+        if not payload:
+            return payload, evidence
+        current = HandState.from_analysis(payload)
+        if current.player_count != 2:
+            evidence["reason"] = "not_tea2"
+            return payload, evidence
+        raw_hand = payload.get("hand_ids") or []
+        if (not isinstance(raw_hand, (list, tuple))
+                or not raw_hand
+                or any(isinstance(v, bool) or not isinstance(v, int)
+                       for v in raw_hand)):
+            evidence["reason"] = "current_hand_unreadable"
+            return payload, evidence
+        current_ids = tuple(int(v) for v in raw_hand)
+        expected = int(current.concealed_expected)
+        evidence.update({
+            "current_count": len(current_ids),
+            "expected_count": expected,
+        })
+        if len(current_ids) >= expected:
+            evidence["reason"] = "current_hand_not_underread"
+            return payload, evidence
+
+        raw_melds = payload.get("melds") or []
+        if not isinstance(raw_melds, (list, tuple)):
+            evidence["reason"] = "current_melds_unreadable"
+            return payload, evidence
+        try:
+            current_melds = tuple(
+                tuple(sorted(int(v) for v in group))
+                for group in raw_melds
+            )
+        except (TypeError, ValueError):
+            evidence["reason"] = "current_melds_unreadable"
+            return payload, evidence
+        caishen = payload.get("caishen") or self.round.caishen
+        if not isinstance(caishen, str) or not caishen:
+            evidence["reason"] = "caishen_unknown"
+            return payload, evidence
+        memory = self._hand_ledger.recall(
+            round_seq=self.round.seq,
+            caishen=caishen,
+            count=expected,
+            whitelist=current_ids,
+            current_frame=str(frame_path),
+        )
+        if memory is None:
+            evidence["reason"] = "ledger_recall_rejected"
+            return payload, evidence
+        # HandLedger 的 whitelist 契约按集合判定；行动恢复再收紧为多重集，
+        # 防止本帧把同一牌多读一张而集合仍然“看似是子集”。
+        current_counts = Counter(current_ids)
+        memory_counts = Counter(memory.tiles)
+        if any(current_counts[tile] > memory_counts[tile]
+               for tile in current_counts):
+            evidence["reason"] = "current_hand_not_multiset_subset"
+            evidence["memory_frame"] = memory.frame
+            return payload, evidence
+        if current_melds != memory.melds:
+            evidence["reason"] = "meld_mismatch"
+            evidence["memory_frame"] = memory.frame
+            evidence["current_melds"] = [list(group) for group in current_melds]
+            evidence["memory_melds"] = [list(group) for group in memory.melds]
+            return payload, evidence
+        payload["hand_ids"] = list(memory.tiles)
+        payload["melds"] = [list(group) for group in memory.melds]
+        evidence.update({
+            "applied": True,
+            "reason": "independent_complete_hand",
+            "memory_frame": memory.frame,
+            "memory_count": memory.count,
+            "caishen": caishen,
+        })
+        return payload, evidence
+
     def _claim_policy_event(self, image: np.ndarray, frame_path: Path,
                              analysis: dict | None = None) -> dict:
         """行动行可见时决策；显式启用后走独立圆盘通道并做 L3 语义验证。
@@ -3404,7 +3707,8 @@ class AutoPlayLoop:
         # 来牌从本帧的牌河读数里取（discard_vision 给的是 DiscardState）。
         # 换局没确认过的帧：本帧"来牌"可能是跨局差分出来的，不许进 L2。
         # P0-5: never reuse a prior frame's analysis for claim decisions.
-        payload: dict = dict(analysis) if isinstance(analysis, dict) else {}
+        payload, hand_recovery = self._claim_payload_from_ledger(
+            analysis, frame_path)
         if self._discard_state is not None and self._discard_trusted:
             payload["discards"] = self._discard_state
         hand = HandState.from_analysis(payload)
@@ -3431,15 +3735,31 @@ class AutoPlayLoop:
                 "frame": str(frame_path),
                 "known": bool(claim_state.known),
                 "buttons": [button.kind for button in claim_state.buttons],
+                "hand_recovery": hand_recovery,
                 "reason": claim_state.reason,
             }}
         payload = decision.ledger()
+        payload["hand_recovery"] = hand_recovery
         payload["incoming_resolution"] = incoming_resolution
         payload["frame"] = str(frame_path)
         payload["status"] = ("blocked" if decision.blocked_reason else
                              "ready" if decision.executable else
                              "awaiting_human_confirm")
         payload["claim_reason"] = claim_state.reason
+        pending = self._post_claim_pending
+        if pending is not None:
+            payload["post_claim_continuation"] = pending.ledger(self._clock())
+            # 吃/碰之后只能等 fresh 手重算并出牌；刚完成的行动圆盘若还残留，
+            # 不能重复点击。杠后唯一例外是补牌直接成胡，且仍须走胡自己的
+            # 模板、引擎与 L3 门禁。
+            allow_kong_hu = (
+                pending.supplement_required and decision.action == ACTION_HU)
+            if not allow_kong_hu:
+                payload["status"] = "awaiting_post_claim_discard"
+                payload["blocked_reason"] = (
+                    f"{pending.action} 已验证，等待 fresh 重算并完成后续出牌；"
+                    "本帧不重复点击行动圆盘")
+                return {"claim": payload}
         if not (decision.executable and self.claim_auto_click):
             return {"claim": payload}
         payload["auto_click"] = {
@@ -3448,6 +3768,19 @@ class AutoPlayLoop:
         }
         if not CLAIM_TAP_CHANNEL_READY:
             payload["auto_click"]["reason"] = "行动圆盘点击通道未启用"
+            return {"claim": payload}
+        if self.actions_done >= self.max_actions:
+            payload["status"] = "blocked"
+            payload["blocked_reason"] = (
+                f"达到 --max-actions={self.max_actions}；本帧零点击")
+            payload["auto_click"]["reason"] = payload["blocked_reason"]
+            return {"claim": payload}
+        if (decision.action in POST_CLAIM_DISCARD_ACTIONS
+                and self.actions_done + 2 > self.max_actions):
+            payload["status"] = "blocked"
+            payload["blocked_reason"] = (
+                "动作预算不足以原子完成鸣牌及后续必出牌；本帧零点击")
+            payload["auto_click"]["reason"] = payload["blocked_reason"]
             return {"claim": payload}
 
         if decision.action == ACTION_CHI:
@@ -3483,10 +3816,19 @@ class AutoPlayLoop:
 
         # L3 语义复核走落定轮询（_verify_claim_settled）：点后首帧
         # 常处动画/压暗状态，单帧计数不可信（实机三例误杀）。
+        action_engine = (
+            decision.engine.get(decision.action, {})
+            if isinstance(decision.engine, dict) else {})
+        kong_kind = (
+            action_engine.get("kong_kind")
+            if decision.action == ACTION_KONG
+            and isinstance(action_engine, dict) else None)
         verified, verify_reason, _after_board, settle_samples = (
             self._verify_claim_settled(
                 before, decision.action, tag="after_claim",
                 note="行动点击后 fresh 状态",
+                target_tile=decision.target_tile,
+                kong_kind=kong_kind,
                 accept_new_window=bool(
                     outcome.get("same_slot_new_window"))))
         payload["auto_click"].update({
@@ -3502,8 +3844,9 @@ class AutoPlayLoop:
                 "gate": "claim_unverified",
                 "reason": verify_reason,
             }}
-        self.actions_done += 1
-        return {"claim": payload}
+        return self._verified_claim_action_event(
+            payload, action=decision.action,
+            target_tile=decision.target_tile)
 
     # ------------------------------------------------------------------
     # 回合所有权门禁
@@ -3754,8 +4097,9 @@ class AutoPlayLoop:
         if not verified:
             return {"claim": payload, "_terminal": {
                 "gate": "claim_unverified", "reason": reason}}
-        self.actions_done += 1
-        return {"claim": payload}
+        return self._verified_claim_action_event(
+            payload, action=ACTION_CHI,
+            target_tile=payload.get("target_tile"))
 
     def _chi_finish_verified(self, payload: dict, chain: dict,
                              before: BoardState, after: BoardState,
@@ -4001,8 +4345,8 @@ class AutoPlayLoop:
         if not verified:
             return {"claim": payload, "_terminal": {
                 "gate": "claim_unverified", "reason": reason}}
-        self.actions_done += 1
-        return {"claim": payload}
+        return self._verified_claim_action_event(
+            payload, action=ACTION_PASS, target_tile=None)
 
     @guard_live_run
     def run(self) -> dict:

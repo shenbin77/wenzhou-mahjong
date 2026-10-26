@@ -43,6 +43,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import time
 from dataclasses import dataclass, replace
 from typing import Callable, Iterable, Sequence
@@ -103,6 +104,14 @@ def _clean_groups(groups: Iterable[Sequence[object]]) -> tuple[tuple[int, ...], 
         if ids:
             out.append(ids)
     return tuple(out)
+
+
+def _frame_key(value: object) -> str:
+    """按 Windows 路径语义归一帧标识，斜杠/大小写差异不能绕过同帧门。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return ntpath.normcase(ntpath.normpath(text))
 
 
 class HandLedger:
@@ -198,8 +207,8 @@ class HandLedger:
         if memory is None:
             self._reject("empty")
             return None
-        memory_frame = str(memory.frame or "")
-        here = str(current_frame or "")
+        memory_frame = _frame_key(memory.frame)
+        here = _frame_key(current_frame)
         if not memory_frame or not here:
             # 证明不了"这是另一帧写入的读数"就弃权：宁可不兜底，也不自证。
             self._reject("unknown_frame")

@@ -71,6 +71,7 @@ confirmed_actions)``，即默认任何动作都需要人工确认。确认一个
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -117,6 +118,10 @@ __all__ = [
     "HandState",
     "INCOMING_SOURCE_OPPONENT",
     "INCOMING_SOURCE_SELF",
+    "KONG_CONCEALED",
+    "KONG_KINDS",
+    "KONG_MING",
+    "KONG_UPGRADE",
     "RECOMMENDED_CONFIRMED_ACTIONS",
     "RECOMMENDED_CONFIRMED_ACTIONS_WITH_CHI",
     "TEMPLATE_MARGIN_MIN",
@@ -150,6 +155,14 @@ ACTION_PENG: str = "peng"
 ACTION_KONG: str = "kong"
 ACTION_CHI: str = "chi"
 ACTION_PASS: str = "pass"
+
+#: 杠的三种语义。明杠只来自对手弃牌；暗杠/加杠只来自我方摸牌后的 +1 态。
+KONG_MING: str = "ming"
+KONG_CONCEALED: str = "concealed"
+KONG_UPGRADE: str = "upgrade"
+KONG_KINDS: frozenset[str] = frozenset({
+    KONG_MING, KONG_CONCEALED, KONG_UPGRADE,
+})
 
 #: 需要别家来牌才能成立的"吃碰杠胡"（``ACTION_PASS`` 不需要来牌）。
 CLAIM_ACTIONS: tuple[str, ...] = (ACTION_HU, ACTION_PENG, ACTION_KONG, ACTION_CHI)
@@ -281,12 +294,18 @@ CLAIM_TEMPLATE_DIR: Path = Path(__file__).resolve().parent / "templates" / "clai
 # hu/kong/peng/pass/chi top1 均 >= .977，次名间隔均远大于 .08。
 VERIFIED_CLAIM_UI_DIR: Path = (
     Path(__file__).resolve().parent.parent / "采集" / "templates" / "ui")
-VERIFIED_CLAIM_UI_FILES: Mapping[str, str] = {
-    ACTION_CHI: "btn_chi.png",
-    ACTION_PENG: "btn_peng.png",
-    ACTION_KONG: "btn_gang.png",
-    ACTION_HU: "btn_hu.png",
-    ACTION_PASS: "btn_guo.png",
+VERIFIED_CLAIM_UI_FILES: Mapping[str, tuple[str, ...]] = {
+    ACTION_CHI: ("btn_chi.png",),
+    ACTION_PENG: ("btn_peng.png",),
+    ACTION_KONG: ("btn_gang.png",),
+    # 胡盘有普通、发光和较小三按钮布局三种实机字形。多个样本只扩充
+    # 同一个 ``hu`` 类，不降低全局阈值，也不把两个 hu 变体互当次名。
+    ACTION_HU: (
+        "btn_hu.png",
+        "btn_hu_glow.png",
+        "btn_hu_live_20261027.png",
+    ),
+    ACTION_PASS: ("btn_guo.png",),
 }
 VERIFIED_CLAIM_INNER_RATIO: float = 0.35
 
@@ -348,17 +367,26 @@ def load_claim_templates(
 def verified_claim_templates() -> dict[str, np.ndarray]:
     """从既有原生按钮样本派生中央字形模板；缺任一文件就不返回半套。"""
     found: dict[str, np.ndarray] = {}
-    for action, filename in VERIFIED_CLAIM_UI_FILES.items():
-        image = _imread_gray(VERIFIED_CLAIM_UI_DIR / filename)
-        if image is None:
-            return {}
-        height, width = image.shape[:2]
-        crop_w = max(8, int(width * VERIFIED_CLAIM_INNER_RATIO))
-        crop_h = max(8, int(height * VERIFIED_CLAIM_INNER_RATIO))
-        x0 = (width - crop_w) // 2
-        y0 = (height - crop_h) // 2
-        found[action] = image[y0:y0 + crop_h, x0:x0 + crop_w].copy()
+    for action, filenames in VERIFIED_CLAIM_UI_FILES.items():
+        for index, filename in enumerate(filenames):
+            image = _imread_gray(VERIFIED_CLAIM_UI_DIR / filename)
+            if image is None:
+                return {}
+            height, width = image.shape[:2]
+            crop_w = max(8, int(width * VERIFIED_CLAIM_INNER_RATIO))
+            crop_h = max(8, int(height * VERIFIED_CLAIM_INNER_RATIO))
+            x0 = (width - crop_w) // 2
+            y0 = (height - crop_h) // 2
+            name = action if index == 0 else f"{action}@{Path(filename).stem}"
+            found[name] = image[y0:y0 + crop_h, x0:x0 + crop_w].copy()
     return found
+
+
+def _canonical_template_label(name: str) -> str:
+    """把 ``hu@variant`` 合并回动作 ``hu``，其它未知标签保持原样。"""
+    label = str(name)
+    action = label.split("@", 1)[0]
+    return action if action in ALL_ACTIONS else label
 
 
 def match_button_glyph(
@@ -411,7 +439,7 @@ def match_button_glyph(
         result["status"] = TEMPLATE_STATUS_NO_TEMPLATES
         return result
 
-    scores: dict[str, float] = {}
+    variant_scores: dict[str, float] = {}
     too_large: list[str] = []
     for name, template in table.items():
         array = np.asarray(template)
@@ -423,8 +451,17 @@ def match_button_glyph(
             continue
         score = float(cv2.minMaxLoc(cv2.matchTemplate(
             gray, array, cv2.TM_CCOEFF_NORMED))[1])
-        scores[name] = round(score, 6)
+        variant_scores[name] = round(score, 6)
+    scores: dict[str, float] = {}
+    best_variants: dict[str, str] = {}
+    for name, score in variant_scores.items():
+        label = _canonical_template_label(name)
+        if label not in scores or score > scores[label]:
+            scores[label] = score
+            best_variants[label] = name
     result["scores"] = scores
+    result["variant_scores"] = variant_scores
+    result["best_variants"] = best_variants
     if not scores:
         result["status"] = TEMPLATE_STATUS_SIZE_MISMATCH
         result["skipped"] = too_large
@@ -436,6 +473,7 @@ def match_button_glyph(
     margin = top1 - float(runner_score)
     result.update({
         "best": best,
+        "best_variant": best_variants.get(best, best),
         "top1": round(float(top1), 6),
         "runner_up": runner_up,
         "runner_up_score": round(float(runner_score), 6),
@@ -492,6 +530,7 @@ def _engine() -> dict[str, Any] | None:
         return None
     return {
         "calc_shanten": shanten.calc_shanten,
+        "is_win": shanten.is_win,
         "is_hu": pattern.is_hu,
         "counts_of": tiles.counts_of,
         "is_honor": tiles.is_honor,
@@ -935,6 +974,9 @@ class BoardState:
             否决，吃改由圆盘实测为 0 + 副露 +1 组 + 暗手 −2 三项正证据
             判定（与本类「不可测不参与判定」的既有契约一致）。
         note: 备注，写进台账。
+        concealed: 闭手的精确牌 ID 多重集。碰/吃沿用历史张数校验；杠必须
+            同时拿到该字段，才能证明拿走的是目标牌而不是仅仅“少了几张”。
+            该字段放在末尾以保持旧位置参数兼容。
     """
 
     concealed_count: int | None = None
@@ -944,6 +986,7 @@ class BoardState:
     turn_owner: str | None = None
     selection_panel: bool | None = None
     note: str = ""
+    concealed: tuple[int, ...] | None = None
 
     @property
     def meld_group_count(self) -> int | None:
@@ -982,6 +1025,7 @@ class BoardState:
             turn_owner=turn_owner,
             selection_panel=selection_panel,
             note=note,
+            concealed=hand.concealed if hand is not None else None,
         )
 
 
@@ -1490,6 +1534,9 @@ def evaluate_claim_candidates(hand: HandState,
     Returns:
         ``{action: {"feasible", "why", "shanten_before", "shanten_after",
         "delta", "improves", "concealed_after", "melds_after", "options"}}``。
+        杠另写 ``legal_candidate/kong_kind/target_tile``：合法候选与允许点击
+        是两个不同结论。自摸暗杠/加杠即使能严格认出，在补牌后 EV 尚未
+        验收前仍保持 ``feasible=False``，由实时自动链安全选择过。
 
         ``feasible`` 为 ``False`` 时 ``why`` 给出中文原因；引擎不可用、
         手牌不守恒或来牌未知时，吃碰杠胡一律 ``feasible=False``。唯一例外
@@ -1504,6 +1551,12 @@ def evaluate_claim_candidates(hand: HandState,
     report: dict[str, dict[str, Any]] = {
         action: dict(blank) for action in CLAIM_ACTIONS
     }
+    report[ACTION_KONG].update({
+        "legal_candidate": False,
+        "kong_kind": None,
+        "target_tile": None,
+        "requires_replacement_ev": False,
+    })
     engine = _engine()
     if engine is None:
         for action in CLAIM_ACTIONS:
@@ -1515,12 +1568,10 @@ def evaluate_claim_candidates(hand: HandState,
         return report
     if not hand.is_valid:
         # 自摸胡发生在我方刚摸牌后的“出牌态”：闭手比等待态恰多一张，
-        # 因而不能拿等待态的 is_valid（16-3×副露）直接否决。只对当前已
-        # 实机复现并能由引擎独立确认的闭手自摸开放；有副露、存在来牌或
-        # 来源标记、张数不是 +1 时全部保持原 fail-closed。
+        # 因而不能拿等待态的 is_valid（16-3×副露）直接否决。副露也由
+        # shanten.is_win 的 melds 参数按同一逻辑张数契约验证。
         self_draw_shape = (
-            not hand.melds
-            and len(hand.concealed) == hand.concealed_expected + 1
+            len(hand.concealed) == hand.concealed_expected + 1
             and hand.incoming_tile is None
             and hand.incoming_source is None
             and hand.caishen is not None
@@ -1529,8 +1580,9 @@ def evaluate_claim_candidates(hand: HandState,
         self_draw_hu = False
         if self_draw_shape:
             try:
-                self_draw_hu = bool(engine["is_hu"](
-                    list(hand.concealed), caishen_id=hand.caishen))
+                self_draw_hu = bool(engine["is_win"](
+                    list(hand.concealed), caishen_id=hand.caishen,
+                    melds=[list(group) for group in hand.melds]))
             except Exception:  # noqa: BLE001 - 引擎拒答即不可判定
                 self_draw_hu = False
         invalid_reason = (
@@ -1547,6 +1599,8 @@ def evaluate_claim_candidates(hand: HandState,
                 "shanten_before": -1,
                 "self_draw": True,
             })
+        if self_draw_shape:
+            _record_self_kong_candidate(report[ACTION_KONG], engine, hand)
         return report
     tile = hand.incoming_tile
     if tile is None:
@@ -1576,21 +1630,20 @@ def evaluate_claim_candidates(hand: HandState,
     for action in CLAIM_ACTIONS:
         report[action]["shanten_before"] = before
 
-    # ---- 胡：直接问引擎（副露局面的胡牌判定未验收，一律不认） ----
-    if hand.melds:
-        report[ACTION_HU]["why"] = "副露局面胡牌判定未验收，不认胡"
-    else:
-        try:
-            hu = bool(engine["is_hu"](list(hand.concealed) + [tile],
-                                      caishen_id=caishen))
-        except Exception:  # noqa: BLE001 - 引擎拒答即不可判定
-            hu = False
-            report[ACTION_HU]["why"] = "胡牌分析器拒绝该手牌，不认胡"
-        report[ACTION_HU]["feasible"] = hu
-        if hu:
-            report[ACTION_HU]["why"] = "引擎判定闭手+来牌成胡"
-        elif not report[ACTION_HU]["why"]:
-            report[ACTION_HU]["why"] = "引擎判定闭手+来牌不成胡"
+    # ---- 胡：统一问支持副露的向听引擎 ----
+    try:
+        hu = bool(engine["is_win"](
+            list(hand.concealed) + [tile], caishen_id=caishen,
+            melds=melds))
+    except Exception:  # noqa: BLE001 - 引擎拒答即不可判定
+        hu = False
+        report[ACTION_HU]["why"] = "胡牌分析器拒绝该手牌，不认胡"
+    report[ACTION_HU]["feasible"] = hu
+    if hu:
+        scope = "副露手" if hand.melds else "闭手"
+        report[ACTION_HU]["why"] = f"引擎判定{scope}+来牌成胡"
+    elif not report[ACTION_HU]["why"]:
+        report[ACTION_HU]["why"] = "引擎判定当前手牌+来牌不成胡"
 
     # ---- 碰：闭手里至少两张（财神是否可替代由 config 决定） ----
     pairs = _available(counts, tile, caishen, allow_sub)
@@ -1601,26 +1654,22 @@ def evaluate_claim_candidates(hand: HandState,
     else:
         report[ACTION_PENG]["why"] = f"闭手里只有 {pairs} 张，不能碰"
 
-    # ---- 杠：闭手三张（明杠）；或已碰过该牌再补一张（加杠） ----
-    concealed_kong = _available(counts, tile, caishen, allow_sub) >= 3
-    upgrade_index = -1
-    for index, group in enumerate(melds):
-        if len(group) == 3 and len(set(group)) == 1 and int(group[0]) == tile:
-            upgrade_index = index
-            break
-    if concealed_kong:
+    # ---- 杠：对手弃牌分支只能是明杠，绝不能借来牌推导加杠 ----
+    # 杠必须是三张实体同牌；财神替代只保留给既有碰策略，不能拼出杠。
+    ming_kong = int(counts.get(tile, 0)) >= 3
+    if ming_kong:
+        report[ACTION_KONG].update({
+            "legal_candidate": True,
+            "kong_kind": KONG_MING,
+            "target_tile": tile,
+        })
         _fill_claim(report[ACTION_KONG], engine, hand, tile, melds, caishen,
                     remove_tiles=[tile, tile, tile],
                     new_meld=[tile, tile, tile, tile],
                     why="闭手里有三张，可明杠")
-    elif upgrade_index >= 0 and _available(counts, tile, caishen, allow_sub) >= 1:
-        after_melds = [list(group) for group in melds]
-        after_melds[upgrade_index] = [tile, tile, tile, tile]
-        _fill_claim(report[ACTION_KONG], engine, hand, tile, melds, caishen,
-                    remove_tiles=[tile], melds_after=after_melds,
-                    why="已碰该牌且闭手里还有一张，可加杠")
     else:
-        report[ACTION_KONG]["why"] = "闭手里不足三张且无可加杠的碰组，不能杠"
+        report[ACTION_KONG]["why"] = (
+            "闭手里不足三张，不能明杠；对手弃牌分支不得判加杠")
 
     # ---- 吃：会弹二次选择面板，默认关闭 ----
     if not config.chi_enabled:
@@ -1641,6 +1690,100 @@ def evaluate_claim_candidates(hand: HandState,
                         remove_tiles=partners, new_meld=first,
                         why=f"可吃（{len(options)} 种顺子）")
     return report
+
+
+def _self_kong_candidates(hand: HandState) -> tuple[dict[str, Any], ...]:
+    """严格枚举我方摸牌后的暗杠/加杠候选，不做策略放行。
+
+    候选只使用实体同牌；财神不替代、财神本身也不杠。每种目标在闭手与
+    已验证副露中的物理总数必须恰为 4，避免把少读/重读画面解释成合法杠。
+    长度 3 的同牌副露视为平铺碰；长度 4 的同牌副露是分析器已通过抬高中列
+    或四张可见牌几何后归一化出的杠，不会再生成加杠候选。
+    """
+    counts = Counter(int(tile) for tile in hand.concealed)
+    meld_counts = Counter(
+        int(tile) for group in hand.melds for tile in group)
+    caishen = None if hand.caishen is None else int(hand.caishen)
+    candidates: list[dict[str, Any]] = []
+
+    for tile, count in sorted(counts.items()):
+        if count != 4 or tile == caishen:
+            continue
+        if count + meld_counts[tile] != 4:
+            continue
+        remaining = list(int(value) for value in hand.concealed)
+        for _ in range(4):
+            remaining.remove(tile)
+        candidates.append({
+            "kong_kind": KONG_CONCEALED,
+            "target_tile": tile,
+            "concealed_after": tuple(remaining),
+            "melds_after": hand.melds + ((tile, tile, tile, tile),),
+        })
+
+    for index, group in enumerate(hand.melds):
+        normalized = tuple(int(tile) for tile in group)
+        if len(normalized) != 3 or len(set(normalized)) != 1:
+            continue
+        tile = normalized[0]
+        if tile == caishen or counts[tile] != 1:
+            continue
+        if counts[tile] + meld_counts[tile] != 4:
+            continue
+        remaining = list(int(value) for value in hand.concealed)
+        remaining.remove(tile)
+        after_melds = [tuple(int(value) for value in meld)
+                       for meld in hand.melds]
+        after_melds[index] = (tile, tile, tile, tile)
+        candidates.append({
+            "kong_kind": KONG_UPGRADE,
+            "target_tile": tile,
+            "concealed_after": tuple(remaining),
+            "melds_after": tuple(after_melds),
+        })
+    return tuple(candidates)
+
+
+def _record_self_kong_candidate(entry: dict[str, Any],
+                                engine: Mapping[str, Any],
+                                hand: HandState) -> None:
+    """把唯一合法自摸杠写入台账，但在补牌 EV 未验收前不放行点击。"""
+    candidates = _self_kong_candidates(hand)
+    entry["legal_candidates"] = candidates
+    entry["requires_replacement_ev"] = bool(candidates)
+    if not candidates:
+        entry["why"] = "自摸出牌态没有严格成立的暗杠/加杠候选"
+        return
+    if len(candidates) != 1:
+        labels = "、".join(
+            f"{row['kong_kind']}:{row['target_tile']}" for row in candidates)
+        entry["why"] = f"同时存在多个杠候选（{labels}），目标不唯一，L2 弃权"
+        entry["ambiguous"] = True
+        return
+
+    candidate = dict(candidates[0])
+    target = int(candidate["target_tile"])
+    kind = str(candidate["kong_kind"])
+    before = _shanten_of(
+        engine, hand.concealed, [list(group) for group in hand.melds],
+        hand.caishen)
+    after = _shanten_of(
+        engine, candidate["concealed_after"],
+        [list(group) for group in candidate["melds_after"]], hand.caishen)
+    entry.update(candidate)
+    entry.update({
+        "feasible": False,
+        "legal_candidate": True,
+        "strategy_ready": False,
+        "shanten_before": before,
+        "shanten_after": after,
+        "delta": (None if before is None or after is None
+                  else int(after) - int(before)),
+        "improves": False,
+        "why": (
+            f"严格识别到合法{kind}候选 {target}，但杠后必须补一张；"
+            "补牌分布与计分 EV 尚未验收，安全选择过"),
+    })
 
 
 def _fill_claim(entry: dict[str, Any], engine: Mapping[str, Any], hand: HandState,
@@ -1733,19 +1876,38 @@ def _finish_claim(
     image: Any,
 ) -> ActionDecision:
     """吃/碰/杠的最后一道：向听不劣化才出手，否则改按过或直接弃权。"""
+    target_status = _status_for(per_button, button, action)
     if config.require_improvement and not info.get("improves"):
         gap = f"{info.get('shanten_before')}→{info.get('shanten_after')}"
-        if pass_button is not None:
+        pass_status = (
+            _status_for(per_button, pass_button, ACTION_PASS)
+            if pass_button is not None else TEMPLATE_STATUS_UNMATCHED)
+        pass_ready = (
+            pass_button is not None
+            and (not config.require_template_match
+                 or pass_status == TEMPLATE_STATUS_MATCHED)
+        )
+        if pass_ready:
             return _accept(ACTION_PASS, pass_button, None, config, evidence, {},
                            report,
                            l2=f"引擎判定{action}会劣化向听（{gap}），改按过",
-                           template_status=_status_for(per_button, pass_button))
+                           template_status=pass_status)
+        suffix = (
+            "，且过按钮自身模板未独立匹配，弃权"
+            if pass_button is not None else "，且无可点的过按钮，弃权")
         return _blocked(claim_state, image, config,
-                        f"引擎判定{action}会劣化向听（{gap}），且无可点的过按钮，弃权",
+                        f"引擎判定{action}会劣化向听（{gap}）{suffix}",
                         l2_reason=str(info.get("why") or ""), engine=report)
+    if (config.require_template_match
+            and target_status != TEMPLATE_STATUS_MATCHED):
+        return _blocked(
+            claim_state, image, config,
+            (f"L1 否决：候选圆盘未独立识别为 {action}；"
+             "不得借其它金盘或 L2 可行性猜按钮"),
+            l2_reason=str(info.get("why") or ""), engine=report)
     return _accept(action, button, target_tile, config, evidence, info, report,
                    l2=str(info.get("why") or ""),
-                   template_status=_status_for(per_button, button))
+                   template_status=target_status)
 
 
 # ---------------------------------------------------------------------------
@@ -1922,6 +2084,36 @@ def decide_action(
     # 归属未确认时用闪光标仲裁（"哪边后打"）；仲裁结果写进证据。
     hand, incoming_evidence = resolve_incoming(image, hand, cfg)
     evidence["incoming"] = incoming_evidence
+    # 自摸行动帧会先把暗手从等待态补到 +1；此时牌河层可能因为行动圆盘
+    # 遮挡而沿用上一轮的 ``incoming_source='opponent'``，但没有本帧来牌。
+    # 仅在茶2、财神已知、胡盘可见或“杠”字形已独立过闸、精确 +1 张、来牌
+    # 为空且来源不是 self 时清掉这条陈旧归属。其它形态一律不改写来牌，
+    # 也绝不覆盖明确的 self。
+    kong_template_visible = any(
+        matched.get("status") == TEMPLATE_STATUS_MATCHED
+        and _canonical_template_label(str(matched.get("best") or "")) == ACTION_KONG
+        for matched in per_button.values()
+    )
+    self_turn_action_shape = (
+        (any(button.kind == KIND_HU for button in buttons)
+         or kong_template_visible)
+        and hand.player_count == 2
+        and hand.caishen is not None
+        and len(hand.concealed) == hand.concealed_expected + 1
+        and hand.incoming_tile is None
+        and hand.incoming_source in (None, INCOMING_SOURCE_OPPONENT)
+    )
+    if self_turn_action_shape:
+        stale_source = hand.incoming_source
+        hand = replace(hand, incoming_source=None)
+        evidence["incoming"]["self_draw_shape_override"] = {
+            "applied": stale_source is not None,
+            "stale_source": stale_source,
+            "trigger": "hu" if any(
+                button.kind == KIND_HU for button in buttons) else "kong",
+            "concealed": len(hand.concealed),
+            "expected_wait": hand.concealed_expected,
+        }
     report = evaluate_claim_candidates(hand, cfg)
     hu_button = _button_of(claim_state, KIND_HU)
     pass_button = _button_of(claim_state, KIND_PASS)
@@ -1930,37 +2122,57 @@ def decide_action(
     # ---- 胡：引擎必须点头 ----
     if hu_button is not None:
         info = report[ACTION_HU]
+        hu_status = _status_for(per_button, hu_button, ACTION_HU)
+        pass_status = _status_for(per_button, pass_button, ACTION_PASS)
         if info["feasible"]:
+            if (cfg.require_template_match
+                    and hu_status != TEMPLATE_STATUS_MATCHED):
+                return _blocked(
+                    claim_state, image, cfg,
+                    "引擎判胡，但胡按钮自身模板未过闸；等待下一动画帧，禁止胡也禁止自动过",
+                    l2_reason=info["why"], engine=report)
             return _accept(ACTION_HU, hu_button, hand.incoming_tile, cfg,
                            evidence, info, report,
-                           l2=info["why"], template_status=_status_for(per_button, hu_button))
-        hu_status = _status_for(per_button, hu_button)
-        pass_status = _status_for(per_button, pass_button)
+                           l2=info["why"], template_status=hu_status)
+        exact_self_draw_shape = (
+            hand.player_count == 2
+            and hand.caishen is not None
+            and hand.incoming_tile is None
+            and hand.incoming_source is None
+            and len(hand.concealed) == hand.concealed_expected + 1
+        )
+        exact_opponent_shape = (
+            hand.player_count == 2
+            and hand.caishen is not None
+            and hand.incoming_source == INCOMING_SOURCE_OPPONENT
+            and hand.incoming_tile is not None
+            and (not hand.is_valid or bool(hand.melds))
+        )
         server_hu_proof = (
             cfg.trust_server_hu_button
             and hu_status == TEMPLATE_STATUS_MATCHED
             and pass_button is not None
             and pass_status == TEMPLATE_STATUS_MATCHED
-            and hand.incoming_source == INCOMING_SOURCE_OPPONENT
-            and hand.incoming_tile is not None
-            and (not hand.is_valid or bool(hand.melds))
+            and (exact_self_draw_shape or exact_opponent_shape)
         )
         if server_hu_proof:
             override = dict(info)
             override.update({
                 "feasible": True,
                 "why": (
-                    "服务端合法胡正证据：胡盘与过盘模板均过闸、来牌来自对手；"
+                    "服务端合法胡正证据：胡盘与过盘模板均过闸、"
+                    f"形态={'自摸' if exact_self_draw_shape else '对手来牌'}；"
                     f"引擎未确认原因仅记录为 {info['why']}"),
                 "server_button_override": True,
+                "server_hu_shape": (
+                    "self_draw" if exact_self_draw_shape else "opponent_discard"),
             })
             return _accept(
                 ACTION_HU, hu_button, hand.incoming_tile, cfg,
                 evidence, override, report,
                 l2=override["why"], template_status=hu_status)
         self_draw_candidate = (
-            not hand.melds
-            and len(hand.concealed) == hand.concealed_expected + 1
+            len(hand.concealed) == hand.concealed_expected + 1
             and hand.incoming_tile is None
             and hand.incoming_source is None
         )
@@ -1999,7 +2211,9 @@ def decide_action(
         if by_label:
             action, button = by_label
             info = report[action]
-            return _finish_claim(action, button, hand.incoming_tile, cfg, evidence,
+            target_tile = (info.get("target_tile") if action == ACTION_KONG
+                           else hand.incoming_tile)
+            return _finish_claim(action, button, target_tile, cfg, evidence,
                                  info, report, per_button, pass_button,
                                  claim_state, image)
         feasible = [action for action in (ACTION_KONG, ACTION_PENG, ACTION_CHI)
@@ -2010,7 +2224,7 @@ def decide_action(
             # 第一版连续代打：无法安全确认吃/碰/杠时，若“过”本身已通过
             # 独立模板闸，就明确放弃本次机会继续牌局。过不会改变手牌/副露，
             # 比让行动面板永久卡住更保守；读不清过按钮仍保持原弃权。
-            pass_status = _status_for(per_button, pass_button)
+            pass_status = _status_for(per_button, pass_button, ACTION_PASS)
             if (cfg.auto_click_enabled and pass_button is not None
                     and (not cfg.require_template_match
                          or pass_status == TEMPLATE_STATUS_MATCHED)):
@@ -2023,7 +2237,7 @@ def decide_action(
                             l2_reason=why, engine=report)
         if len(feasible) > 1:
             names = "、".join(feasible)
-            pass_status = _status_for(per_button, pass_button)
+            pass_status = _status_for(per_button, pass_button, ACTION_PASS)
             if (cfg.auto_click_enabled and pass_button is not None
                     and (not cfg.require_template_match
                          or pass_status == TEMPLATE_STATUS_MATCHED)):
@@ -2039,7 +2253,9 @@ def decide_action(
         action = feasible[0]
         info = report[action]
         button = min(gold_buttons, key=lambda b: b.center[0])
-        return _finish_claim(action, button, hand.incoming_tile, cfg, evidence,
+        target_tile = (info.get("target_tile") if action == ACTION_KONG
+                       else hand.incoming_tile)
+        return _finish_claim(action, button, target_tile, cfg, evidence,
                              info, report, per_button, pass_button,
                              claim_state, image)
 
@@ -2050,18 +2266,32 @@ def decide_action(
                             "只检出过按钮而没有金/红盘，与已验证口径不符，弃权")
         return _accept(ACTION_PASS, pass_button, None, cfg, evidence, {}, report,
                        l2="仅有过按钮，按过处理",
-                       template_status=_status_for(per_button, pass_button))
+                       template_status=_status_for(
+                           per_button, pass_button, ACTION_PASS))
     return None
 
 
 def _status_for(per_button: Mapping[int, dict[str, Any]],
-                button: ClaimButton | None) -> str:
-    """取该按钮的模板状态；找不到时按 ``no_templates`` 计（不加分）。"""
+                button: ClaimButton | None,
+                expected_action: str | None = None) -> str:
+    """取按钮模板状态；过闸还必须认成当前要执行的那个动作。
+
+    仅 ``status='matched'`` 不够：它只说明某个模板过线。若胡按钮框实际最像
+    ``pass``，或过按钮框实际最像 ``peng``，都必须按 unmatched 处理，禁止
+    借别的按钮标签通过目标动作安全门。
+    """
     if button is None:
         return TEMPLATE_STATUS_NO_TEMPLATES
     for matched in per_button.values():
         if list(matched.get("box") or ()) == list(button.box):
-            return str(matched.get("status") or TEMPLATE_STATUS_NO_TEMPLATES)
+            status = str(
+                matched.get("status") or TEMPLATE_STATUS_NO_TEMPLATES)
+            if (expected_action is not None
+                    and status == TEMPLATE_STATUS_MATCHED
+                    and _canonical_template_label(
+                        str(matched.get("best") or "")) != expected_action):
+                return TEMPLATE_STATUS_UNMATCHED
+            return status
     return TEMPLATE_STATUS_NO_TEMPLATES
 
 
@@ -2105,14 +2335,18 @@ def verify_after_click(
     before_state: BoardState | None,
     after_state: BoardState | None,
     action: str,
+    *,
+    target_tile: int | None = None,
+    kong_kind: str | None = None,
 ) -> tuple[bool, str]:
     """L3：点击后的盘面是否按预期迁移。
 
     预期（任一可测项不符即判失败）：
 
     * 碰/吃：暗手 −2、多出一组副露、行动圆盘消失；
-    * 杠：暗手 −3 且多出一组副露（明杠），或暗手 −1 且某组由 3 张变 4 张
-      （加杠）；
+    * 杠：必须显式给出 ``target_tile`` 与 ``kong_kind``，并核对精确闭手
+      多重集、目标四张副露、其它副露不变。明杠/暗杠/加杠各接受“尚未补牌”
+      与“已经补一张”两态，共六态；只对上张数但牌型不对仍失败；
     * 胡：进入结算画面，或至少行动圆盘消失；
     * 过：副露不变、行动圆盘消失、倒计时转到我方；暗手保持不变，或在
       “过”后立即轮到我方摸牌时合法 +1。
@@ -2127,6 +2361,8 @@ def verify_after_click(
         before_state: 点击前的盘面快照。
         after_state: 点击后的盘面快照。
         action: 实际执行（或计划执行）的动作。
+        target_tile: 杠的目标牌（引擎编码）；其它动作忽略。
+        kong_kind: ``ming/concealed/upgrade``；其它动作忽略。
 
     Returns:
         ``(是否通过, 中文原因)``。不通过时调用方必须立即停机并落证据。
@@ -2146,7 +2382,9 @@ def verify_after_click(
     if action == ACTION_PASS:
         return _verify_pass(before_state, after_state)
     if action == ACTION_KONG:
-        return _verify_kong(before_state, after_state)
+        return _verify_kong(
+            before_state, after_state,
+            target_tile=target_tile, kong_kind=kong_kind)
     return _verify_simple_claim(before_state, after_state, action)
 
 
@@ -2215,33 +2453,131 @@ def _verify_simple_claim(before: BoardState, after: BoardState,
     return True, f"{action} 状态迁移已验证（暗手 −2、副露 +1 组、圆盘消失）"
 
 
-def _verify_kong(before: BoardState, after: BoardState) -> tuple[bool, str]:
-    """杠：明杠（暗手 −3、副露 +1 组/+4 张）或加杠（暗手 −1、张数 +1）。"""
-    if before.concealed_count is None or after.concealed_count is None:
-        return False, "暗手张数不可测（点击前后都应有完整识牌）"
-    gap = after.concealed_count - before.concealed_count
-    expected_total: int
-    if gap == -3:
-        ok, why = _melds_grew(before, after, group_delta=1, tile_delta=4)
-        if not ok:
-            return False, why
-        expected_total = 1      # 明杠：接了别家那张，总张数 16 → 17
-    elif gap == -1:
-        ok, why = _melds_grew(before, after, group_delta=0, tile_delta=1)
-        if not ok:
-            return False, why
-        expected_total = 0      # 加杠：把闭手里那张并进已有碰组，总张数不变
+def _canonical_melds(
+    melds: tuple[tuple[int, ...], ...] | None,
+) -> Counter[tuple[int, ...]] | None:
+    """副露转为无序多重集；同组内部也按牌 ID 排序。"""
+    if melds is None:
+        return None
+    return Counter(tuple(sorted(int(tile) for tile in group))
+                   for group in melds)
+
+
+def _verify_kong(
+    before: BoardState,
+    after: BoardState,
+    *,
+    target_tile: int | None,
+    kong_kind: str | None,
+) -> tuple[bool, str]:
+    """按目标牌验证明杠/暗杠/加杠的补牌前后六种合法迁移。"""
+    if kong_kind not in KONG_KINDS:
+        return False, "杠类型缺失或未知，必须传 ming/concealed/upgrade（fail closed）"
+    if target_tile is None:
+        return False, "杠目标牌缺失，无法验证拿走和副露的是同一张牌（fail closed）"
+    if before.concealed is None or after.concealed is None:
+        return False, "杠的精确暗手多重集不可测，不能只凭张数验证（fail closed）"
+    if before.melds is None or after.melds is None:
+        return False, "杠的副露牌型不可测，无法验证目标四张与几何归一化结果"
+
+    target = int(target_tile)
+    before_tiles = tuple(int(tile) for tile in before.concealed)
+    after_tiles = tuple(int(tile) for tile in after.concealed)
+    if (before.concealed_count is not None
+            and before.concealed_count != len(before_tiles)):
+        return False, "杠前暗手张数与精确牌列表不一致"
+    if (after.concealed_count is not None
+            and after.concealed_count != len(after_tiles)):
+        return False, "杠后暗手张数与精确牌列表不一致"
+
+    remove_count = {
+        KONG_MING: 3,
+        KONG_CONCEALED: 4,
+        KONG_UPGRADE: 1,
+    }[kong_kind]
+    base = Counter(before_tiles)
+    if base[target] != remove_count:
+        return False, (f"{kong_kind} 前闭手有 {base[target]} 张目标牌 "
+                       f"{target}，必须精确为 {remove_count} 张")
+    base[target] -= remove_count
+    if base[target] == 0:
+        del base[target]
+
+    after_counter = Counter(after_tiles)
+    missing = base - after_counter
+    extras = after_counter - base
+    if missing:
+        return False, f"杠后除目标牌外还少了其它暗手牌：{dict(missing)}"
+    extra_count = sum(extras.values())
+    if extra_count not in (0, 1):
+        return False, (f"杠后相对基础暗手多出 {extra_count} 张，"
+                       "预期补牌前 0 张或补牌后恰好 1 张")
+    if extra_count == 1 and extras[target] > 0:
+        return False, (f"杠后补牌又读到目标牌 {target}，会形成物理上不可能的"
+                       "第五张同牌，拒绝该迁移")
+    expected_after = base + extras
+    if after_counter != expected_after:
+        return False, "杠后暗手不是‘移除目标牌后原样保留，再可选补一张’"
+    replacement_drawn = extra_count == 1
+
+    before_melds = _canonical_melds(before.melds)
+    after_melds = _canonical_melds(after.melds)
+    assert before_melds is not None and after_melds is not None
+    quad = (target, target, target, target)
+    expected_melds = before_melds.copy()
+    if kong_kind in (KONG_MING, KONG_CONCEALED):
+        # 生产分析器只有在四张牌面可见，或“三牌面且中列抬高/双层底座”
+        # 的杠几何成立时才归一化为长度 4；平铺三张碰不会通过这里。
+        if sum(group.count(target) * count
+               for group, count in before_melds.items()):
+            return False, f"{kong_kind} 前目标牌 {target} 已出现在副露中，物理账冲突"
+        expected_melds[quad] += 1
     else:
-        return False, (f"杠后暗手 {before.concealed_count}→{after.concealed_count}，"
-                       f"预期 −3（明杠）或 −1（加杠）")
+        triplet = (target, target, target)
+        if expected_melds[triplet] != 1:
+            return False, (f"加杠前必须恰有一组目标牌 {target} 的平铺碰，"
+                           f"实际 {expected_melds[triplet]} 组")
+        target_meld_tiles = sum(
+            group.count(target) * count
+            for group, count in before_melds.items())
+        if target_meld_tiles != 3:
+            return False, (f"加杠前目标牌 {target} 在全部副露中共出现 "
+                           f"{target_meld_tiles} 张，必须精确为平铺碰的 3 张")
+        expected_melds[triplet] -= 1
+        if expected_melds[triplet] == 0:
+            del expected_melds[triplet]
+        expected_melds[quad] += 1
+    if after_melds != expected_melds:
+        return False, (f"{kong_kind} 后副露不等于目标四张牌的精确迁移；"
+                       "禁止用别的四张组或平铺碰冒充")
+
+    expected_gap = {
+        KONG_MING: -2 if replacement_drawn else -3,
+        KONG_CONCEALED: -3 if replacement_drawn else -4,
+        KONG_UPGRADE: 0 if replacement_drawn else -1,
+    }[kong_kind]
+    actual_gap = len(after_tiles) - len(before_tiles)
+    if actual_gap != expected_gap:
+        return False, (f"{kong_kind} 后暗手 {len(before_tiles)}→{len(after_tiles)}，"
+                       f"预期 {'补牌后' if replacement_drawn else '补牌前'} "
+                       f"{expected_gap:+d}")
+
+    expected_total_gap = {
+        KONG_MING: 2 if replacement_drawn else 1,
+        KONG_CONCEALED: 1 if replacement_drawn else 0,
+        KONG_UPGRADE: 1 if replacement_drawn else 0,
+    }[kong_kind]
+    if before.total is not None and after.total is not None:
+        total_gap = after.total - before.total
+        if total_gap != expected_total_gap:
+            return False, (f"{kong_kind} 后总张数 {before.total}→{after.total}，"
+                           f"预期 {expected_total_gap:+d}")
     ok, why = _discs_gone(after, ACTION_KONG)
     if not ok:
         return False, why
-    if before.total is not None and after.total is not None:
-        if after.total - before.total != expected_total:
-            return False, (f"杠后总张数 {before.total}→{after.total}，"
-                           f"预期 +{expected_total}")
-    return True, "杠状态迁移已验证（暗手 −3 或 −1、副露张数吻合、圆盘消失）"
+    phase = "补牌后" if replacement_drawn else "补牌前"
+    return True, (f"{kong_kind} 杠状态迁移已验证（目标 {target}、{phase}、"
+                  "精确暗手/副露吻合、圆盘消失）")
 
 
 def _verify_hu(before: BoardState, after: BoardState) -> tuple[bool, str]:

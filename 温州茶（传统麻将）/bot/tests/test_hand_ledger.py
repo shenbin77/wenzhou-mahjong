@@ -83,6 +83,21 @@ def test_recall_rejects_same_frame():
                          whitelist=[24, 62], current_frame=THIS_FRAME) is None
     rejects = ledger.ledger()["rejects"]
     assert rejects["same_frame"] == 1
+
+
+def test_recall_rejects_same_windows_frame_with_separator_and_case_changes():
+    """Windows 同一路径不能靠 `/`、`\\` 或盘符大小写绕过独立帧门。"""
+    ledger = HandLedger()
+    ledger.remember(
+        advise(), round_seq=ROUND, caishen=CAISHEN,
+        frame=r"D:\Capture\frames\before.png")
+
+    recalled = ledger.recall(
+        round_seq=ROUND, caishen=CAISHEN, count=17,
+        current_frame="d:/capture/frames/before.png")
+
+    assert recalled is None
+    assert ledger.ledger()["rejects"]["same_frame"] == 1
     assert ledger.ledger()["recalls"] == 0
 
 

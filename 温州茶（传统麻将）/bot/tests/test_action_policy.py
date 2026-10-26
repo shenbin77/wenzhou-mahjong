@@ -315,6 +315,66 @@ def test_ambiguous_peng_and_kong_abstains() -> None:
     assert decision.tap_point is None
 
 
+def test_opponent_discard_never_turns_existing_peng_into_upgrade_kong() -> None:
+    """加杠是自摸动作；对手打一张同牌时不能拿来补已有碰。"""
+    hand = HandState(
+        concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24),
+        melds=((1, 1, 1),), incoming_tile=1,
+        incoming_source="opponent", player_count=2)
+    report = ap.evaluate_claim_candidates(
+        hand, ActionPolicyConfig(require_template_match=False))
+    kong = report[ACTION_KONG]
+    assert not kong["feasible"]
+    assert not kong["legal_candidate"]
+    assert kong["kong_kind"] is None
+    assert "不得判加杠" in kong["why"]
+
+
+def test_caishen_substitution_never_fabricates_ming_kong() -> None:
+    """即使显式允许财神辅助普通鸣牌，杠仍必须三张实体同牌。"""
+    hand = HandState(
+        concealed=(1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41, 62),
+        caishen=62, incoming_tile=1, incoming_source="opponent", player_count=2)
+    report = ap.evaluate_claim_candidates(
+        hand, ActionPolicyConfig(
+            require_template_match=False,
+            caishen_substitutes_for_claim=True))
+    assert report[ACTION_PENG]["feasible"]
+    assert not report[ACTION_KONG]["legal_candidate"]
+    assert not report[ACTION_KONG]["feasible"]
+
+
+def test_self_draw_upgrade_kong_is_ledgered_but_not_executable() -> None:
+    """唯一平铺碰 + 闭手同牌只登记加杠；补牌 EV 未验收前不点击。"""
+    hand = HandState(
+        concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 25),
+        melds=((1, 1, 1),), caishen=62, incoming_tile=None,
+        incoming_source=None, player_count=2)
+    report = ap.evaluate_claim_candidates(
+        hand, ActionPolicyConfig(require_template_match=False))
+    kong = report[ACTION_KONG]
+    assert kong["legal_candidate"] is True
+    assert kong["kong_kind"] == ap.KONG_UPGRADE
+    assert kong["target_tile"] == 1
+    assert kong["requires_replacement_ev"] is True
+    assert kong["strategy_ready"] is False
+    assert kong["feasible"] is False
+
+
+def test_self_draw_multiple_kongs_fail_closed_without_target() -> None:
+    """同时两组四张时不可猜按钮对应哪一组，台账保留候选但不选目标。"""
+    hand = HandState(
+        concealed=(1, 1, 1, 1, 2, 2, 2, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22),
+        caishen=62, incoming_tile=None, incoming_source=None, player_count=2)
+    kong = ap.evaluate_claim_candidates(
+        hand, ActionPolicyConfig(require_template_match=False))[ACTION_KONG]
+    assert kong["ambiguous"] is True
+    assert len(kong["legal_candidates"]) == 2
+    assert kong["target_tile"] is None
+    assert not kong["legal_candidate"]
+    assert not kong["feasible"]
+
+
 # ---------------------------------------------------------------------------
 # L2：引擎放行
 # ---------------------------------------------------------------------------
@@ -389,7 +449,8 @@ def test_live_auto_unverifiable_hu_uses_independently_verified_pass(
             {"geometry_ok": True, "template_status": ap.TEMPLATE_STATUS_MATCHED},
             {0: {"box": list(GOLD_BOX), "status": ap.TEMPLATE_STATUS_MATCHED},
              1: {"box": list(GOLD_BOX_B), "status": ap.TEMPLATE_STATUS_MATCHED},
-             2: {"box": list(PASS_BOX), "status": ap.TEMPLATE_STATUS_MATCHED}},
+             2: {"box": list(PASS_BOX), "status": ap.TEMPLATE_STATUS_MATCHED,
+                 "best": ACTION_PASS}},
         ))
     hand = HandState(
         concealed=(5, 5, 1, 3, 8, 9, 22, 22, 26, 28),
@@ -409,16 +470,18 @@ def test_live_auto_unverifiable_hu_uses_independently_verified_pass(
     assert "胡未获完整证据" in decision.l2_reason
 
 
-def test_hu_with_melds_is_not_verifiable() -> None:
-    """副露局面的胡牌判定未验收 → 即使有胡盘也不认。"""
-    hand = HandState(concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 41),
-                     melds=((41, 42, 43),), incoming_tile=42,
-                     incoming_source="opponent", player_count=2)
+def test_hu_with_melds_uses_shanten_engine() -> None:
+    """02:02 真帧：两组副露 + 对手 6 条应由副露引擎直接判胡。"""
+    hand = HandState(
+        concealed=(28, 6, 7, 8, 43, 43, 47, 48, 24, 25),
+        melds=((3, 4, 5), (25, 26, 27)), caishen=28,
+        incoming_tile=46, incoming_source="opponent", player_count=2)
     assert hand.is_valid
     decision = decide_action(state(hu_button()), hand, ADVISORY)
     assert decision is not None
-    assert not decision.executable
-    assert "副露" in decision.blocked_reason
+    assert decision.action == ACTION_HU
+    assert not decision.blocked_reason
+    assert "副露手+来牌成胡" in decision.l2_reason
 
 
 def test_runner_can_accept_exact_server_hu_when_meld_engine_is_unverified(
@@ -426,14 +489,15 @@ def test_runner_can_accept_exact_server_hu_when_meld_engine_is_unverified(
     """服务端胡盘救回只在 runner 显式开启且胡/过模板均过闸时生效。"""
     hand = HandState(
         concealed=(1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 41),
-        melds=((41, 42, 43),), incoming_tile=42,
+        melds=((41, 42, 43),), caishen=21, incoming_tile=42,
         incoming_source="opponent", player_count=2)
     cfg = ActionPolicyConfig(
         trust_server_hu_button=True,
         require_template_match=False,
     )
     monkeypatch.setattr(
-        ap, "_status_for", lambda _per, _button: ap.TEMPLATE_STATUS_MATCHED)
+        ap, "_status_for", lambda _per, _button, *_expected:
+        ap.TEMPLATE_STATUS_MATCHED)
     decision = decide_action(state(hu_button(), pass_button()), hand, cfg)
     assert decision is not None
     assert decision.action == ACTION_HU
@@ -444,17 +508,172 @@ def test_runner_can_accept_exact_server_hu_when_meld_engine_is_unverified(
 def test_server_hu_override_never_accepts_own_discard(monkeypatch) -> None:
     hand = HandState(
         concealed=(1, 2, 3, 4, 5, 6, 7, 8),
-        melds=((41, 42, 43), (21, 22, 23)), incoming_tile=25,
+        melds=((41, 42, 43), (21, 22, 23)), caishen=28, incoming_tile=25,
         incoming_source="self", player_count=2)
     cfg = ActionPolicyConfig(
         trust_server_hu_button=True,
         require_template_match=False,
     )
     monkeypatch.setattr(
-        ap, "_status_for", lambda _per, _button: ap.TEMPLATE_STATUS_MATCHED)
+        ap, "_status_for", lambda _per, _button, *_expected:
+        ap.TEMPLATE_STATUS_MATCHED)
     decision = decide_action(state(hu_button(), pass_button()), hand, cfg)
     assert decision is not None
     assert not decision.executable
+
+
+def test_melded_self_draw_engine_accepts_exact_shape() -> None:
+    """02:07 自摸形态：两组副露、等待张数+1 由副露引擎直接判胡。"""
+    hand = HandState(
+        concealed=(6, 7, 8, 9, 9, 23, 24, 24, 25, 26, 25),
+        melds=((43, 44, 45), (41, 42, 43)), caishen=46,
+        incoming_tile=None, incoming_source=None, player_count=2)
+    assert len(hand.concealed) == hand.concealed_expected + 1
+    decision = decide_action(state(hu_button(), pass_button()), hand, ADVISORY)
+
+    assert decision is not None
+    assert decision.action == ACTION_HU
+    assert decision.engine[ACTION_HU]["self_draw"] is True
+    assert "自摸正证据" in decision.l2_reason
+
+
+def test_server_hu_override_accepts_exact_drawn_shape_when_engine_unconfirmed(
+        monkeypatch) -> None:
+    """规则引擎未覆盖时，精确自摸张数和胡/过双模板仍可采用服务端胡。"""
+    hand = HandState(
+        concealed=(6, 7, 8, 9, 9, 22, 23, 24, 25, 26, 25),
+        melds=((43, 44, 45), (41, 42, 43)), caishen=46,
+        incoming_tile=None, incoming_source=None, player_count=2)
+    assert len(hand.concealed) == hand.concealed_expected + 1
+    cfg = ActionPolicyConfig(
+        trust_server_hu_button=True,
+        require_template_match=False,
+    )
+    monkeypatch.setattr(
+        ap, "_status_for", lambda _per, _button, *_expected:
+        ap.TEMPLATE_STATUS_MATCHED)
+
+    decision = decide_action(state(hu_button(), pass_button()), hand, cfg)
+
+    assert decision is not None
+    assert decision.action == ACTION_HU
+    assert decision.engine[ACTION_HU]["server_button_override"] is True
+    assert decision.engine[ACTION_HU]["server_hu_shape"] == "self_draw"
+
+
+def test_engine_hu_waits_when_hu_button_itself_is_unmatched(monkeypatch) -> None:
+    """不能用“过”模板替胡按钮过闸，也不能在动画半帧立刻按过。"""
+    cfg = ap.recommended_runner_config(auto_click_enabled=True)
+    monkeypatch.setattr(
+        ap, "_l1_evidence",
+        lambda _state, _image, _cfg: (
+            {"geometry_ok": True, "template_status": ap.TEMPLATE_STATUS_MATCHED},
+            {0: {"box": list(GOLD_BOX), "status": ap.TEMPLATE_STATUS_UNMATCHED},
+             1: {"box": list(PASS_BOX), "status": ap.TEMPLATE_STATUS_MATCHED}},
+        ))
+
+    decision = decide_action(
+        state(hu_button(), pass_button()), HU_HAND, cfg)
+
+    assert decision is not None
+    assert not decision.executable
+    assert decision.action == ""
+    assert "胡按钮自身模板未过闸" in decision.blocked_reason
+
+
+def test_engine_hu_rejects_matched_status_with_wrong_best_label(
+        monkeypatch) -> None:
+    """matched 只表示某模板过线；胡框若 top1=pass 仍必须拒绝。"""
+    cfg = ap.recommended_runner_config(auto_click_enabled=True)
+    monkeypatch.setattr(
+        ap, "_l1_evidence",
+        lambda _state, _image, _cfg: (
+            {"geometry_ok": True,
+             "template_status": ap.TEMPLATE_STATUS_MATCHED},
+            {0: {"box": list(GOLD_BOX),
+                 "status": ap.TEMPLATE_STATUS_MATCHED,
+                 "best": ACTION_PASS},
+             1: {"box": list(PASS_BOX),
+                 "status": ap.TEMPLATE_STATUS_MATCHED,
+                 "best": ACTION_PASS}},
+        ))
+
+    decision = decide_action(
+        state(hu_button(), pass_button()), HU_HAND, cfg)
+
+    assert decision is not None
+    assert not decision.executable
+    assert decision.action == ""
+    assert "胡按钮自身模板未过闸" in decision.blocked_reason
+
+
+@pytest.mark.parametrize(
+    ("action", "wrong_label"),
+    [
+        (ACTION_PENG, ACTION_CHI),
+        (ACTION_CHI, ACTION_KONG),
+        (ACTION_KONG, ACTION_PENG),
+    ],
+)
+def test_claim_never_borrows_wrong_gold_button_label(
+        action: str, wrong_label: str) -> None:
+    """L2 可行也不能把一个识别成其它动作的金盘当成目标按钮点。"""
+    cfg = ap.recommended_runner_config(auto_click_enabled=True, include_chi=True)
+    button = gold_button()
+    report = {action: {"feasible": True}}
+    decision = ap._finish_claim(
+        action, button, 1, cfg,
+        {"geometry_ok": True, "template_status": ap.TEMPLATE_STATUS_MATCHED},
+        {"improves": True, "why": f"测试 {action} 可行"},
+        report,
+        {0: {"box": list(button.box),
+             "status": ap.TEMPLATE_STATUS_MATCHED,
+             "best": wrong_label}},
+        pass_button(), state(button, pass_button()),
+        np.zeros((900, 1600, 3), np.uint8),
+    )
+
+    assert not decision.executable
+    assert decision.tap_point is None
+    assert "不得借其它金盘" in decision.blocked_reason
+
+
+@pytest.mark.parametrize(
+    ("action", "wrong_label"),
+    [
+        (ACTION_PENG, ACTION_CHI),
+        (ACTION_CHI, ACTION_KONG),
+        (ACTION_KONG, ACTION_PENG),
+    ],
+)
+def test_non_improving_wrong_gold_still_uses_independently_matched_pass(
+        action: str, wrong_label: str) -> None:
+    """不值得鸣牌时可靠“过”优先保桌，错误金盘只禁止真正鸣牌。"""
+    cfg = ap.recommended_runner_config(auto_click_enabled=True, include_chi=True)
+    button = gold_button()
+    pass_disc = pass_button()
+    report = {action: {"feasible": True}}
+    decision = ap._finish_claim(
+        action, button, 1, cfg,
+        {"geometry_ok": True,
+         "template_status": ap.TEMPLATE_STATUS_MATCHED},
+        {"improves": False, "why": f"测试 {action} 劣化",
+         "shanten_before": 2, "shanten_after": 3},
+        report,
+        {0: {"box": list(button.box),
+             "status": ap.TEMPLATE_STATUS_MATCHED,
+             "best": wrong_label},
+         1: {"box": list(pass_disc.box),
+             "status": ap.TEMPLATE_STATUS_MATCHED,
+             "best": ACTION_PASS}},
+        pass_disc, state(button, pass_disc),
+        np.zeros((900, 1600, 3), np.uint8),
+    )
+
+    assert decision.executable
+    assert decision.action == ACTION_PASS
+    assert decision.tap_point == pass_disc.center
+    assert not decision.blocked_reason
 
 
 def test_pass_alone_is_blocked_by_default() -> None:
@@ -798,31 +1017,97 @@ def test_l3_chi_positive_and_negative() -> None:
     assert not ok, why
 
 
-def test_l3_kong_from_discard_positive() -> None:
-    after = BoardState(concealed_count=13, melds=((1, 1, 1, 1),), claim_buttons=0,
-                       settled=False, turn_owner="me")
-    ok, why = verify_after_click(_before(), after, ACTION_KONG)
-    assert ok, why
+def _kong_board(concealed: tuple[int, ...], melds: tuple[tuple[int, ...], ...],
+                *, buttons: int, turn: str) -> BoardState:
+    return BoardState(
+        concealed_count=len(concealed), concealed=concealed, melds=melds,
+        claim_buttons=buttons, settled=False, turn_owner=turn)
 
 
-def test_l3_kong_upgrade_positive() -> None:
-    before = BoardState(concealed_count=13, melds=((1, 1, 1),), claim_buttons=2,
-                        settled=False, turn_owner="opponent")
-    after = BoardState(concealed_count=12, melds=((1, 1, 1, 1),), claim_buttons=0,
-                       settled=False, turn_owner="me")
-    ok, why = verify_after_click(before, after, ACTION_KONG)
-    assert ok, why
-
-
-@pytest.mark.parametrize("concealed,melds,marker", [
-    (14, ((1, 1, 1, 1),), "暗手少了 2 张，既不是明杠也不是加杠"),
-    (13, ((1, 1, 1),), "副露张数没长到 4"),
+@pytest.mark.parametrize("kind,target,before_tiles,before_melds,base_after,after_melds", [
+    (ap.KONG_MING, 1,
+     (1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41), (),
+     (2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41), ((1, 1, 1, 1),)),
+    (ap.KONG_CONCEALED, 6,
+     (3, 6, 6, 6, 6, 7, 8, 9, 21, 22, 23, 24, 25, 41, 42, 43, 44), (),
+     (3, 7, 8, 9, 21, 22, 23, 24, 25, 41, 42, 43, 44), ((6, 6, 6, 6),)),
+    (ap.KONG_UPGRADE, 5,
+     (5, 1, 2, 3, 4, 6, 7, 8, 9, 21, 22, 23, 24, 25), ((5, 5, 5),),
+     (1, 2, 3, 4, 6, 7, 8, 9, 21, 22, 23, 24, 25), ((5, 5, 5, 5),)),
 ])
-def test_l3_kong_negative(concealed: int, melds: tuple, marker: str) -> None:
-    after = BoardState(concealed_count=concealed, melds=melds, claim_buttons=0,
-                       settled=False, turn_owner="me")
-    ok, _why = verify_after_click(_before(), after, ACTION_KONG)
-    assert not ok, marker
+@pytest.mark.parametrize("replacement", [(), (49,)])
+def test_l3_kong_six_legal_before_after_replacement_states(
+    kind: str, target: int, before_tiles: tuple[int, ...],
+    before_melds: tuple[tuple[int, ...], ...], base_after: tuple[int, ...],
+    after_melds: tuple[tuple[int, ...], ...], replacement: tuple[int, ...],
+) -> None:
+    before = _kong_board(before_tiles, before_melds, buttons=2, turn="opponent")
+    after = _kong_board(
+        base_after + replacement, after_melds, buttons=0, turn="me")
+    ok, why = verify_after_click(
+        before, after, ACTION_KONG, target_tile=target, kong_kind=kind)
+    assert ok, why
+
+
+@pytest.mark.parametrize("kind,target,before_tiles,before_melds,base_after,after_melds", [
+    (ap.KONG_MING, 1,
+     (1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41), (),
+     (2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41), ((1, 1, 1, 1),)),
+    (ap.KONG_CONCEALED, 6,
+     (3, 6, 6, 6, 6, 7, 8, 9, 21, 22, 23, 24, 25, 41, 42, 43, 44), (),
+     (3, 7, 8, 9, 21, 22, 23, 24, 25, 41, 42, 43, 44), ((6, 6, 6, 6),)),
+    (ap.KONG_UPGRADE, 5,
+     (5, 1, 2, 3, 4, 6, 7, 8, 9, 21, 22, 23, 24, 25), ((5, 5, 5),),
+     (1, 2, 3, 4, 6, 7, 8, 9, 21, 22, 23, 24, 25), ((5, 5, 5, 5),)),
+])
+def test_l3_kong_rejects_impossible_fifth_target_as_replacement(
+    kind: str, target: int, before_tiles: tuple[int, ...],
+    before_melds: tuple[tuple[int, ...], ...], base_after: tuple[int, ...],
+    after_melds: tuple[tuple[int, ...], ...],
+) -> None:
+    before = _kong_board(before_tiles, before_melds, buttons=2, turn="opponent")
+    after = _kong_board(
+        base_after + (target,), after_melds, buttons=0, turn="me")
+
+    ok, why = verify_after_click(
+        before, after, ACTION_KONG, target_tile=target, kong_kind=kind)
+
+    assert not ok
+    assert "第五张同牌" in why
+
+
+def test_l3_kong_requires_kind_target_and_exact_concealed_evidence() -> None:
+    before_tiles = (1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41)
+    after_tiles = (2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41)
+    before = _kong_board(before_tiles, (), buttons=2, turn="opponent")
+    after = _kong_board(after_tiles, ((1, 1, 1, 1),), buttons=0, turn="me")
+    assert not verify_after_click(before, after, ACTION_KONG)[0]
+    assert not verify_after_click(
+        before, after, ACTION_KONG, target_tile=1, kong_kind="unknown")[0]
+    missing_exact = BoardState(
+        concealed_count=13, melds=((1, 1, 1, 1),), claim_buttons=0,
+        settled=False, turn_owner="me")
+    assert not verify_after_click(
+        before, missing_exact, ACTION_KONG,
+        target_tile=1, kong_kind=ap.KONG_MING)[0]
+
+
+@pytest.mark.parametrize("after_tiles,after_melds", [
+    ((2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 42), ((1, 1, 1, 1),)),
+    ((2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41), ((1, 1, 1),)),
+    ((2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41), ((2, 2, 2, 2),)),
+])
+def test_l3_kong_rejects_wrong_remaining_tile_flat_peng_or_wrong_quad(
+    after_tiles: tuple[int, ...], after_melds: tuple[tuple[int, ...], ...],
+) -> None:
+    before = _kong_board(
+        (1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41), (),
+        buttons=2, turn="opponent")
+    after = _kong_board(after_tiles, after_melds, buttons=0, turn="me")
+    ok, _why = verify_after_click(
+        before, after, ACTION_KONG,
+        target_tile=1, kong_kind=ap.KONG_MING)
+    assert not ok
 
 
 def test_l3_hu_positive_by_settlement() -> None:
@@ -902,6 +1187,7 @@ def test_l3_board_state_from_hand_state() -> None:
     board = BoardState.from_hand_state(PENG_HAND, claim_buttons=2,
                                        settled=False, turn_owner="opponent")
     assert board.concealed_count == 16
+    assert board.concealed == PENG_HAND.concealed
     assert board.meld_tile_total == 0
     assert board.total == 16
 

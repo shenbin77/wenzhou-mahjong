@@ -78,13 +78,28 @@ def test_l3_pass_with_existing_melds_uses_delta_not_absolute_count() -> None:
 @pytest.mark.parametrize("action,concealed,melds", [
     (ACTION_PENG, 14, ((1, 1, 1),)),
     (ACTION_CHI, 14, ((1, 2, 3),)),
-    (ACTION_KONG, 13, ((1, 1, 1, 1),)),
 ])
 def test_l3_claim_unmeasured_discs_fails_closed(action, concealed, melds) -> None:
     """碰/吃/杠：其余迁移都对、唯独圆盘数量不可测 → 仍判未证实。"""
     after = BoardState(concealed_count=concealed, melds=melds,
                        claim_buttons=None, settled=False, turn_owner="me")
     ok, why = verify_after_click(_before(), after, action)
+    assert not ok and "不可测" in why
+
+
+def test_l3_kong_unmeasured_discs_fails_closed_with_exact_evidence() -> None:
+    before_tiles = (1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41)
+    after_tiles = (2, 3, 4, 5, 6, 7, 8, 9, 21, 22, 23, 24, 41)
+    before = BoardState(
+        concealed_count=len(before_tiles), concealed=before_tiles, melds=(),
+        claim_buttons=2, settled=False, turn_owner="opponent")
+    after = BoardState(
+        concealed_count=len(after_tiles), concealed=after_tiles,
+        melds=((1, 1, 1, 1),), claim_buttons=None,
+        settled=False, turn_owner="me")
+    ok, why = verify_after_click(
+        before, after, ACTION_KONG,
+        target_tile=1, kong_kind=ap.KONG_MING)
     assert not ok and "不可测" in why
 
 
@@ -322,7 +337,10 @@ def test_verified_claim_templates_match_native_action_frames() -> None:
     if not frame_a.is_file() or not frame_b.is_file():
         pytest.skip("原生行动圆盘回归帧缺失")
     templates = ap.verified_claim_templates()
-    assert set(templates) == {"chi", "peng", "kong", "hu", "pass"}
+    assert {name.split("@", 1)[0] for name in templates} == {
+        "chi", "peng", "kong", "hu", "pass"}
+    assert "hu@btn_hu_glow" in templates
+    assert "hu@btn_hu_live_20261027" in templates
     expected_a = {"hu", "kong", "peng", "pass"}
     image_a = cv2.imdecode(np.fromfile(str(frame_a), np.uint8), cv2.IMREAD_COLOR)
     matches_a = {
@@ -336,6 +354,112 @@ def test_verified_claim_templates_match_native_action_frames() -> None:
         for button in read_claims(image_b).buttons
     }
     assert "chi" in matches_b
+
+
+def test_live_melded_hu_animation_frame_is_not_passed_over() -> None:
+    """02:02 真帧的发光胡盘必须过自身模板并由副露引擎判胡。"""
+    frame = (BOT_DIR.parent / "采集" / "dev_auto_play"
+             / "ui_20261027_015814_emulator5556_烘熊瞎" / "frames"
+             / "20261027_020226_207971_before_f7e6b4.png")
+    if not frame.is_file():
+        pytest.skip("02:02 副露胡真帧缺失")
+    image = cv2.imdecode(np.fromfile(str(frame), np.uint8), cv2.IMREAD_COLOR)
+    hand = HandState(
+        concealed=(28, 6, 7, 8, 43, 43, 47, 48, 24, 25),
+        melds=((3, 4, 5), (25, 26, 27)), caishen=28,
+        incoming_tile=46, incoming_source="opponent", player_count=2)
+
+    decision = ap.decide_action(
+        read_claims(image), hand,
+        ap.recommended_runner_config(auto_click_enabled=True), image=image)
+
+    assert decision is not None
+    assert decision.action == ACTION_HU
+    assert decision.executable
+    hu_row = next(row for row in decision.l1_evidence["buttons"]
+                  if row["kind"] == "hu")
+    assert hu_row["template"]["status"] == ap.TEMPLATE_STATUS_MATCHED
+    assert hu_row["template"]["best"] == ACTION_HU
+    assert hu_row["template"]["best_variant"] == "hu@btn_hu_live_20261027"
+
+
+def test_live_melded_self_draw_server_hu_is_accepted() -> None:
+    """02:07 真帧：副露后的自摸胡不再被旧“仅闭手自摸”限制漏掉。"""
+    frame = (BOT_DIR.parent / "采集" / "dev_auto_play"
+             / "ui_20261027_015814_emulator5556_烘熊瞎" / "frames"
+             / "20261027_020712_698703_before_8b941d.png")
+    if not frame.is_file():
+        pytest.skip("02:07 副露自摸真帧缺失")
+    image = cv2.imdecode(np.fromfile(str(frame), np.uint8), cv2.IMREAD_COLOR)
+    hand = HandState(
+        concealed=(6, 7, 8, 9, 9, 23, 24, 24, 25, 26, 25),
+        melds=((43, 44, 45), (41, 42, 43)), caishen=46,
+        # 实机牌河层沿用了上一轮 opponent 来源，但本帧没有来牌；精确
+        # 等待态+1 的当前整手应覆盖这条陈旧归属并走自摸引擎。
+        incoming_tile=None, incoming_source="opponent", player_count=2)
+
+    decision = ap.decide_action(
+        read_claims(image), hand,
+        ap.recommended_runner_config(auto_click_enabled=True), image=image)
+
+    assert decision is not None
+    assert decision.action == ACTION_HU
+    assert decision.executable
+    assert "自摸正证据" in decision.l2_reason
+    override = decision.l1_evidence["incoming"]["self_draw_shape_override"]
+    assert override["applied"] is True
+    assert override["stale_source"] == "opponent"
+
+
+def test_live_20261026_230324_concealed_kong_is_ledgered_and_passed() -> None:
+    """真实暗杠帧：四张 6万和杠字形成立，但无补牌 EV 时仍安全按过。"""
+    frame = (BOT_DIR.parent / "采集" / "dev_auto_play"
+             / "ui_20261026_230150_emulator5556_烘熊瞎" / "frames"
+             / "20261026_230324_271895_before_56b34d.png")
+    if not frame.is_file():
+        pytest.skip("20261026 23:03:24 暗杠真帧缺失")
+    image = cv2.imdecode(np.fromfile(str(frame), np.uint8), cv2.IMREAD_COLOR)
+    hand = HandState(
+        # HandLedger 在行动遮挡前恢复出的完整 17 张；南(62)为本局财神。
+        concealed=(62, 3, 6, 6, 6, 6, 7, 41, 42,
+                   46, 46, 48, 23, 24, 24, 25, 49),
+        melds=(), caishen=62, incoming_tile=None,
+        # 真日志带了上一轮陈旧 opponent 来源；杠模板 + 精确 +1 态才可清掉。
+        incoming_source="opponent", player_count=2,
+        source="ui_20261026_230150:20261026_230324")
+
+    decision = ap.decide_action(
+        read_claims(image), hand,
+        ap.recommended_runner_config(auto_click_enabled=True), image=image)
+
+    assert decision is not None
+    assert decision.action == ACTION_PASS
+    assert decision.executable
+    override = decision.l1_evidence["incoming"]["self_draw_shape_override"]
+    assert override["applied"] is True
+    assert override["trigger"] == "kong"
+    kong = decision.engine["all"][ACTION_KONG]
+    assert kong["legal_candidate"] is True
+    assert kong["kong_kind"] == ap.KONG_CONCEALED
+    assert kong["target_tile"] == 6
+    assert kong["requires_replacement_ev"] is True
+    assert kong["strategy_ready"] is False
+    assert kong["feasible"] is False
+    assert "补牌分布与计分 EV 尚未验收" in kong["why"]
+
+
+def test_live_kong_shape_with_only_three_exact_tiles_does_not_invent_candidate() -> None:
+    """同一杠按钮画面若账本只有三张目标牌，不能猜成暗杠。"""
+    hand = HandState(
+        concealed=(62, 3, 6, 6, 6, 7, 8, 9, 21,
+                   22, 23, 24, 25, 41, 42, 43, 44),
+        melds=(), caishen=62, incoming_tile=None,
+        incoming_source=None, player_count=2)
+    kong = ap.evaluate_claim_candidates(
+        hand, ActionPolicyConfig(require_template_match=False))[ACTION_KONG]
+    assert not kong["legal_candidate"]
+    assert kong["target_tile"] is None
+    assert not kong["feasible"]
 
 
 def test_live_auto_unknown_claim_uses_verified_pass_instead_of_stalling() -> None:

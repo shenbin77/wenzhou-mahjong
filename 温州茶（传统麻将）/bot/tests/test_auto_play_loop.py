@@ -46,9 +46,11 @@ from auto_play_loop import (  # noqa: E402
 )
 from action_guard import ActionGuardResult  # noqa: E402
 from action_policy import (  # noqa: E402
-    ACTION_HU, ACTION_PASS, ActionDecision, ActionPolicyConfig, BoardState,
+    ACTION_CHI, ACTION_HU, ACTION_KONG, ACTION_PASS, ACTION_PENG,
+    ActionDecision, ActionPolicyConfig, BoardState, HandState, decide_action,
+    recommended_runner_config,
 )
-from claim_vision import ClaimButton, ClaimState  # noqa: E402
+from claim_vision import ClaimButton, ClaimState, read_claims  # noqa: E402
 from harvest_tea import EXPECTED_PACKAGE  # noqa: E402
 from invite_dialog import InvitationState  # noqa: E402
 from match_score import MatchScoreState, read_match_score  # noqa: E402
@@ -530,6 +532,10 @@ def test_enabled_tick_taps_once_and_verifies_hand_minus_one(tmp_path):
     assert loop.actions_done == 1
     assert loop.stopped is False
     assert event["after_frame"] and Path(event["after_frame"]).is_file()
+    assert event["hand_ledger_discard"] == {"tile_id": 4, "applied": True}
+    assert loop._hand_ledger.memory is not None
+    assert len(loop._hand_ledger.memory.tiles) == 16
+    assert loop._hand_ledger.memory.tiles.count(4) == 1
 
 
 def test_enabled_tick_marks_unverified_when_hand_does_not_shrink(tmp_path):
@@ -1452,7 +1458,7 @@ def test_claim_auto_click_executes_and_l3_verifies_pass(tmp_path, monkeypatch):
 
     event = loop.tick()
 
-    assert event["event"] == "idle"
+    assert event["event"] == "action"
     assert event["claim"]["auto_click"]["executed"] is True
     assert event["claim"]["auto_click"]["semantic_verified"] is True
     assert len(tap.execute_claim_calls) == 1
@@ -1838,7 +1844,7 @@ def test_pass_verify_accepts_real_14_to_17_overlay_recovery(tmp_path, monkeypatc
         _hand_analysis(HAND17_IDS),
     ])
     event = loop.tick()
-    assert event["event"] == "idle"
+    assert event["event"] == "action"
     auto = event["claim"]["auto_click"]
     assert auto["executed"] is True
     assert auto["semantic_verified"] is True
@@ -1859,7 +1865,7 @@ def test_pass_verify_recovers_from_dimmed_first_frame(tmp_path, monkeypatch):
         _hand_analysis(HAND16_IDS),          # 落定帧：真实手牌
     ])
     event = loop.tick()
-    assert event["event"] == "idle"
+    assert event["event"] == "action"
     auto = event["claim"]["auto_click"]
     assert auto["executed"] is True
     assert auto["semantic_verified"] is True
@@ -2427,6 +2433,113 @@ def test_ledger_advice_requires_whitelist_hit(tmp_path):
                                frame=LEDGER_THIS_FRAME) is None
 
 
+# 2026-10-27 02:04:45 真帧：行动圆盘动画把 16 张等待手少读成 14 张。
+# 上一独立帧已稳定读全；恢复只能补暗手，来牌仍由当前 discard_vision 提供。
+CLAIM_LEDGER_HAND16 = (
+    6, 6, 8, 9, 41, 42, 42, 43, 44, 67, 49, 23, 24, 24, 25, 26,
+)
+CLAIM_LEDGER_UNDERREAD14 = CLAIM_LEDGER_HAND16[:-2]
+
+
+def _prime_claim_ledger(loop, *, hand=CLAIM_LEDGER_HAND16,
+                        melds=(), caishen="s6",
+                        frame=LEDGER_PREV_FRAME):
+    loop._hand_ledger.remember(
+        {"status": "advise", "hand_ids": list(hand),
+         "melds": [list(group) for group in melds],
+         "caishen": caishen, "caishen_id": 46},
+        round_seq=loop.round.seq, caishen=caishen, frame=frame)
+
+
+def _claim_underread(*, hand=CLAIM_LEDGER_UNDERREAD14,
+                     melds=(), caishen="s6") -> dict:
+    return {
+        "status": "abstain", "mode": "tea_2p",
+        "hand_ids": list(hand),
+        "melds": [list(group) for group in melds],
+        "caishen": caishen, "caishen_id": 46,
+    }
+
+
+def test_claim_payload_recovers_independent_complete_hand(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_claim_ledger(loop)
+
+    payload, evidence = loop._claim_payload_from_ledger(
+        _claim_underread(), Path(LEDGER_THIS_FRAME))
+
+    assert payload["hand_ids"] == list(CLAIM_LEDGER_HAND16)
+    assert evidence["applied"] is True
+    assert evidence["memory_frame"] == LEDGER_PREV_FRAME
+    assert evidence["current_count"] == 14
+    assert evidence["expected_count"] == 16
+
+
+@pytest.mark.parametrize(
+    ("analysis", "frame", "reason"),
+    [
+        (_claim_underread(), Path(LEDGER_PREV_FRAME),
+         "ledger_recall_rejected"),
+        (_claim_underread(caishen="s5"), Path(LEDGER_THIS_FRAME),
+         "ledger_recall_rejected"),
+        (_claim_underread(melds=((41, 42, 43),)), Path(LEDGER_THIS_FRAME),
+         "current_hand_not_underread"),
+        (_claim_underread(hand=CLAIM_LEDGER_HAND16), Path(LEDGER_THIS_FRAME),
+         "current_hand_not_underread"),
+    ],
+)
+def test_claim_payload_recovery_rejects_unproven_state(
+        tmp_path, analysis, frame, reason):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_claim_ledger(loop)
+
+    payload, evidence = loop._claim_payload_from_ledger(analysis, frame)
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] == reason
+    assert payload["hand_ids"] == analysis["hand_ids"]
+
+
+def test_claim_payload_recovery_requires_multiset_subset(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    memory = (6, 8, 9, 41, 42, 42, 43, 44, 67, 49, 23, 24, 24, 25, 26, 27)
+    _prime_claim_ledger(loop, hand=memory)
+    # 集合仍是子集，但本帧把 6 万重复读成两张；不得被集合判据蒙混过关。
+    current = (6, 6, 8, 9, 41, 42, 43, 44, 67, 49, 23, 24, 25, 26)
+
+    payload, evidence = loop._claim_payload_from_ledger(
+        _claim_underread(hand=current), Path(LEDGER_THIS_FRAME))
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] == "current_hand_not_multiset_subset"
+    assert payload["hand_ids"] == list(current)
+
+
+def test_live_missed_peng_is_recovered_from_prior_complete_hand(tmp_path):
+    """02:04:45 原生帧：只恢复手牌后，现有模板/策略应从过改为碰。"""
+    frame = (BOT_DIR.parent / "采集" / "dev_auto_play"
+             / "ui_20261027_015814_emulator5556_烘熊瞎" / "frames"
+             / "20261027_020445_274090_before_749282.png")
+    if not frame.is_file():
+        pytest.skip("02:04:45 碰真帧缺失")
+    image = cv2.imdecode(np.fromfile(str(frame), np.uint8), cv2.IMREAD_COLOR)
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_claim_ledger(loop)
+    payload, evidence = loop._claim_payload_from_ledger(
+        _claim_underread(), frame)
+    payload["incoming_tile"] = 6
+    payload["incoming_source"] = "opponent"
+
+    decision = decide_action(
+        read_claims(image), HandState.from_analysis(payload),
+        recommended_runner_config(auto_click_enabled=True), image=image)
+
+    assert evidence["applied"] is True
+    assert decision is not None
+    assert decision.action == ACTION_PENG
+    assert decision.executable
+
+
 # ---------------------------------------------------------------------------
 # 2026-10-26 Codex P0：账本禁止同帧自证
 #
@@ -2603,6 +2716,25 @@ def test_round_transition_uncertain_or_halted_stops_explicitly(tmp_path, status)
 
     assert event["event"] == "stop"
     assert event["gate"] == "round_transition_uncertain"
+    assert loop.stopped is True
+
+
+def test_pending_post_claim_blocks_round_transition_before_attempt(tmp_path):
+    """鸣牌后尚未出牌时，下一局探针只能停手，不能先点再发现跨局。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    transition = FakeRoundTransition(TransitionResult(
+        "clicked", "不应到达 attempt"))
+    loop._round_transition = transition
+    loop._verified_claim_action_event(
+        {"action": ACTION_PENG}, action=ACTION_PENG, target_tile=24)
+
+    event = loop._round_transition_event(
+        np.zeros((900, 1600, 3), dtype=np.uint8),
+        Path(tmp_path) / "pending-claim.png")
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "post_claim_round_transition"
+    assert transition.attempt_kwargs == []
     assert loop.stopped is True
 
 
@@ -2909,6 +3041,26 @@ def test_promo_popup_unresolved_abstains_without_clicking(
     assert len(events_of(loop, "promo_popup_abstain")) == 1
     assert events_of(loop, "promo_popup_abstain")[0]["promo_popup"]["present"] is True
     assert loop.stopped is False
+
+
+def test_pending_post_claim_watchdog_precedes_unresolved_promo(
+        tmp_path, monkeypatch):
+    """不可读促销遮罩不得靠早退让鸣牌后的必出牌事务无限挂起。"""
+    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+                        lambda _image: promo_unresolved())
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop._verified_claim_action_event(
+        {"action": ACTION_PENG}, action=ACTION_PENG, target_tile=24)
+    loop._post_claim_pending.observed_ticks = (
+        auto_play_loop.POST_CLAIM_DISCARD_MAX_TICKS)
+
+    event = loop.tick()
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "post_claim_discard_timeout"
+    assert tap.execute_close_popup_calls == []
+    assert tap.execute_calls == []
+    assert loop.stopped is True
 
 
 def test_promo_popup_frame_never_reaches_the_turn_gate(tmp_path, monkeypatch):
@@ -3416,3 +3568,378 @@ def test_non_action_event_does_not_claim_bot_click_provenance():
 
     assert "action_id" not in event
     assert "action_source" not in event
+
+
+# ----------------------------------------------------------------------
+# 2026-10-27 硬验收：吃／碰／杠不是终点，必须续接一次 verified 出牌
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("action", "supplement_required"),
+    [
+        (ACTION_CHI, False),
+        (ACTION_PENG, False),
+        (ACTION_KONG, True),
+    ],
+)
+def test_verified_claim_l3_starts_post_claim_continuation(
+        tmp_path, action, supplement_required):
+    """L3 已确认的吃/碰/杠要落 action_id，并建立必出牌事务。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    payload = {"action": action, "target_tile": 24,
+               "auto_click": {"semantic_verified": True}}
+
+    event = loop._verified_claim_action_event(
+        payload, action=action, target_tile=24)
+
+    assert event["event"] == "action"
+    assert event["action_kind"] == "claim"
+    assert event["action_source"] == "bot"
+    assert event["action_id"].startswith(
+        f"emulator-test:r{loop.round.seq}:t{loop.tick_index}:claim-{action}:")
+    assert loop.actions_done == 1
+    assert loop._post_claim_pending is not None
+    assert loop._post_claim_pending.action_id == event["action_id"]
+    assert loop._post_claim_pending.action == action
+    assert loop._post_claim_pending.supplement_required is supplement_required
+    assert event["post_claim_continuation"]["status"] == (
+        "awaiting_recomputed_discard")
+
+
+def test_verified_chi_tail_starts_post_claim_continuation(tmp_path):
+    """吃的二段链只有 L3=true 才能进入后续出牌事务。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    payload = {"action": ACTION_CHI, "target_tile": 24,
+               "auto_click": {}}
+    chain = {"stage": "group_clicked"}
+
+    event = loop._chi_finish_tail(payload, chain, True, "吃后副露已落定")
+
+    assert event["event"] == "action"
+    assert event["claim"]["auto_click"]["semantic_verified"] is True
+    assert event["claim"]["auto_click"]["semantic_reason"] == "吃后副露已落定"
+    assert chain["stage"] == "verified"
+    assert loop._post_claim_pending is not None
+    assert loop._post_claim_pending.action == ACTION_CHI
+
+
+def test_unverified_chi_tail_never_starts_continuation(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    payload = {"action": ACTION_CHI, "target_tile": 24,
+               "auto_click": {}}
+
+    event = loop._chi_finish_tail(
+        payload, {"stage": "group_clicked"}, False, "副露尚未落定")
+
+    assert event["_terminal"]["gate"] == "claim_unverified"
+    assert loop.actions_done == 0
+    assert loop._post_claim_pending is None
+
+
+def test_verified_discard_closes_post_claim_continuation(tmp_path):
+    """后续牌只有 verified 离手后才把 claim action_id 串起来并闭合。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    claim = loop._verified_claim_action_event(
+        {"action": ACTION_PENG}, action=ACTION_PENG, target_tile=24)
+
+    discard = loop._complete_post_claim_after_discard({
+        "event": "action", "verified": True, "tap": [346, 836],
+    })
+
+    assert discard["continuation_of"] == claim["action_id"]
+    assert discard["post_claim_continuation"]["status"] == (
+        "completed_by_verified_discard")
+    assert loop._post_claim_pending is None
+
+
+def test_unverified_discard_never_closes_post_claim_continuation(tmp_path):
+    """调用侧即使误传未验证事件，事务本身也必须 fail-closed。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    claim = loop._verified_claim_action_event(
+        {"action": ACTION_PENG}, action=ACTION_PENG, target_tile=24)
+
+    discard = loop._complete_post_claim_after_discard({
+        "event": "action", "verified": False, "tap": [346, 836],
+    })
+
+    assert "continuation_of" not in discard
+    assert loop._post_claim_pending is not None
+    assert loop._post_claim_pending.action_id == claim["action_id"]
+
+
+def test_tick_verified_discard_closes_post_claim_continuation(tmp_path):
+    """整环接线：鸣牌后要等 fresh 稳定帧重算，下一次 verified 出牌才闭合。"""
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    claim = loop._verified_claim_action_event(
+        {"action": ACTION_PENG}, action=ACTION_PENG, target_tile=24)
+
+    settle(loop)
+    event = loop.tick()
+
+    assert event["event"] == "action"
+    assert event["verified"] is True
+    assert event["continuation_of"] == claim["action_id"]
+    assert event["post_claim_continuation"]["status"] == (
+        "completed_by_verified_discard")
+    assert loop.actions_done == 2
+    assert loop._post_claim_pending is None
+    assert len(tap.execute_calls) == 1
+
+
+def test_post_claim_continuation_timeout_stops_instead_of_silent_wait(
+        tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop._verified_claim_action_event(
+        {"action": ACTION_PENG}, action=ACTION_PENG, target_tile=24)
+    loop._post_claim_pending.observed_ticks = (
+        auto_play_loop.POST_CLAIM_DISCARD_MAX_TICKS)
+
+    event = loop._post_claim_watchdog(tmp_path / "waiting.png", 0.0)
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "post_claim_discard_timeout"
+    assert event["post_claim_continuation"]["action"] == ACTION_PENG
+    assert loop.stopped is True
+
+
+def test_post_claim_continuation_never_crosses_round(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    claim = loop._verified_claim_action_event(
+        {"action": ACTION_CHI}, action=ACTION_CHI, target_tile=24)
+    loop.round.seq += 1
+
+    event = loop._post_claim_watchdog(tmp_path / "new-round.png", 0.0)
+
+    assert event["event"] == "stop"
+    assert event["gate"] == "post_claim_round_mismatch"
+    assert event["post_claim_continuation"]["action_id"] == claim["action_id"]
+    assert loop.stopped is True
+
+
+@pytest.mark.parametrize("action", [ACTION_CHI, ACTION_PENG, ACTION_KONG])
+def test_claim_budget_is_atomic_for_required_followup_discard(
+        tmp_path, monkeypatch, action):
+    """只剩一个动作额度时不得先鸣牌再因 max_actions 留在半条链。"""
+    button = ClaimButton("gold", (970, 534, 1097, 666), (1033, 597))
+    monkeypatch.setattr(
+        auto_play_loop, "read_claims",
+        lambda _image: ClaimState(
+            (button,), action, f"测试 {action}", {}, True),
+    )
+    monkeypatch.setattr(
+        auto_play_loop, "decide_action",
+        lambda *_args, **_kwargs: ActionDecision(
+            action=action, target_tile=24, confidence=1.0,
+            l1_evidence={"template_status": "matched"},
+            l2_reason="测试：鸣牌可执行", needs_human_confirm=False,
+            button=button, tap_point=button.center,
+        ),
+    )
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, claim_auto_click=True, max_actions=1)
+
+    event = loop._claim_policy_event(
+        np.zeros((900, 1600, 3), np.uint8),
+        tmp_path / "claim.png", CLAIM_HAND_ANALYSIS)
+
+    assert event["claim"]["status"] == "blocked"
+    assert "原子完成" in event["claim"]["blocked_reason"]
+    assert loop.actions_done == 0
+    assert loop._post_claim_pending is None
+    assert tap.execute_claim_calls == []
+
+
+def test_verified_hu_closes_pending_kong_after_supplement(tmp_path):
+    """杠后补牌若形成胡，verified Hu 是合法终点，不应硬等一次 discard。"""
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    kong = loop._verified_claim_action_event(
+        {"action": ACTION_KONG}, action=ACTION_KONG, target_tile=24)
+    assert loop._post_claim_pending.supplement_required is True
+
+    hu = loop._verified_claim_action_event(
+        {"action": ACTION_HU}, action=ACTION_HU, target_tile=None)
+
+    assert hu["continuation_of"] == kong["action_id"]
+    assert hu["post_claim_completed_by"] == "verified_hu"
+    assert hu["post_claim_continuation"]["status"] == "completed_by_hu"
+    assert loop.actions_done == 2
+    assert loop._post_claim_pending is None
+
+
+@pytest.mark.parametrize(
+    ("pending_action", "expected_status", "should_tap"),
+    [
+        (ACTION_PENG, "awaiting_post_claim_discard", False),
+        (ACTION_KONG, "ready", True),
+    ],
+)
+def test_only_pending_kong_may_finish_through_verified_hu(
+        tmp_path, monkeypatch, pending_action, expected_status, should_tap):
+    """吃/碰残留胡盘也不能点；只有杠后补牌成胡可走胡自己的 L3。"""
+    button = ClaimButton("gold", (1179, 533, 1305, 666), (1241, 597))
+    monkeypatch.setattr(
+        auto_play_loop, "read_claims",
+        lambda _image: ClaimState((button,), ACTION_HU, "测试胡", {}, True),
+    )
+    monkeypatch.setattr(
+        auto_play_loop, "decide_action",
+        lambda *_args, **_kwargs: ActionDecision(
+            action=ACTION_HU, confidence=1.0,
+            l1_evidence={"template_status": "matched"},
+            l2_reason="测试：胡可执行", needs_human_confirm=False,
+            button=button, tap_point=button.center,
+        ),
+    )
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, claim_auto_click=True)
+    claim = loop._verified_claim_action_event(
+        {"action": pending_action}, action=pending_action, target_tile=24)
+    monkeypatch.setattr(
+        loop, "_verify_claim_settled",
+        lambda *_args, **_kwargs: (
+            True, "胡后结算已落定", BoardState(0), [{"frame": "after-hu.png"}]),
+    )
+
+    event = loop._claim_policy_event(
+        np.zeros((900, 1600, 3), np.uint8),
+        tmp_path / "hu.png", CLAIM_HAND_ANALYSIS)
+
+    assert event["claim"]["status"] == expected_status
+    assert bool(tap.execute_claim_calls) is should_tap
+    if should_tap:
+        assert event["event"] == "action"
+        assert event["continuation_of"] == claim["action_id"]
+        assert event["post_claim_completed_by"] == "verified_hu"
+        assert event["claim"]["auto_click"]["semantic_verified"] is True
+        assert loop._post_claim_pending is None
+    else:
+        assert "不重复点击行动圆盘" in event["claim"]["blocked_reason"]
+        assert loop._post_claim_pending is not None
+
+
+# ----------------------------------------------------------------------
+# 2026-10-27 01:59--02:05 真帧：账本恢复只补暗手，不替来牌/副露作证
+# ----------------------------------------------------------------------
+LIVE_015814_ROOT = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+)
+
+
+def _read_native_frame_or_skip(path: Path, label: str) -> np.ndarray:
+    if not path.is_file():
+        pytest.skip(f"{label} 真帧缺失")
+    image = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+    assert image is not None, path
+    return image
+
+
+def test_live_015954_one_meld_underread_recovers_peng(tmp_path):
+    """01:59:54：一组副露等待手 13→11 少读，独立账本恢复后应碰。"""
+    frame = (LIVE_015814_ROOT
+             / "ui_20261027_015814_emulator5556_烘熊瞎" / "frames"
+             / "20261027_015954_408173_before_587b85.png")
+    image = _read_native_frame_or_skip(frame, "01:59:54 一组副露碰")
+    complete13 = (28, 6, 7, 8, 43, 43, 47, 48, 24, 24, 25, 25, 26)
+    current11 = (28, 6, 7, 8, 43, 43, 47, 48, 24, 24, 26)
+    melds = ((3, 4, 5),)
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_claim_ledger(loop, hand=complete13, melds=melds, caishen="t8")
+
+    payload, evidence = loop._claim_payload_from_ledger(
+        _claim_underread(hand=current11, melds=melds, caishen="t8"), frame)
+    payload.update({"incoming_tile": 24, "incoming_source": "opponent"})
+    decision = decide_action(
+        read_claims(image), HandState.from_analysis(payload),
+        recommended_runner_config(auto_click_enabled=True), image=image)
+
+    assert evidence["applied"] is True
+    assert evidence["expected_count"] == 13
+    assert evidence["memory_count"] == 13
+    assert decision is not None
+    assert decision.action == ACTION_PENG
+    assert decision.executable
+
+
+@pytest.mark.parametrize(
+    ("frame_name", "current14", "incoming"),
+    [
+        ("20261027_020034_166079_before_f6d17d.png",
+         (41, 48, 49, 49, 23, 23, 67, 67, 29, 29, 61, 61, 63, 63), 44),
+        ("20261027_020110_035872_before_935104.png",
+         (41, 44, 44, 48, 49, 49, 23, 23, 29, 29, 61, 61, 63, 63), 67),
+    ],
+)
+def test_live_peng_offer_still_passes_when_peng_worsens_shanten(
+        tmp_path, frame_name, current14, incoming):
+    """02:00:34/02:01:10：恢复完整手不等于强碰，向听 1→3 必须过。"""
+    frame = (LIVE_015814_ROOT
+             / "ui_20261027_015814_emulator5554_玉姐" / "frames"
+             / frame_name)
+    image = _read_native_frame_or_skip(frame, frame_name)
+    complete16 = (
+        41, 44, 44, 48, 49, 49, 23, 23,
+        67, 67, 29, 29, 61, 61, 63, 63,
+    )
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_claim_ledger(loop, hand=complete16, caishen="t8")
+    payload, evidence = loop._claim_payload_from_ledger(
+        _claim_underread(hand=current14, caishen="t8"), frame)
+    payload.update({"incoming_tile": incoming,
+                    "incoming_source": "opponent"})
+
+    decision = decide_action(
+        read_claims(image), HandState.from_analysis(payload),
+        recommended_runner_config(auto_click_enabled=True), image=image)
+
+    assert evidence["applied"] is True
+    assert decision is not None
+    assert decision.action == ACTION_PASS
+    assert "1→3" in decision.l2_reason
+    assert decision.executable
+
+
+def test_live_020523_low_confidence_incoming_stays_blocked(tmp_path):
+    """02:05:23：暗手可恢复，但来牌只有 0.849，须弃权而不是猜碰/吃。"""
+    frame = (LIVE_015814_ROOT
+             / "ui_20261027_015814_emulator5556_烘熊瞎" / "frames"
+             / "20261027_020523_725939_before_f3b05e.png")
+    image = _read_native_frame_or_skip(frame, "02:05:23 低置信来牌")
+    complete16 = (
+        6, 6, 7, 8, 9, 41, 42, 42,
+        43, 44, 67, 23, 24, 24, 25, 26,
+    )
+    current14 = (6, 6, 7, 8, 9, 41, 42, 42, 43, 44, 67, 23, 25, 26)
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_claim_ledger(loop, hand=complete16, caishen="s6")
+
+    event = loop._claim_policy_event(
+        image, frame,
+        _claim_underread(hand=current14, caishen="s6"))
+
+    assert event["claim"]["hand_recovery"]["applied"] is True
+    assert event["claim"]["action"] == ""
+    assert event["claim"]["status"] == "blocked"
+    assert event["claim"]["tap_point"] is None
+    sparkle = event["claim"]["incoming_resolution"]["sparkle_tile"]
+    assert sparkle["accepted"] is False
+    assert sparkle["score"] == pytest.approx(0.8488225, abs=1e-5)
+    assert "来牌未知" in event["claim"]["l2_reason"]
+
+
+def test_claim_payload_recovery_rejects_true_meld_mismatch(tmp_path):
+    """张数和多重集即使都能对上，只要副露组变了也绝不恢复旧手。"""
+    memory13 = (28, 6, 7, 8, 43, 43, 47, 48, 24, 24, 25, 25, 26)
+    current11 = memory13[:-2]
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    _prime_claim_ledger(loop, hand=memory13, melds=(), caishen="t8")
+
+    payload, evidence = loop._claim_payload_from_ledger(
+        _claim_underread(
+            hand=current11, melds=((3, 4, 5),), caishen="t8"),
+        Path(LEDGER_THIS_FRAME),
+    )
+
+    assert evidence["applied"] is False
+    assert evidence["reason"] == "meld_mismatch"
+    assert evidence["current_melds"] == [[3, 4, 5]]
+    assert evidence["memory_melds"] == []
+    assert payload["hand_ids"] == list(current11)
