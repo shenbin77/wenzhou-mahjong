@@ -15,18 +15,13 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from lobby_autostart import read_lobby_room
 from session_watch import WatchState, classify_watch
 
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "lobby"
-TABLE_TEMPLATE = TEMPLATE_DIR / "tea2_table.png"
-TABLE_ONE_SEATED_TEMPLATE = TEMPLATE_DIR / "tea2_table_one_seated.png"
-TABLE_TEMPLATES = (TABLE_TEMPLATE, TABLE_ONE_SEATED_TEMPLATE)
 RULES_TEMPLATE = TEMPLATE_DIR / "tea2_rules_modal.png"
-TABLE_ROI = (124, 286, 400, 438)  # x0,y0,x1,y1
 RULES_ROI = (463, 230, 1139, 665)
-PLUS_SEARCH_ROI = (20, 150, 600, 600)
-TABLE_MIN_SCORE = 0.98
 RULES_MIN_SCORE = 0.98
 TARGET_MAX_DRIFT = 12.0
 
@@ -73,54 +68,6 @@ def _roi_score(image: np.ndarray, roi: tuple[int, int, int, int],
         crop, template, cv2.TM_CCOEFF_NORMED)[0, 0])
 
 
-def _table_score(image: np.ndarray) -> float:
-    scores = [
-        _roi_score(image, TABLE_ROI, template_path)
-        for template_path in TABLE_TEMPLATES
-        if template_path.is_file()
-    ]
-    return max(scores, default=0.0)
-
-
-def _is_plus_component(mask: np.ndarray) -> bool:
-    height, width = mask.shape
-    if not (30 <= width <= 42 and 30 <= height <= 42):
-        return False
-    cy, cx = height // 2, width // 2
-    horizontal = float(mask[max(0, cy - 2):cy + 3, :].mean())
-    vertical = float(mask[:, max(0, cx - 2):cx + 3].mean())
-    corner = float(np.concatenate((
-        mask[:8, :8].ravel(), mask[:8, -8:].ravel(),
-        mask[-8:, :8].ravel(), mask[-8:, -8:].ravel(),
-    )).mean())
-    return horizontal >= 0.55 and vertical >= 0.55 and corner <= 0.12
-
-
-def find_empty_seats(image: np.ndarray) -> tuple[SeatTarget, ...]:
-    """Find the two reviewed tan seat cards by their white plus glyphs."""
-    x0, y0, x1, y1 = PLUS_SEARCH_ROI
-    hsv = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
-    white = ((hsv[:, :, 1] < 70) & (hsv[:, :, 2] > 190)).astype(np.uint8)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(white, 8)
-    targets: list[SeatTarget] = []
-    for index in range(1, count):
-        x, y, width, height, area = (int(v) for v in stats[index])
-        if not (350 <= area <= 700):
-            continue
-        component = (labels[y:y + height, x:x + width] == index).astype(np.uint8)
-        if not _is_plus_component(component):
-            continue
-        gx0, gy0 = x0 + x, y0 + y
-        gx1, gy1 = gx0 + width, gy0 + height
-        point = ((gx0 + gx1) // 2, (gy0 + gy1) // 2)
-        # The reviewed two-player table has only these opposing seat zones.
-        in_upper_left = 85 <= point[0] <= 145 and 235 <= point[1] <= 300
-        in_lower_right = 380 <= point[0] <= 440 and 435 <= point[1] <= 500
-        if in_upper_left or in_lower_right:
-            targets.append(SeatTarget((gx0, gy0, gx1, gy1), point))
-    return tuple(sorted(targets, key=lambda item: (item.point[1], item.point[0])))
-
-
 def _seat_index(serial: str, count: int) -> int:
     suffix = str(serial or "").rsplit("-", 1)[-1]
     if suffix.isdigit():
@@ -135,17 +82,33 @@ def plan_auto_seat(image: np.ndarray | None, serial: str,
         return SeatPlan("blocked", "自动坐下目前只开放温州茶2人", 0.0)
     if image is None or image.ndim != 3 or image.shape[:2] != (900, 1600):
         return SeatPlan("blocked", "大厅画面不是已验证的1600×900原生帧", 0.0)
-    score = _table_score(image)
-    if score < TABLE_MIN_SCORE:
-        return SeatPlan("blocked", f"目标茶2桌证据不足（{score:.3f}）", score)
-    targets = find_empty_seats(image)
+    # Keep a single source of truth for the lobby layout.  The old executor had
+    # its own stricter table-template gate (0.98) and could therefore reject a
+    # live one-seated table that the audited lobby recognizer had already
+    # proven safe (measured 0.966).  Execution now consumes the exact same
+    # RoomState evidence used by the read-only plan and still performs its own
+    # fresh-frame target recheck immediately before tapping.
+    room = read_lobby_room(image)
+    # ``read_lobby_room`` sorts diamonds by x and only marks a room present
+    # when the first diamond is lattice unit 0.  Report that target table's
+    # evidence, not a potentially higher score from a later empty table.
+    diamonds = room.evidence.get("diamonds", [])
+    first_diamond = diamonds[0] if diamonds and isinstance(diamonds[0], dict) else {}
+    score = float(first_diamond.get("score", 0.0))
+    if not room.present:
+        return SeatPlan("blocked", f"目标茶2桌证据不足：{room.reason}", score)
+    first_unit = [seat for seat in room.seats if seat.unit == 0]
+    targets = tuple(sorted(
+        (SeatTarget(seat.box, seat.center) for seat in first_unit),
+        key=lambda item: (item.point[1], item.point[0]),
+    ))
     if not targets:
-        return SeatPlan("blocked", "没有找到可复核的空座“+”", score)
+        return SeatPlan("blocked", "最左桌没有可复核的空座“+”", score)
     if len(targets) > 2:
-        return SeatPlan("blocked", f"空座候选异常：{len(targets)}个", score, targets)
+        return SeatPlan("blocked", f"最左桌空座候选异常：{len(targets)}个", score, targets)
     target = targets[_seat_index(serial, len(targets))]
     return SeatPlan(
-        "ready", f"目标茶2桌已确认，发现{len(targets)}个空座", score,
+        "ready", f"{room.reason}；最左桌发现{len(targets)}个可复核空座", score,
         targets, target,
     )
 
