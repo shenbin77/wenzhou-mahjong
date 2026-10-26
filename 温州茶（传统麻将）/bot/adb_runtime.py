@@ -1,20 +1,54 @@
 """adb 可执行文件与 adb server 的单点治理（只读优先，默认不杀进程）。
 
-背景（2026-10-26 外部审查结论，两个真实故障）：
+本模块存在的唯一理由：**把"到底用哪个 adb"收敛成一处决策**。
+**它不解决、也不需要解决"两套 adb 抢端口"——那条推测已被实测推翻。**
 
-1. **两套 adb 抢服务**。代码里一处用 ``D:/leidian/LDPlayer14/adb.exe``
-   （雷电模拟器自带），另一处用 ``采集/scrcpy/adb.exe``（采集工具链自带）。
-   两个版本/来源不同的 adb server 会在 5037 端口互相踢，表现为
-   ``adb shell dumpsys window windows`` 随机崩溃（退出码 1，或
-   3221225773 = 0xC0000005 访问违例），进而让"前台包名门禁"误判成
-   "无法确认前台应用"而停手——表面像识别问题，根因是 adb 抢端口。
+背景（2026-10-26 重写；上一版注释已被实测推翻，并被证明会持续把排查带偏）
+------------------------------------------------------------------------
 
-   本模块把"到底用哪个 adb"收敛成**唯一一处**决策：
-   ``adb_candidates()`` 定顺序、``resolve_adb_path()`` 做探测挑选，
-   其余模块一律调用本模块，不许再各自拼路径。
+【已推翻】旧版注释声称：一处用雷电 adb、另一处用采集工具链 adb，两个 server
+会在 5037 端口互踢，导致 ``adb shell dumpsys window windows`` 随机崩溃。
+实测证据（来源为下方报告，第 1~3 条均为该报告标注【实测】的结果）：
 
-2. **进程内存失控**（全量测试与代打并发时 OpenCV OOM）。
-   见 ``mem_guard.py``。
+1. 本机此刻只有 **1 个** ``adb.exe`` 进程（PID 18368，启动于 2026-10-26 08:04:17）；
+2. ``C:/leidian/LDPlayer14/adb.exe`` 与 ``D:/leidian/LDPlayer14/adb.exe``
+   **字节完全相同**：同为 1.0.41、5,916,440 字节，MD5
+   ``F1F479BBA21298E758FC22D8D98F8E48``；
+3. ``采集/scrcpy/adb.exe`` **磁盘上并不存在**（它只是一条候选路径，不是一个进程）。
+
+第 2、3 条的字节比对由团队执行并在报告中标注【实测】，**本次改动未重跑该比对**，
+所以这里只作引用，不额外宣称实测。
+
+【真实故障】宿主机内存/提交额度耗尽 → 子进程起不来 → dumpsys 失败 →
+被误判成"无法确认前台应用"而停手。台账里真实存在的 adb 失败只有 2 次
+（台账原文照抄）：
+
+    ```
+    2026-10-25T18:45:49.463471+08:00  emulator-5558  tick=87
+    gate=gate_foreground  reason="无法确认前台应用: ADB 调用失败: [WinError 1455] 页面文件太小，无法完成操作。"
+
+    2026-10-25T18:45:52.127547+08:00  emulator-5556  tick=87
+    gate=gate_foreground  reason="无法确认前台应用: ADB 调用失败: Command '['C:\\leidian\\LDPlayer14\\adb.exe', '-s', 'emulator-5556', 'shell', 'dumpsys', 'window', 'windows']' returned non-zero exit status 3221225794."
+    ```
+
+两台机相隔 3 秒、同一个 tick 同时失败 → 宿主机级资源故障，**不是 adb 的错**。
+崩溃前 1.2 秒（18:45:50.881）同一会话已先出现
+``capture_failed: OpenCV !buf.empty()``（screencap 返回空缓冲）——顺序自洽。
+这三个退出码一律交给 :func:`describe_exit_code` 翻译，**不要人肉换算**：
+
+* ``3221225477`` = ``0xC0000005`` STATUS_ACCESS_VIOLATION —— 访问违例（真崩了）；
+* ``3221225794`` = ``0xC0000142`` STATUS_DLL_INIT_FAILED —— 进程起不来（典型：无内存可提交）；
+* ``3221225773`` = ``0xC000012D`` STATUS_COMMITMENT_LIMIT —— 提交额度/页面文件不足。
+  旧注释把它错写成 "0xC0000005 访问违例"，正是把人带向"adb 崩溃"而非
+  "内存耗尽"的那一行，2026-10-26 已订正。
+
+【推断，未确认】到底是谁把提交额度打满。报告第 ④ 节第 1 名疑犯是**进程内存
+失控**（``mem_guard.py`` 头部记录的"第二个真实故障：OpenCV OOM"是同一真因的
+另一个面），但崩溃时刻没有 RSS/commit 读数（当时看门狗还没接进
+``auto_play_loop``），所以这一步只是推断，不要当成结论传播。
+
+报告全文：``D:/温州麻将/SPECS/ADB-FORENSICS-20261026-dumpsys-timeout.md``
+（含 adb 调用点全表、并发压测数据、以及"崩溃瞬间该抓哪些证据"的命令清单）。
 
 设计红线
 --------
@@ -30,6 +64,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -65,13 +100,101 @@ EXCEPTION_RETURNCODE = -1
 #: Windows 下避免弹出控制台窗口。
 _CREATE_NO_WINDOW = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
 
+#: 已收录的 Windows/NTSTATUS 退出码 -> (名称, 人话)。
+#:
+#: 只收**实测见过**的退出码。收进来之前必须有真凭实据（台账原文 / 亲自换算），
+#: 绝不从数字长相去猜：**猜错一次就把整条排查带偏**（前车之鉴见模块头注释）。
+#:
+#: 十进制值与十六进制的换算可在 Python 里复核：``hex(3221225794)``。
+EXIT_CODE_TABLE: dict[int, tuple[str, str]] = {
+    # 真·访问违例：进程自己崩了。
+    3221225477: ("STATUS_ACCESS_VIOLATION", "访问违例（真崩了）"),
+    # 进程根本没起来：通常是 DLL 初始化拿不到可提交的内存/桌面堆。
+    3221225794: ("STATUS_DLL_INIT_FAILED", "进程起不来（典型：无内存可提交）"),
+    # WinError 1455 / 0xC000012D 是同一件事的两个面：提交额度（内存+页面文件）被打满。
+    3221225773: ("STATUS_COMMITMENT_LIMIT", "提交额度/页面文件不足"),
+}
+
+#: 从 ``subprocess.CalledProcessError`` 的文本里抠十进制退出码。
+#: 典型句式：``Command '[...]' returned non-zero exit status 3221225794.``
+_EXIT_STATUS_DECIMAL_RE = re.compile(r"exit\s+status\s+(-?\d+)", re.IGNORECASE)
+#: 兜底：日志里直接写十六进制的句式（``0xC0000142``）。
+_EXIT_STATUS_HEX_RE = re.compile(r"0x([0-9a-fA-F]{1,16})\b")
+
 __all__ = [
     "adb_candidates",
     "resolve_adb_path",
     "resolve_adb_path_cached",
     "adb_inventory",
     "ensure_single_server",
+    "describe_exit_code",
+    "extract_exit_code",
 ]
+
+
+# --------------------------------------------------------------------------
+# 退出码翻译（真源：不许再有人肉换算）
+# --------------------------------------------------------------------------
+
+def describe_exit_code(code: object) -> str:
+    """把子进程退出码（含 Windows NTSTATUS）翻译成人话。
+
+    存在理由：2026-10-26 之前靠人肉换算，把 ``3221225773`` 错写成
+    ``0xC0000005 访问违例``，实际它是 ``0xC000012D STATUS_COMMITMENT_LIMIT``
+    ——与台账里那条 ``WinError 1455`` 是同一件事的两个面。错一次就足以把
+    整轮排查从"内存耗尽"带向"adb 崩溃"，所以换算必须留在代码里。
+
+    Args:
+        code: 退出码。接受 int / 可 int() 的字符串 / None / 任意对象。
+            负数按 32 位无符号补码归一化后再查表
+            （``-1073741819`` 与 ``3221225477`` 是同一个 0xC0000005）。
+
+    Returns:
+        str: 统一格式 ``退出码 <十进制> (0x<8 位十六进制> <名称>)：<人话>``。
+        未收录的码返回中性串 ``退出码 <十进制> (0x<十六进制>)``，
+        **不猜、不套到已知码上**；``0`` 单独说明为正常退出；
+        拿不到整数的一律返回 ``退出码不可用：<repr>``，**绝不抛异常**
+        （本函数本身要在异常处理路径里被调用）。
+    """
+    try:
+        value = int(code)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return f"退出码不可用：{code!r}"
+    if value == 0:
+        return "退出码 0 (0x00000000)：子进程正常退出"
+    unsigned = value & 0xFFFFFFFF
+    entry = EXIT_CODE_TABLE.get(unsigned)
+    if entry is None:
+        return f"退出码 {unsigned} (0x{unsigned:08X})"
+    name, plain = entry
+    signed_note = f"（有符号 {value}）" if value != unsigned else ""
+    return f"退出码 {unsigned}{signed_note} (0x{unsigned:08X} {name}）：{plain}"
+
+
+def extract_exit_code(text: object) -> int | None:
+    """从异常/日志文本里抠出退出码，抠不到返回 ``None``。
+
+    Args:
+        text: 任意对象；非字符串先 ``str()``。为 ``None`` 时按空串处理。
+
+    Returns:
+        int | None: 抠到的退出码（十进制 int）；
+        文本里没有 ``exit status <n>`` 也没有 ``0x<hex>`` 时返回 ``None``。
+    """
+    raw = "" if text is None else str(text)
+    match = _EXIT_STATUS_DECIMAL_RE.search(raw)
+    if match is not None:
+        try:
+            return int(match.group(1))
+        except ValueError:            # pragma: no cover - 正则已保证是数字
+            return None
+    match = _EXIT_STATUS_HEX_RE.search(raw)
+    if match is not None:
+        try:
+            return int(match.group(1), 16)
+        except ValueError:            # pragma: no cover - 超长溢出
+            return None
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -335,9 +458,12 @@ def adb_inventory() -> dict:
     if not servers:
         notes.append("未发现 adb.exe 进程（psutil/tasklist 均不可用，或当前确实没有 server 在跑）。")
     elif len(servers) > 1:
+        # 措辞须精确：多 server 会让"用哪个 adb"产生分歧，需收敛到统一入口；
+        # **不等于**"抢端口"——后者是早期推测，2026-10-26 已被推翻
+        # （本机常态只有 1 个 adb.exe；两路径 adb 字节完全相同）。详见模块头注释。
         notes.append(
-            f"发现 {len(servers)} 个 adb.exe 进程（PID={servers}）：这正是'两套 adb 抢服务'的典型特征，"
-            "需用 resolve_adb_path() 统一入口收敛到同一个 adb。"
+            f"发现 {len(servers)} 个 adb.exe 进程（PID={servers}）：adb 入口出现分歧，"
+            "需用 resolve_adb_path() 收敛到同一个 adb（注意这不是'抢端口'，见模块头注释）。"
         )
 
     devices: list[str] = []

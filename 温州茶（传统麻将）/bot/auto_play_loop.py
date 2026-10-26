@@ -817,13 +817,19 @@ class AutoPlayLoop:
         # 「门禁不放行时不留空会话目录」，冷启动自检失败就该什么都不建。
         if self._dirs_ready or self.ledger_path.exists():
             try:
-                self._write_event({
+                payload = {
                     "ts": datetime.now().astimezone().isoformat(),
                     "event": "gate_blocked", "reason": reason,
                     "serial": self.serial, "adb": self.adb_path,
                     **{key: report.get(key) for key in
                        ("adb_exists", "adb_inventory", "adb_inventory_error")},
-                })
+                }
+                # 前台读取失败的原始异常也进台账：异常文本里通常带着退出码，
+                # 是事后给故障定性的关键一行。只在它存在时才加键，
+                # 避免给其它门禁分支塞进无意义的 None。
+                if report.get("foreground_error") is not None:
+                    payload["foreground_error"] = report["foreground_error"]
+                self._write_event(payload)
             except Exception:               # noqa: BLE001 - 落盘失败不许盖掉门禁原因
                 pass
         return GateBlocked(message)
@@ -847,7 +853,20 @@ class AutoPlayLoop:
                 report,
                 f"靶机不在线：serial={self.serial!r} 不在 adb devices "
                 f"{inventory['devices']} 内；不重试、不自愈")
-        package = self._foreground()
+        # 前台包读取失败**必须**走 _gate_blocked：2026-10-26 取证发现这条
+        # 裸调用（旧代码：``package = self._foreground()`` 无 try/except）
+        # 会在 dumpsys 超时/崩溃时把异常直接冒出去，绕过门禁落盘分支，
+        # 前面已经采到的 adb_inventory 现场一行都不留——证据黑洞就是这里。
+        # 现在的口径：fail closed 不变，但**先把现场留住再抛**。
+        try:
+            package = self._foreground()
+        except Exception as exc:  # noqa: BLE001 - 确认不了前台就不许点，但要留证
+            detail = self._foreground_error_detail(exc)
+            report["foreground_error"] = detail
+            raise self._gate_blocked(
+                report,
+                f"无法确认前台应用: {detail['type']}: {detail['message']}"
+                f"｜退出码诊断: {detail['diagnosis']}") from exc
         report["foreground"] = package
         if package != EXPECTED_PACKAGE:
             raise self._gate_blocked(
@@ -855,6 +874,35 @@ class AutoPlayLoop:
         report["card_count"] = self._read_card_count(None)
         self._last_gate_report = dict(report)
         return report
+
+    @staticmethod
+    def _foreground_error_detail(exc: BaseException) -> dict:
+        """把"前台包读不到"的异常拆成可落台账的结构 + 退出码人话诊断。
+
+        Args:
+            exc: ``self._foreground()`` 抛出的任意异常。
+
+        Returns:
+            dict: ``{"type": 异常类名, "message": str(exc),
+            "exit_code": int | None, "diagnosis": str}``。
+            退出码抠不出来时 ``exit_code`` 为 ``None``、``diagnosis`` 为
+            ``"未取到退出码"``——**绝不猜**（WinError 1455 这类文本里就没有退出码）。
+            翻译一律走 ``adb_runtime.describe_exit_code`` 这个唯一真源；
+            adb_runtime 导入失败时退化成 ``"未取到退出码（adb_runtime 不可用）"``。
+        """
+        message = str(exc)
+        exit_code: int | None = None
+        diagnosis = "未取到退出码"
+        try:
+            from adb_runtime import describe_exit_code, extract_exit_code
+
+            exit_code = extract_exit_code(message)
+            if exit_code is not None:
+                diagnosis = describe_exit_code(exit_code)
+        except Exception as import_exc:  # noqa: BLE001 - 诊断失败不许盖掉门禁原因
+            diagnosis = f"未取到退出码（adb_runtime 不可用: {type(import_exc).__name__}）"
+        return {"type": type(exc).__name__, "message": message,
+                "exit_code": exit_code, "diagnosis": diagnosis}
 
     def _adb_inventory_evidence(self) -> dict:
         """把只读现场按台账口径摊平：devices/servers/version/chosen + 错误。"""

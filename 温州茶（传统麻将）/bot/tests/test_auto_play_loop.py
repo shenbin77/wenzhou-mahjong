@@ -2680,6 +2680,125 @@ def test_cold_start_gate_failure_never_creates_a_session_dir(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# check_gates() 前台读取失败必须留证（2026-10-26 取证报告登记的第 1 号证据黑洞）
+#
+# 旧代码 check_gates() 里是裸调用 ``package = self._foreground()``：
+# dumpsys 超时/崩溃抛出的异常会**绕过 _gate_blocked()**，于是前面刚采到的
+# adb_inventory 现场一行都落不了盘，异常最后只变成 Tk 上一句状态字符串，
+# 窗口一关证据归零。以下三条用例把修复后的口径钉死：
+#   ① fail closed（绝不停在"读取失败但继续跑"）
+#   ② 消息里带【翻译过的】退出码
+#   ③ 现场真的写进台账（读盘断言，不是只看有没有调用）
+# ---------------------------------------------------------------------------
+def _broken_foreground(text: str):
+    """返回一个抛指定文本 RuntimeError 的假 _foreground()。"""
+    def boom():
+        raise RuntimeError(text)
+
+    return boom
+
+
+def test_check_gates_foreground_crash_persists_the_scene_and_translates_code(tmp_path):
+    """带 3221225794 的崩溃：Fail closed + 现场落盘 + 退出码翻译进消息。"""
+    loop, *_ = make_loop(tmp_path, enabled=False)
+    loop._adb_inventory = lambda: {
+        "chosen": "D:/leidian/LDPlayer14/adb.exe", "version": "1.0.41",
+        "servers": ["18368"], "devices": ["emulator-test"],
+        "found": [], "notes": []}
+    # 房卡读数是前台之后的下一道门禁：被调到就说明没有 fail closed。
+    card_calls = {"n": 0}
+
+    def counting_card_reader(_image):
+        card_calls["n"] += 1
+        return 3
+
+    loop._card_reader = counting_card_reader
+    loop._foreground = _broken_foreground(
+        "ADB 调用失败: Command '['C:\\leidian\\LDPlayer14\\adb.exe', '-s', "
+        "'emulator-5556', 'shell', 'dumpsys', 'window', 'windows']' "
+        "returned non-zero exit status 3221225794.")
+    loop._ensure_dirs()                 # 会话目录已存在 → 这一条必须真落盘
+
+    with pytest.raises(GateBlocked) as excinfo:
+        loop.check_gates()
+
+    # ① 不许继续往下跑
+    assert card_calls["n"] == 0
+    assert "foreground" not in loop._last_gate_report
+    # ② 异常原文 + 翻译后的退出码都要在消息里（stdout 也看得见）
+    message = str(excinfo.value)
+    assert "无法确认前台应用" in message
+    assert "RuntimeError" in message
+    assert "0xC0000142 STATUS_DLL_INIT_FAILED" in message
+    assert "进程起不来" in message
+    # ③ 现场真的写进了台账
+    rows = [row for row in read_ledger(loop) if row.get("event") == "gate_blocked"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["adb_inventory"]["servers"] == ["18368"]
+    assert row["adb_inventory"]["devices"] == ["emulator-test"]
+    assert row["adb_inventory"]["chosen"] == "D:/leidian/LDPlayer14/adb.exe"
+    assert row["foreground_error"]["type"] == "RuntimeError"
+    assert "3221225794" in row["foreground_error"]["message"]
+    assert row["foreground_error"]["exit_code"] == 3221225794
+    assert "STATUS_DLL_INIT_FAILED" in row["foreground_error"]["diagnosis"]
+
+
+def test_check_gates_foreground_failure_without_exit_code_says_unretrieved(tmp_path):
+    """WinError 1455 这条台账原文里没有退出码 → 必须写"未取到退出码"，不许猜。"""
+    loop, *_ = make_loop(tmp_path, enabled=False)
+    loop._adb_inventory = lambda: {
+        "chosen": "adb", "version": "1.0.41", "servers": ["18368"],
+        "devices": ["emulator-test"], "found": [], "notes": []}
+    loop._foreground = _broken_foreground(
+        "ADB 调用失败: [WinError 1455] 页面文件太小，无法完成操作。")
+    loop._ensure_dirs()
+
+    with pytest.raises(GateBlocked) as excinfo:
+        loop.check_gates()
+
+    message = str(excinfo.value)
+    assert "未取到退出码" in message
+    assert "WinError 1455" in message
+    for known in ("STATUS_ACCESS_VIOLATION", "STATUS_DLL_INIT_FAILED",
+                  "STATUS_COMMITMENT_LIMIT"):
+        assert known not in message, "抠不到退出码时不许套任何已知码"
+
+    rows = [row for row in read_ledger(loop) if row.get("event") == "gate_blocked"]
+    assert len(rows) == 1
+    assert rows[0]["foreground_error"]["exit_code"] is None
+    assert rows[0]["foreground_error"]["diagnosis"] == "未取到退出码"
+    assert rows[0]["adb_inventory"]["servers"] == ["18368"]
+
+
+def test_cold_start_foreground_failure_keeps_report_but_creates_no_dir(tmp_path):
+    """冷启动路径：report 里留住异常，但 818 行的"不建目录"不变量不许被打破。
+
+    这条同时是任务 C 的回归护栏——改 try/except 时最容易顺手把那段条件也改掉。
+    """
+    loop, *_ = make_loop(tmp_path, enabled=False)
+
+    def timeout_boom():
+        raise TimeoutError("Command '[...]' timed out after 15 seconds")
+
+    loop._foreground = timeout_boom
+
+    with pytest.raises(GateBlocked) as excinfo:
+        loop.check_gates()
+
+    report = loop._last_gate_report
+    assert report["foreground_error"]["type"] == "TimeoutError"
+    assert "timed out after 15 seconds" in report["foreground_error"]["message"]
+    assert report["foreground_error"]["diagnosis"] == "未取到退出码"
+    # 已经采到的现场仍在 report 里，且照样挂在异常消息上
+    assert report["adb_inventory"]["servers"] == ["18368"]
+    assert "adb 现场: servers=['18368']" in str(excinfo.value)
+    # 冷启动不变量完好
+    assert not loop.session_dir.exists()
+    assert not loop.ledger_path.exists()
+
+
+# ---------------------------------------------------------------------------
 # 内存看门狗（2026-10-26）：观测优先，未标定绝不停手
 #
 # limit_mb 的 1500 是未标定的初值。WZMJ_RSS_LIMIT_MB 没设 → 只记遥测；

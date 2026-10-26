@@ -62,6 +62,26 @@ DEFAULT_SIZE = (1180, 860)
 SIZE_RANGE = {"w": (900, 1600), "h": (760, 1200)}
 FLOATING_BAR_SIZE = (132, 36)
 FLOATING_BAR_MARGIN = 8
+#: Size of the floating bar's explicit quit control (a small "×" top-right).
+#: It intentionally stays smaller than :data:`FLOATING_BAR_SIZE` so it never
+#: covers the status text or the "click anywhere to restore" area.
+FLOATING_BAR_CLOSE_SIZE = (12, 12)
+#: Outcome identifiers of :meth:`TeaAssistWindow.window_close_action`.
+#: The main window's close box (X) is bound to the *collapse* action only;
+#: quitting is an explicit, separately reachable action.
+CLOSE_ACTION_COLLAPSE = "collapse"
+CLOSE_ACTION_QUIT = "quit"
+#: Action ids of the floating bar's right-click menu.
+FLOATING_BAR_MENU_RESTORE = "restore"
+FLOATING_BAR_MENU_QUIT = "quit"
+#: Floating-bar context menu entries as ``(label, action id)``, in display
+#: order.  Data-driven so the menu can be verified without a Tk instance.
+FLOATING_BAR_MENU_ITEMS: tuple[tuple[str, str], ...] = (
+    ("恢复窗口", FLOATING_BAR_MENU_RESTORE),
+    ("退出程序", FLOATING_BAR_MENU_QUIT),
+)
+#: Label of the explicit quit entry appended to the main window's 更多 menu.
+QUIT_MENU_LABEL = "退出程序"
 _WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^\s*(?P<width>\d+)x(?P<height>\d+)"
     r"(?P<x>[+-]\d+)(?P<y>[+-]\d+)\s*$")
@@ -530,6 +550,12 @@ class TeaAssistWindow:
         self._last_stop_reason = ""
         self.display_source: str | None = None
         self._floating_bar: tk.Toplevel | None = None
+        #: Lazy right-click menu of the floating bar (created on first use).
+        self._floating_menu: tk.Menu | None = None
+        #: The small "×" quit control inside the floating bar, when built.
+        self._floating_close_label: tk.Label | None = None
+        #: Guards :meth:`quit_app` against a second teardown pass.
+        self._quitting = False
         self._collapsed_geometry = format_window_geometry(width, height, x, y)
         self._collapsed_topmost = bool(state.get("topmost", True))
         self._floating_status = tk.StringVar(value="茶2 · 待命")
@@ -540,7 +566,43 @@ class TeaAssistWindow:
         self._apply_preview_layout(False)
         self.recorder_timer = root.after(500, self._poll_recorder)
         self.ticker = root.after(200, self._tick)
-        root.protocol("WM_DELETE_WINDOW", self.close)
+        # Closing the main window hides it into the right-bottom floating bar
+        # instead of exiting: following/logging/auto-play keep running there.
+        self._bind_window_close_protocol()
+
+    # -- window close semantics -------------------------------------------
+    def _bind_window_close_protocol(self) -> None:
+        """Bind the window-manager close box (X) to the collapse action.
+
+        Split out of ``__init__`` so an offline test double can verify the
+        binding target without creating a Tk root.
+        """
+        self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
+
+    def window_close_action(self) -> str:
+        """Return the action the main window's close box triggers.
+
+        Returns:
+            str: always :data:`CLOSE_ACTION_COLLAPSE`.  Quitting is a separate
+            explicit action (:meth:`quit_app`) and is never reachable by
+            accidentally hitting the close box.
+        """
+        return CLOSE_ACTION_COLLAPSE
+
+    def on_window_close(self) -> str:
+        """Handle the main window's close box: collapse, never quit.
+
+        The process keeps running -- the continuous-observation thread, the
+        log tailers, the full-auto thread and the 200 ms ``_tick`` cadence are
+        untouched, and the serial lease held by ``__main__`` stays valid
+        because this window is only withdrawn.
+
+        Returns:
+            str: :data:`CLOSE_ACTION_COLLAPSE`, so callers/tests can assert the
+            close box never maps to :data:`CLOSE_ACTION_QUIT`.
+        """
+        self.collapse_to_floating_bar()
+        return CLOSE_ACTION_COLLAPSE
 
     # -- layout ----------------------------------------------------------
     def _build(self) -> None:
@@ -768,8 +830,20 @@ class TeaAssistWindow:
         self.menu.add_command(label="历史会话日志", command=self.open_follow_session_log)
         self.menu.add_separator()
         self.menu.add_command(label="下一局", command=self.next_round)
+        # Explicit quit: the main window's X only collapses to the floating
+        # bar, so a never-collapsed window still needs a visible exit here.
+        self._append_quit_menu_entry(self.menu)
 
         self._mount_embedded_follow_log()
+
+    def _append_quit_menu_entry(self, menu) -> None:
+        """Append the explicit "退出程序" row to ``menu``.
+
+        Split out so the wiring (label -> :meth:`quit_app`) can be verified
+        offline against a recording menu double instead of a real Tk menu.
+        """
+        menu.add_separator()
+        menu.add_command(label=QUIT_MENU_LABEL, command=self.quit_app)
 
     def _follow_log_search_roots(self) -> list:
         tea_root = TEA_ROOT
@@ -2197,6 +2271,9 @@ class TeaAssistWindow:
         """Destroy this serial window's floating bar if it exists."""
         bar = getattr(self, "_floating_bar", None)
         self._floating_bar = None
+        # The "×" control dies with its parent; drop the stale reference so a
+        # later collapse rebuilds it instead of resurrecting a dead widget.
+        self._floating_close_label = None
         if bar is None:
             return
         try:
@@ -2204,6 +2281,101 @@ class TeaAssistWindow:
                 bar.destroy()
         except tk.TclError:
             pass
+
+    def _floating_menu_command(self, action: str):
+        """Return the callable bound to a floating-bar menu ``action``."""
+        if action == FLOATING_BAR_MENU_QUIT:
+            return self.quit_app
+        return self.restore_from_floating_bar
+
+    def _ensure_floating_menu(self) -> tk.Menu | None:
+        """Create (once) the floating bar's right-click menu.
+
+        Returns:
+            tk.Menu | None: the reusable menu, or ``None`` when Tk refused it
+            (e.g. the root is already being torn down).
+        """
+        menu = getattr(self, "_floating_menu", None)
+        if menu is not None:
+            try:
+                if menu.winfo_exists():
+                    return menu
+            except tk.TclError:
+                self._floating_menu = None
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            for label, action in FLOATING_BAR_MENU_ITEMS:
+                menu.add_command(label=label,
+                                 command=self._floating_menu_command(action))
+        except tk.TclError:
+            self._floating_menu = None
+            return None
+        self._floating_menu = menu
+        return menu
+
+    def _popup_floating_menu(self, event=None) -> str:
+        """Show the floating bar's menu (right click).  Consumes the click."""
+        menu = self._ensure_floating_menu()
+        if menu is None:
+            return "break"
+        try:
+            x = getattr(event, "x_root", None) if event is not None else None
+            y = getattr(event, "y_root", None) if event is not None else None
+            if x is None or y is None:
+                x = self.root.winfo_pointerx()
+                y = self.root.winfo_pointery()
+            menu.tk_popup(int(x), int(y))
+        except tk.TclError:
+            self._floating_menu = None
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+        return "break"
+
+    def _build_floating_close_control(self, bar) -> tk.Label | None:
+        """Add the tiny "×" quit control to the top-right of ``bar``.
+
+        It is a separate child widget using ``place`` (independent of the
+        packed status label) and it binds ``<Button-1>`` at *widget* level,
+        which Tk dispatches before the toplevel binding that restores the
+        window; :meth:`_on_floating_close_click` returns ``"break"`` to stop
+        that later tag, so a click on "×" can never restore the window.
+
+        Returns:
+            tk.Label | None: the control, or ``None`` when Tk refused it.
+        """
+        width, height = FLOATING_BAR_CLOSE_SIZE
+        try:
+            close = tk.Label(
+                bar, text="×", background="#263238", foreground="#90a4ae",
+                cursor="hand2", font=("Microsoft YaHei UI", 8, "bold"),
+                width=1, height=1, borderwidth=0, highlightthickness=0)
+            close.place(relx=1.0, x=-1, y=0, anchor="ne",
+                        width=width, height=height)
+            # Widget-level binding runs first and "break" short-circuits the
+            # toplevel (bar) <Button-1> restore binding.
+            close.bind("<Button-1>", self._on_floating_close_click)
+            close.bind("<Enter>",
+                       lambda _e: close.configure(foreground="#ff8a80"))
+            close.bind("<Leave>",
+                       lambda _e: close.configure(foreground="#90a4ae"))
+            close.bind("<Button-3>", self._popup_floating_menu)
+        except tk.TclError:
+            return None
+        self._floating_close_label = close
+        return close
+
+    def _on_floating_close_click(self, _event=None) -> str:
+        """Really quit from the floating bar's "×" control.
+
+        Returns:
+            str: ``"break"``, so Tk stops after the widget-level binding and
+            the bar's "click to restore" binding never fires.
+        """
+        self.quit_app()
+        return "break"
 
     def _show_floating_bar(self) -> None:
         """Create one borderless, topmost floating bar for this window."""
@@ -2234,7 +2406,13 @@ class TeaAssistWindow:
         label.pack(fill="both", expand=True)
         for widget in (bar, label):
             widget.bind("<Button-1>", self.restore_from_floating_bar)
+            # Right click anywhere on the bar opens the explicit menu.
+            widget.bind("<Button-3>", self._popup_floating_menu)
+        # An (invisible) window-manager close on the bar still means "restore";
+        # the real quit entry points are the "×" control and the context menu.
         bar.protocol("WM_DELETE_WINDOW", self.restore_from_floating_bar)
+        # Built last so it sits on top of the packed status label.
+        self._build_floating_close_control(bar)
         self._refresh_floating_status()
         bar.lift()
 
@@ -4025,6 +4203,24 @@ class TeaAssistWindow:
         save_window_state(state, self._geometry_file())
 
     def close(self) -> None:
+        """Deprecated alias of :meth:`quit_app` (kept for explicit shutdown).
+
+        The main window's close box (X) does **not** call this; it collapses
+        to the floating bar instead (see :meth:`on_window_close`).
+        """
+        self.quit_app()
+
+    def quit_app(self) -> None:
+        """Really exit the assistant: stop work, flush logs, destroy the root.
+
+        Reached only through explicit entry points: the floating bar's "×"
+        control, the floating bar's context menu and the main window's
+        更多 menu.  Everything below is the former ``close()`` body, kept
+        verbatim so quitting still tears the process down cleanly.
+        """
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
         self._destroy_floating_bar()
         if getattr(self, "_adb_diagnostic_timer", None) is not None:
             try:

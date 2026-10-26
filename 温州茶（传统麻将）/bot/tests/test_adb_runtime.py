@@ -412,3 +412,89 @@ def test_run_cmd_swallows_exceptions(monkeypatch, exc):
     proc = adb_runtime._run_cmd(["adb", "version"])
     assert proc.returncode == adb_runtime.EXCEPTION_RETURNCODE
     assert proc.returncode != 0
+
+
+# --------------------------------------------------------------------------
+# describe_exit_code —— 退出码翻译真源（2026-10-26）
+#
+# 起因：adb_runtime 旧注释把 3221225773 写成了 "0xC0000005 访问违例"，
+# 实为 0xC000012D STATUS_COMMITMENT_LIMIT（提交额度不足，与 WinError 1455
+# 同源）。人肉换算错一次就把整轮排查从"内存耗尽"带向"adb 崩溃"，
+# 所以三个已实测见过的码必须用**逐字相等**钉死在测试里。
+# --------------------------------------------------------------------------
+
+#: (退出码, 十六进制串, NTSTATUS 名, 人话片段)
+MEASURED_EXIT_CODES = [
+    (3221225477, "0xC0000005", "STATUS_ACCESS_VIOLATION", "访问违例（真崩了）"),
+    (3221225794, "0xC0000142", "STATUS_DLL_INIT_FAILED",
+     "进程起不来（典型：无内存可提交）"),
+    (3221225773, "0xC000012D", "STATUS_COMMITMENT_LIMIT", "提交额度/页面文件不足"),
+]
+
+
+@pytest.mark.parametrize("code,hex_text,name,plain", MEASURED_EXIT_CODES)
+def test_describe_exit_code_is_exact_for_measured_codes(code, hex_text, name, plain):
+    """逐字相等：改掉表里任意一个字符本用例都会变红（供变异验证）。"""
+    assert adb_runtime.describe_exit_code(code) == (
+        f"退出码 {code} ({hex_text} {name}）：{plain}")
+
+
+def test_exit_code_table_covers_exactly_the_three_measured_codes():
+    """表里不许多收（不猜），也不许漏收，且三个名字/人话互不重复。"""
+    assert set(adb_runtime.EXIT_CODE_TABLE) == {3221225477, 3221225794, 3221225773}
+    names = [entry[0] for entry in adb_runtime.EXIT_CODE_TABLE.values()]
+    plains = [entry[1] for entry in adb_runtime.EXIT_CODE_TABLE.values()]
+    assert len(names) == len(set(names))
+    assert len(plains) == len(set(plains))
+
+
+@pytest.mark.parametrize("code", [
+    1, 2, 255, 3221225476, 3221225478, 3221225793, 3221225795, 4294967295,
+])
+def test_describe_exit_code_never_guesses_an_unknown_code(code):
+    """未收录的码只给中性串：不许套到任何已知码的名字/人话上。"""
+    got = adb_runtime.describe_exit_code(code)
+    assert got == f"退出码 {code} (0x{code:08X})"
+    for name, plain in adb_runtime.EXIT_CODE_TABLE.values():
+        assert name not in got
+        assert plain not in got
+
+
+def test_describe_exit_code_handles_zero_signed_and_garbage():
+    """0 是正常退出；负数按补码归一；拿不到整数时不抛异常。"""
+    assert adb_runtime.describe_exit_code(0) == "退出码 0 (0x00000000)：子进程正常退出"
+    # -1073741819 与 3221225477 是同一个 0xC0000005 的有符号/无符号写法。
+    assert "STATUS_ACCESS_VIOLATION" in adb_runtime.describe_exit_code(-1073741819)
+    # 本模块自己的哨兵（EXCEPTION_RETURNCODE = -1）必须安全退化。
+    assert adb_runtime.describe_exit_code(adb_runtime.EXCEPTION_RETURNCODE) == (
+        "退出码 4294967295 (0xFFFFFFFF)")
+    # 垃圾输入一律返回 str，绝不抛。
+    for junk in (None, "abc", "", object(), 1.5):
+        got = adb_runtime.describe_exit_code(junk)
+        assert isinstance(got, str)
+    assert adb_runtime.describe_exit_code(None).startswith("退出码不可用")
+    assert adb_runtime.describe_exit_code("abc").startswith("退出码不可用")
+
+
+def test_extract_exit_code_reads_the_subprocess_message():
+    """台账原文那条：exit status 3221225794 → 抠出来 → 翻译成人话。"""
+    text = (
+        "ADB 调用失败: Command '['C:\\leidian\\LDPlayer14\\adb.exe', '-s', "
+        "'emulator-5556', 'shell', 'dumpsys', 'window', 'windows']' "
+        "returned non-zero exit status 3221225794.")
+    code = adb_runtime.extract_exit_code(text)
+    assert code == 3221225794
+    assert "0xC0000142 STATUS_DLL_INIT_FAILED" in adb_runtime.describe_exit_code(code)
+
+
+def test_extract_exit_code_returns_none_when_there_is_no_code():
+    """抠不到就是抠不到：WinError 1455 那条台账原文里本来就没有退出码。"""
+    assert adb_runtime.extract_exit_code(
+        "ADB 调用失败: [WinError 1455] 页面文件太小，无法完成操作。") is None
+    assert adb_runtime.extract_exit_code("") is None
+    assert adb_runtime.extract_exit_code(None) is None
+
+
+def test_extract_exit_code_falls_back_to_the_hex_form():
+    """日志里直接写 0x 形式时也要认得。"""
+    assert adb_runtime.extract_exit_code("adb 炸了 0xC0000142 收尾") == 3221225794
