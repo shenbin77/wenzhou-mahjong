@@ -52,6 +52,22 @@ def consume_command(serial: str, root: Path | None = None) -> Optional[str]:
     return text if text in COMMANDS else None
 
 
+def revoke_pending_command(serial: str, root: Path | None = None) -> bool:
+    """Remove stale click authority before crash-recovering a UI window.
+
+    Missing is success.  Any deletion failure is fail-closed so a newly opened
+    assistant cannot consume an old ``resume`` command.
+    """
+    path = control_path(serial, root)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 2:

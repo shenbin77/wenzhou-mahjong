@@ -4454,6 +4454,9 @@ class TeaAssistWindow:
         if request is None:
             return True
         try:
+            if request.command == "ping":
+                acknowledge_control(request, ok=True, detail="ready")
+                return True
             if request.command == "restore":
                 self.restore_from_floating_orb()
                 acknowledge_control(request, ok=True, detail="restored")

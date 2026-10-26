@@ -43,6 +43,16 @@ def test_structured_restore_requires_matching_ack(tmp_path):
     assert not ticket.ack_path.exists()
 
 
+def test_ping_is_acknowledgement_only_lifecycle_command(tmp_path):
+    ticket = request_control("emulator-5556", "ping", tmp_path)
+    consumed = consume_control("emulator-5556", tmp_path)
+    assert consumed == ticket
+    assert consumed.command == "ping"
+    acknowledge_control(consumed, ok=True, detail="ready")
+    ack = wait_for_ack(ticket, timeout=0.1)
+    assert ack is not None and ack.ok is True and ack.detail == "ready"
+
+
 def test_quit_is_a_lifecycle_command_not_a_restore(tmp_path):
     ticket = request_control("emulator-5554", "quit", tmp_path)
     consumed = consume_control("emulator-5554", tmp_path)

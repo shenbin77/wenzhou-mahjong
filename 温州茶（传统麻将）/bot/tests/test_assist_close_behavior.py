@@ -262,6 +262,23 @@ def test_structured_restore_acknowledges_after_window_is_restored(monkeypatch):
     assert events[1][0:3] == ("ack", request, True)
 
 
+def test_structured_ping_acknowledges_without_restoring_window(monkeypatch):
+    window = _bare_window()
+    window.serial = _Value("emulator-5556")
+    request = SimpleNamespace(command="ping")
+    events = []
+    monkeypatch.setattr(
+        assist_module, "consume_control", lambda serial: request)
+    monkeypatch.setattr(
+        assist_module, "acknowledge_control",
+        lambda received, *, ok, detail="": events.append(
+            (received, ok, detail)))
+    window.restore_from_floating_orb = lambda: events.append("unexpected")
+
+    assert window._process_window_control() is True
+    assert events == [(request, True, "ready")]
+
+
 def test_structured_quit_acknowledges_acceptance_before_teardown(monkeypatch):
     window = _bare_window()
     window.serial = _Value("emulator-5556")

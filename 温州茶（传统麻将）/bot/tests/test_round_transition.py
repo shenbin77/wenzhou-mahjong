@@ -333,6 +333,19 @@ def test_full_auto_control_roundtrip(tmp_path):
         fac.write_command("emulator-5556", "click", root=tmp_path)
 
 
+def test_crash_recovery_revokes_stale_full_auto_command(tmp_path, monkeypatch):
+    path = fac.write_command("emulator-5556", "resume", root=tmp_path)
+    assert path.is_file()
+    assert fac.revoke_pending_command("emulator-5556", root=tmp_path) is True
+    assert not path.exists()
+    assert fac.revoke_pending_command("emulator-5556", root=tmp_path) is True
+
+    fac.write_command("emulator-5556", "resume", root=tmp_path)
+    monkeypatch.setattr(type(path), "unlink",
+                        lambda _self: (_ for _ in ()).throw(OSError("busy")))
+    assert fac.revoke_pending_command("emulator-5556", root=tmp_path) is False
+
+
 def test_assist_resume_after_round(monkeypatch):
     import assist_window as aw
 

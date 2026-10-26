@@ -25,7 +25,7 @@ from instance_profile import safe_serial
 
 CONTROL_DIR = Path(__file__).resolve().parents[2] / "_control"
 CONTROL_VERSION = 1
-CONTROL_COMMANDS = frozenset({"restore", "quit"})
+CONTROL_COMMANDS = frozenset({"restore", "quit", "ping"})
 CONTROL_REQUEST_TTL_S = 15.0
 _REQUEST_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
