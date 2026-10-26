@@ -178,12 +178,12 @@ class ExportSamplesTests(unittest.TestCase):
     def test_manifest_out_of_bounds_and_path_escape_are_rejected(self):
         self.exported()
         manifest_path = self.dataset / "manifest.json"
-        original = json.loads(manifest_path.read_text())
+        original = json.loads(manifest_path.read_text(encoding="utf-8"))
         labels = self.labels({"tile_000": "w1"})
         for field, value in (("bbox_xyxy", [0, 0, 99, 99]), ("file", "../原截图.png")):
             changed = json.loads(json.dumps(original))
             changed["tiles"][0][field] = value
-            manifest_path.write_text(json.dumps(changed))
+            manifest_path.write_text(json.dumps(changed), encoding="utf-8")
             with self.subTest(field=field), self.assertRaises(ValueError):
                 import_reviewed_labels(self.dataset, labels, self.base / "bad_output")
             self.assertFalse((self.base / "bad_output").exists())
