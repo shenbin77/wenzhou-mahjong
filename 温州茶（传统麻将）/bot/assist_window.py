@@ -26,7 +26,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from tkinter import filedialog, simpledialog, ttk
 
 from PIL import Image, ImageTk
@@ -503,9 +503,11 @@ class TeaAssistWindow:
         self._auto_future: Future | None = None
         self._auto_poll_timer: str | None = None
         self._auto_start_pending = False
+        self._auto_start_cancel_pending = False
         self._auto_start_event: Event | None = None
         self._round_transition_future: Future | None = None
         self._round_transition_future_mode: str | None = None
+        self._round_transition_cancel_event: Event | None = None
         # ``start()`` may recover a process restart from a verified between-
         # round summary.  Keep its authority separate from full auto: a
         # follow-only click may continue observing, but must never acquire
@@ -521,6 +523,9 @@ class TeaAssistWindow:
         self._suppress_review = False
         self._review_thread: Thread | None = None
         self._review_target: Path | None = None
+        self._review_queue: Queue = Queue()
+        self._review_targets: set[Path] = set()
+        self._review_lock = Lock()
         self._review_events: Queue = Queue()
         self._review_poll_timer: str | None = None
         self._binding: dict | None = None
@@ -2876,6 +2881,7 @@ class TeaAssistWindow:
             return
         executor = self._ensure_round_transition_executor()
         round_no = int(getattr(self, "round_no", 0) or 0) or None
+        cancel_event = Event()
         self._round_transition_resume_mode = "full_auto"
         self._transition_follow_pending = False
         # The autoplay worker has just stopped at a verified settlement.  Keep
@@ -2884,8 +2890,9 @@ class TeaAssistWindow:
         self._auto_resume_pending = True
         self.full_auto_status.set("本局结束：正在核验局间页「下一局」按钮（单次点击）。")
         self._round_transition_future = self.auto_executor.submit(
-            executor.attempt, round_no=round_no)
+            executor.attempt, round_no=round_no, cancel_event=cancel_event)
         self._round_transition_future_mode = "full_auto"
+        self._round_transition_cancel_event = cancel_event
         self.root.after(200, self._poll_round_transition)
 
     def _ensure_round_transition_executor(self):
@@ -2906,7 +2913,7 @@ class TeaAssistWindow:
         return executor
 
     @staticmethod
-    def _recover_startup_round_transition(executor):
+    def _recover_startup_round_transition(executor, cancel_event=None):
         """Read once, then either use the existing guarded executor or abstain.
 
         This runs only after an explicit follow/full-auto/resume request.  The
@@ -2918,6 +2925,10 @@ class TeaAssistWindow:
         from match_end import read_match_end
         from round_transition import TransitionResult
 
+        if cancel_event is not None and cancel_event.is_set():
+            return TransitionResult(
+                "cancelled", "重启续局授权已撤销；预检前零点击")
+
         try:
             frame = executor._capture()
             match_end = read_match_end(frame)
@@ -2925,6 +2936,9 @@ class TeaAssistWindow:
             return TransitionResult(
                 "startup_blocked",
                 f"重启续局预检失败，已停手且未点击：{type(exc).__name__}: {exc}")
+        if cancel_event is not None and cancel_event.is_set():
+            return TransitionResult(
+                "cancelled", "重启续局授权已撤销；首帧后零点击")
         if match_end.present:
             return TransitionResult(
                 "startup_blocked",
@@ -2941,7 +2955,8 @@ class TeaAssistWindow:
             # A restarted process cannot trust its local round counter.  The
             # existing visual gates/fresh recheck decide; the enclosing future
             # guarantees this attempt is submitted only once.
-            return executor.attempt(round_no=None, round_total=0)
+            return executor.attempt(
+                round_no=None, round_total=0, cancel_event=cancel_event)
 
         scene = (evidence or {}).get("scene") or {}
         if scene.get("ok"):
@@ -2963,13 +2978,15 @@ class TeaAssistWindow:
             return
         executor = self._ensure_round_transition_executor()
         mode = "full_auto" if mode == "full_auto" else "follow"
+        cancel_event = Event()
         self._round_transition_resume_mode = mode
         self._transition_follow_pending = mode == "follow"
         self.full_auto_status.set(
             "正在核验当前画面是否为可安全续接的局间页；只允许一次「下一局」。")
         self._round_transition_future = self.auto_executor.submit(
-            self._recover_startup_round_transition, executor)
+            self._recover_startup_round_transition, executor, cancel_event)
         self._round_transition_future_mode = mode
+        self._round_transition_cancel_event = cancel_event
         self.root.after(200, self._poll_round_transition)
 
     def _active_round_transition_mode(self) -> str | None:
@@ -3007,6 +3024,7 @@ class TeaAssistWindow:
             self, "_accepted_round_future_generation", None)
         self._round_transition_future = None
         self._round_transition_future_mode = None
+        self._round_transition_cancel_event = None
         if was_accepted_observer:
             self._accepted_round_observing = False
             self._accepted_round_future_generation = None
@@ -3036,6 +3054,24 @@ class TeaAssistWindow:
                      or not self._round_transition_authorized())):
             return
         self._on_round_transition_result(result)
+
+    def _revoke_round_transition_authority(self) -> None:
+        """Revoke one in-flight UI transition without losing its lifecycle.
+
+        ``Future.cancel()`` only succeeds while queued.  A running attempt keeps
+        its Future attached until the normal poll collects it; its cancellation
+        Event is checked at every pre-click boundary and, after a committed tap,
+        limits the worker to read-only verification.
+        """
+        cancel_event = getattr(self, "_round_transition_cancel_event", None)
+        if cancel_event is not None:
+            cancel_event.set()
+        future = getattr(self, "_round_transition_future", None)
+        if future is not None:
+            try:
+                future.cancel()
+            except (AttributeError, RuntimeError):
+                pass
 
     @staticmethod
     def _observe_accepted_round_transition(
@@ -3131,6 +3167,7 @@ class TeaAssistWindow:
         self._accepted_round_observe_generation = generation
         self._accepted_round_future_generation = generation
         self._accepted_round_cancel_event = cancel_event
+        self._round_transition_cancel_event = cancel_event
         self._accepted_round_observing = True
         self._round_transition_future = self.auto_executor.submit(observe)
         self._round_transition_future_mode = self._active_round_transition_mode()
@@ -3157,7 +3194,13 @@ class TeaAssistWindow:
             max(200, int(delay_ms)), resume_observation)
 
     def _cancel_accepted_round_observation(self) -> None:
-        """Cancel a queued/running read-only segment during explicit stop."""
+        """Cancel a queued/running read-only segment during explicit stop.
+
+        A running Future is deliberately retained until ``_poll_round_transition``
+        collects it.  Clearing an uncancellable Future here used to make the UI
+        look idle while the old worker was still alive, allowing another worker
+        to be queued behind an untracked one.
+        """
         self._accepted_round_observe_generation = int(getattr(
             self, "_accepted_round_observe_generation", 0)) + 1
         cancel_event = getattr(self, "_accepted_round_cancel_event", None)
@@ -3171,17 +3214,9 @@ class TeaAssistWindow:
                 self.root.after_cancel(timer)
             except (AttributeError, tk.TclError):
                 pass
-        if getattr(self, "_accepted_round_observing", False):
-            future = getattr(self, "_round_transition_future", None)
-            if future is not None:
-                try:
-                    future.cancel()
-                except (AttributeError, RuntimeError):
-                    pass
-            self._round_transition_future = None
-            self._round_transition_future_mode = None
-            self._accepted_round_future_generation = None
-            self._accepted_round_observing = False
+        # The generic transition revoker owns Future.cancel(); keeping the
+        # operation in one place avoids racing/double-cancelling the same
+        # Future while this method only invalidates observer generations.
 
     def _on_round_transition_result(self, result) -> None:
         status = getattr(result, "status", "")
@@ -3287,6 +3322,7 @@ class TeaAssistWindow:
                 self._auto_resume_pending = False
                 self._cancel_pending_full_auto_start()
                 self._cancel_accepted_round_observation()
+                self._revoke_round_transition_authority()
                 self._round_transition_resume_mode = None
                 self._transition_follow_pending = False
                 self.full_auto_status.set(
@@ -3568,6 +3604,10 @@ class TeaAssistWindow:
         if not getattr(self, "_handoff_to_auto", False):
             self._full_auto_wanted = False
             self._auto_resume_pending = False
+            revoke_transition = getattr(
+                self, "_revoke_round_transition_authority", None)
+            if callable(revoke_transition):
+                revoke_transition()
             cancel_start = getattr(
                 self, "_cancel_pending_full_auto_start", None)
             if callable(cancel_start):
@@ -4514,8 +4554,12 @@ class TeaAssistWindow:
             self._full_auto_wanted = False
             self._auto_resume_pending = False
             self._cancel_pending_full_auto_start()
-            self.full_auto_status.set(
-                "已取消全自动启动排队；不会取得点击权。")
+            if getattr(self, "_auto_start_cancel_pending", False):
+                self.full_auto_status.set(
+                    "全自动授权已撤销；旧 worker 正在安全退出，退出前禁止启动第二个 worker。")
+            else:
+                self.full_auto_status.set(
+                    "已取消全自动启动排队；不会取得点击权。")
             self._set_operational_status(
                 "已停止", "全自动启动排队已撤销", level="wait")
             refresh = getattr(self, "_refresh_auto_gate", None)
@@ -4621,6 +4665,7 @@ class TeaAssistWindow:
         self._auto_loop = auto_loop
         self.session_dir = auto_session
         started = Event()
+        self._auto_start_cancel_pending = False
 
         def run_auto_loop():
             started.set()
@@ -4632,6 +4677,7 @@ class TeaAssistWindow:
             self._auto_loop = None
             self._auto_future = None
             self._auto_start_pending = False
+            self._auto_start_cancel_pending = False
             self._auto_start_event = None
             self.full_auto_running = False
             self._lobby_in_game_verified = True
@@ -4669,6 +4715,7 @@ class TeaAssistWindow:
                 or not getattr(self, "_auto_resume_pending", False)):
             return False
         self._auto_start_pending = False
+        self._auto_start_cancel_pending = False
         self._auto_start_event = None
         self.full_auto_running = True
         self._auto_resume_pending = False
@@ -4700,6 +4747,14 @@ class TeaAssistWindow:
         self._auto_poll_timer = None
         if not getattr(self, "_auto_start_pending", False):
             return
+        if getattr(self, "_auto_start_cancel_pending", False):
+            future = getattr(self, "_auto_future", None)
+            if future is not None and not future.done():
+                self._auto_poll_timer = self.root.after(
+                    50, self._poll_full_auto_start)
+                return
+            self._finish_cancelled_full_auto_start()
+            return
         if (not getattr(self, "_full_auto_wanted", False)
                 or not getattr(self, "_auto_resume_pending", False)):
             self._cancel_pending_full_auto_start()
@@ -4719,6 +4774,7 @@ class TeaAssistWindow:
             self._auto_future = None
             self._auto_loop = None
             self._auto_start_pending = False
+            self._auto_start_cancel_pending = False
             self._auto_start_event = None
             self.full_auto_running = False
             self._lobby_in_game_verified = True
@@ -4733,6 +4789,33 @@ class TeaAssistWindow:
         self._auto_poll_timer = self.root.after(
             50, self._poll_full_auto_start)
 
+    def _finish_cancelled_full_auto_start(self) -> None:
+        """Collect a revoked startup Future, then release its worker identity."""
+        future = getattr(self, "_auto_future", None)
+        started = getattr(self, "_auto_start_event", None)
+        worker_started = bool(started is not None and started.is_set())
+        if future is not None and future.done():
+            try:
+                future.result()
+            except Exception:
+                # Revocation is already the authoritative outcome.  The worker
+                # writes its own terminal evidence; do not resurrect authority.
+                pass
+        ended_session = Path(self.session_dir) if worker_started else None
+        self._auto_future = None
+        self._auto_loop = None
+        self._auto_poll_timer = None
+        self._auto_start_pending = False
+        self._auto_start_cancel_pending = False
+        self._auto_start_event = None
+        self.full_auto_running = False
+        if ended_session is not None:
+            schedule = getattr(self, "_schedule_session_review", None)
+            if callable(schedule):
+                schedule(ended_session)
+        self.full_auto_status.set(
+            "全自动授权已撤销；旧 worker 已退出，未启动第二个 worker。")
+
     def _cancel_pending_full_auto_start(self) -> None:
         """Revoke a queued worker before it can acquire click authority."""
         if not getattr(self, "_auto_start_pending", False):
@@ -4741,9 +4824,10 @@ class TeaAssistWindow:
         if loop is not None:
             loop.request_stop("全自动启动排队期间已撤销授权")
         future = getattr(self, "_auto_future", None)
+        cancelled = False
         if future is not None:
             try:
-                future.cancel()
+                cancelled = bool(future.cancel())
             except (AttributeError, RuntimeError):
                 pass
         timer = getattr(self, "_auto_poll_timer", None)
@@ -4752,12 +4836,17 @@ class TeaAssistWindow:
                 self.root.after_cancel(timer)
             except (AttributeError, tk.TclError):
                 pass
-        self._auto_future = None
-        self._auto_loop = None
         self._auto_poll_timer = None
-        self._auto_start_pending = False
-        self._auto_start_event = None
         self.full_auto_running = False
+        if cancelled or future is None:
+            self._finish_cancelled_full_auto_start()
+            return
+        # The worker already owns the executor.  Keep both references until it
+        # really terminates; _auto_start_pending continues to reject a second
+        # submission while this revoked worker drains its final evidence.
+        self._auto_start_cancel_pending = True
+        self._auto_poll_timer = self.root.after(
+            50, self._poll_full_auto_start)
 
     def _stop_full_auto(self) -> None:
         if getattr(self, "_auto_start_pending", False):
@@ -4768,6 +4857,7 @@ class TeaAssistWindow:
         self._full_auto_wanted = False
         self._auto_resume_pending = False
         self._cancel_accepted_round_observation()
+        self._revoke_round_transition_authority()
         self.full_auto_status.set("正在安全停手：若有点击正在验证，会先完成验证再退出。")
         self._set_operational_status(
             "正在停手", "等待当前动作验证完成", level="wait")
@@ -4928,28 +5018,69 @@ class TeaAssistWindow:
         self.status.set("已标记本局有问题；将随本场自动复盘一并筛查。")
 
     def _schedule_session_review(self, session_dir) -> None:
-        """Kick off the Line-A auto review for a just-ended session."""
+        """Queue one session on the single review worker."""
         if getattr(self, "_suppress_review", False):
             self._suppress_review = False
             return
         if not session_dir:
             return
         target = Path(session_dir)
-        thread = getattr(self, "_review_thread", None)
-        if (thread is not None and thread.is_alive()
-                and getattr(self, "_review_target", None) == target):
-            return
-        self._review_target = target
-        thread = Thread(
-            target=self._run_session_review, args=(target,), daemon=True)
-        self._review_thread = thread
-        thread.start()
+        queue = getattr(self, "_review_queue", None)
+        if queue is None:
+            queue = Queue()
+            self._review_queue = queue
+        lock = getattr(self, "_review_lock", None)
+        if lock is None:
+            lock = Lock()
+            self._review_lock = lock
+        targets = getattr(self, "_review_targets", None)
+        if targets is None:
+            targets = set()
+            self._review_targets = targets
+        with lock:
+            if target in targets:
+                return
+            targets.add(target)
+            queue.put(target)
+        self._ensure_review_worker()
         if getattr(self, "_review_poll_timer", None) is None:
             try:
                 self._review_poll_timer = self.root.after(
                     150, self._poll_review)
             except Exception:
                 self._review_poll_timer = None
+
+    def _ensure_review_worker(self) -> None:
+        """Start exactly one daemon that drains the session review queue."""
+        lock = getattr(self, "_review_lock", None)
+        if lock is None:
+            lock = Lock()
+            self._review_lock = lock
+        with lock:
+            thread = getattr(self, "_review_thread", None)
+            if thread is not None and thread.is_alive():
+                return
+            thread = Thread(
+                target=self._review_worker_loop,
+                name="tea-assist-session-review", daemon=True)
+            self._review_thread = thread
+            thread.start()
+
+    def _review_worker_loop(self) -> None:
+        """Serially review queued sessions; this thread never touches Tk."""
+        queue = self._review_queue
+        while True:
+            target = queue.get()
+            try:
+                lock = self._review_lock
+                with lock:
+                    self._review_target = target
+                self._run_session_review(target)
+            finally:
+                with self._review_lock:
+                    self._review_targets.discard(target)
+                    self._review_target = None
+                queue.task_done()
 
     def _run_session_review(self, session_dir: Path) -> None:
         """Worker thread: call the review core; never touch Tk here."""
@@ -4977,8 +5108,8 @@ class TeaAssistWindow:
                 except Empty:
                     break
                 self._apply_review_result(outcome)
-        thread = getattr(self, "_review_thread", None)
-        if thread is not None and thread.is_alive():
+        queue = getattr(self, "_review_queue", None)
+        if queue is not None and getattr(queue, "unfinished_tasks", 0):
             try:
                 self._review_poll_timer = self.root.after(
                     200, self._poll_review)

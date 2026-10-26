@@ -12,6 +12,8 @@ assistant rect and the monitor work area; no guessed scale factor is applied.
 from __future__ import annotations
 
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
@@ -55,6 +57,7 @@ class DockTarget:
     rect: Rect
     work_area: Rect
     minimized: bool = False
+    pid: int = 0
 
 
 @dataclass(frozen=True)
@@ -129,7 +132,7 @@ def find_ldplayer_window(serial: str) -> DockTarget | None:
             or win32process is None or win32api is None or win32con is None):
         return None
 
-    matches: list[tuple[int, int]] = []
+    matches: list[tuple[int, int, int]] = []
 
     def collect(hwnd, _unused) -> bool:
         try:
@@ -144,7 +147,7 @@ def find_ldplayer_window(serial: str) -> DockTarget | None:
             left, top, right, bottom = win32gui.GetWindowRect(hwnd)
             area = max(0, right - left) * max(0, bottom - top)
             if area > 10_000:
-                matches.append((area, int(hwnd)))
+                matches.append((area, int(hwnd), int(pid)))
         except Exception:  # noqa: BLE001 - one inaccessible window is skipped
             pass
         return True
@@ -155,7 +158,7 @@ def find_ldplayer_window(serial: str) -> DockTarget | None:
         return None
     if not matches:
         return None
-    hwnd = max(matches)[1]
+    _area, hwnd, pid = max(matches)
     try:
         rect = Rect(*map(int, win32gui.GetWindowRect(hwnd)))
         monitor = win32api.MonitorFromWindow(
@@ -165,8 +168,97 @@ def find_ldplayer_window(serial: str) -> DockTarget | None:
         return DockTarget(
             hwnd=hwnd, rect=rect, work_area=work_area,
             minimized=bool(win32gui.IsIconic(hwnd)),
+            pid=pid,
         )
     except Exception:  # noqa: BLE001 - disappearing emulator is normal
+        return None
+
+
+def _refresh_cached_target(target: DockTarget) -> DockTarget | None:
+    """Refresh geometry only; never read a process command line on Tk."""
+    if (win32gui is None or win32process is None or win32api is None
+            or win32con is None):
+        return None
+    try:
+        if not win32gui.IsWindow(target.hwnd):
+            return None
+        _thread_id, pid = win32process.GetWindowThreadProcessId(target.hwnd)
+        if target.pid and int(pid) != target.pid:
+            return None
+        rect = Rect(*map(int, win32gui.GetWindowRect(target.hwnd)))
+        monitor = win32api.MonitorFromWindow(
+            target.hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+        info = win32api.GetMonitorInfo(monitor)
+        return DockTarget(
+            hwnd=target.hwnd,
+            rect=rect,
+            work_area=Rect(*map(int, info["Work"])),
+            minimized=bool(win32gui.IsIconic(target.hwnd)),
+            pid=int(pid),
+        )
+    except Exception:  # noqa: BLE001 - disappearing window is normal
+        return None
+
+
+class AsyncDockTargetReader:
+    """Resolve serial→HWND off the Tk thread, then read geometry cheaply."""
+
+    def __init__(
+        self,
+        *,
+        resolver: Callable[[str], DockTarget | None] = find_ldplayer_window,
+        refresher: Callable[[DockTarget], DockTarget | None] =
+            _refresh_cached_target,
+        retry_s: float = 1.0,
+    ) -> None:
+        self.resolver = resolver
+        self.refresher = refresher
+        self.retry_s = max(0.1, float(retry_s))
+        self._lock = threading.Lock()
+        self._serial: str | None = None
+        self._target: DockTarget | None = None
+        self._resolving = False
+        self._retry_at = 0.0
+
+    def _resolve(self, serial: str) -> None:
+        try:
+            target = self.resolver(serial)
+        except Exception:  # noqa: BLE001 - optional UX remains fail-closed
+            target = None
+        with self._lock:
+            if self._serial == serial:
+                self._target = target
+                self._retry_at = (0.0 if target is not None
+                                  else time.monotonic() + self.retry_s)
+            self._resolving = False
+
+    def __call__(self, serial: str) -> DockTarget | None:
+        value = str(serial)
+        with self._lock:
+            if self._serial != value:
+                self._serial = value
+                self._target = None
+                self._retry_at = 0.0
+            cached = self._target
+        if cached is not None:
+            refreshed = self.refresher(cached)
+            if refreshed is not None:
+                with self._lock:
+                    if self._serial == value:
+                        self._target = refreshed
+                return refreshed
+            with self._lock:
+                if self._serial == value:
+                    self._target = None
+
+        with self._lock:
+            now = time.monotonic()
+            if self._resolving or now < self._retry_at:
+                return None
+            self._resolving = True
+        threading.Thread(
+            target=self._resolve, args=(value,), daemon=True,
+            name=f"mahjong-dock-resolve-{value}").start()
         return None
 
 
@@ -187,13 +279,13 @@ class DockFollower:
 
     def __init__(
             self, host: DockHost, serial: str, *,
-            target_reader: Callable[[str], DockTarget | None] = find_ldplayer_window,
+            target_reader: Callable[[str], DockTarget | None] | None = None,
             on_manual_detach: Callable[[], None] | None = None,
             gap: int = DEFAULT_GAP,
             tolerance: int = MANUAL_DETACH_TOLERANCE):
         self.host = host
         self.serial = serial
-        self.target_reader = target_reader
+        self.target_reader = target_reader or AsyncDockTargetReader()
         self.on_manual_detach = on_manual_detach
         self.gap = max(0, int(gap))
         self.tolerance = max(1, int(tolerance))

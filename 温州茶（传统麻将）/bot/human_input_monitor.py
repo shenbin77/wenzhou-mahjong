@@ -25,6 +25,7 @@ from typing import Any, Mapping, Optional, Sequence
 __all__ = [
     "ClickTarget",
     "HumanInputMonitor",
+    "LdPlayerWindowRegistry",
     "associate_human_click",
     "build_human_click_event",
     "load_human_clicks",
@@ -310,37 +311,118 @@ def parse_ldplayer_list2(output: str | bytes) -> list[dict]:
     return rows
 
 
+class LdPlayerWindowRegistry:
+    """One shared stale-while-revalidate ``ldconsole list2`` snapshot.
+
+    ``rows`` is called by the mouse sampling threads, so it must never wait for
+    ``ldconsole``.  A daemon refresh owns that potentially slow subprocess;
+    callers receive a still-bounded stale snapshot or fail closed while the
+    first/overdue refresh is in flight.
+    """
+
+    def __init__(self, *, ttl_s: float = 5.0,
+                 max_stale_s: float = 20.0,
+                 retry_s: float = 1.0) -> None:
+        self.ttl_s = max(0.1, float(ttl_s))
+        self.max_stale_s = max(self.ttl_s, float(max_stale_s))
+        self.retry_s = max(0.1, float(retry_s))
+        self._lock = threading.Lock()
+        self._path: str | None = None
+        self._loaded_at = 0.0
+        self._rows: list[dict] = []
+        self._generation = 0
+        self._refreshing_generation: int | None = None
+        self._retry_at = 0.0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._generation += 1
+            self._path = None
+            self._loaded_at = 0.0
+            self._rows = []
+            self._refreshing_generation = None
+            self._retry_at = 0.0
+
+    def _refresh(self, path: str, generation: int) -> None:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        try:
+            completed = subprocess.run(
+                [path, "list2"], check=True,
+                capture_output=True, timeout=5, **kwargs)
+        except (OSError, subprocess.SubprocessError):
+            rows = None
+        else:
+            rows = parse_ldplayer_list2(completed.stdout)
+        completed_at = time.monotonic()
+        with self._lock:
+            if (self._generation != generation or self._path != path
+                    or self._refreshing_generation != generation):
+                return
+            self._refreshing_generation = None
+            if rows is None:
+                self._retry_at = completed_at + self.retry_s
+                return
+            self._rows = rows
+            self._loaded_at = completed_at
+            self._retry_at = 0.0
+
+    def rows(self, ldconsole_path: str | Path) -> list[dict]:
+        path = str(ldconsole_path)
+        now = time.monotonic()
+        with self._lock:
+            if self._path != path:
+                self._generation += 1
+                self._path = path
+                self._loaded_at = 0.0
+                self._rows = []
+                self._refreshing_generation = None
+                self._retry_at = 0.0
+            age = now - self._loaded_at if self._loaded_at else float("inf")
+            if (age >= self.ttl_s
+                    and self._refreshing_generation is None
+                    and now >= self._retry_at):
+                generation = self._generation
+                self._refreshing_generation = generation
+                threading.Thread(
+                    target=self._refresh,
+                    args=(path, generation),
+                    daemon=True,
+                    name="mahjong-ldplayer-window-refresh",
+                ).start()
+            if age <= self.max_stale_s:
+                return list(self._rows)
+            return []
+
+    def resolve(self, serial: str,
+                ldconsole_path: str | Path) -> Optional[ClickTarget]:
+        match = re.fullmatch(r"emulator-(\d+)", str(serial or ""))
+        if not match:
+            return None
+        port = int(match.group(1))
+        if port < 5554 or (port - 5554) % 2:
+            return None
+        expected_index = (port - 5554) // 2
+        for row in self.rows(ldconsole_path):
+            if (row["index"] == expected_index and row["running"]
+                    and row["hwnd"] > 0 and row["pid"] > 0):
+                return ClickTarget(
+                    row["hwnd"], serial, True,
+                    "ldconsole_list2_index_port")
+        return None
+
+
+_LDPLAYER_WINDOWS = LdPlayerWindowRegistry()
+
+
 def resolve_ldplayer_target(
     serial: str,
     ldconsole_path: str | Path,
 ) -> Optional[ClickTarget]:
     """用官方实例 index 与默认 emulator 端口公式做双向精确映射。"""
-    match = re.fullmatch(r"emulator-(\d+)", str(serial or ""))
-    if not match:
-        return None
-    port = int(match.group(1))
-    if port < 5554 or (port - 5554) % 2:
-        return None
-    expected_index = (port - 5554) // 2
-    try:
-        kwargs = {}
-        if os.name == "nt":
-            # The watchdog periodically re-resolves both LDPlayer windows.
-            # Keep those background ldconsole probes invisible.
-            kwargs["creationflags"] = getattr(
-                subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        completed = subprocess.run(
-            [str(ldconsole_path), "list2"], check=True,
-            capture_output=True, timeout=5, **kwargs)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    for row in parse_ldplayer_list2(completed.stdout):
-        if (row["index"] == expected_index and row["running"]
-                and row["hwnd"] > 0 and row["pid"] > 0):
-            return ClickTarget(
-                row["hwnd"], serial, True,
-                "ldconsole_list2_index_port")
-    return None
+    return _LDPLAYER_WINDOWS.resolve(serial, ldconsole_path)
 
 
 def main(argv=None) -> int:
@@ -357,7 +439,11 @@ def main(argv=None) -> int:
             args.hwnd, args.serial or None, bool(args.mapping_verified),
             "explicit_hwnd" if args.mapping_verified else "caller_unverified")
     else:
+        deadline = time.monotonic() + 5.5
         target = resolve_ldplayer_target(args.serial, args.ldconsole)
+        while target is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+            target = resolve_ldplayer_target(args.serial, args.ldconsole)
         if target is None:
             print("无法把 serial 精确映射到正在运行的雷电窗口；拒绝猜测")
             return 2

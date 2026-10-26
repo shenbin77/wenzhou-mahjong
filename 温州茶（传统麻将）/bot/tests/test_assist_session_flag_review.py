@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from queue import Queue
+from threading import Event
 from types import SimpleNamespace
 
 import auto_review
@@ -219,7 +220,7 @@ def test_review_runs_in_background_and_applies_summary(monkeypatch, tmp_path):
 
     window._schedule_session_review(session)
     assert window._review_thread is not None
-    window._review_thread.join(timeout=10)
+    window._review_queue.join()
     assert seen["dir"] == session
 
     window._poll_review()
@@ -240,7 +241,7 @@ def test_review_zero_issues_shows_ok(monkeypatch, tmp_path):
     window = _window(tmp_path)
 
     window._schedule_session_review(tmp_path / "s")
-    window._review_thread.join(timeout=10)
+    window._review_queue.join()
     window._poll_review()
 
     _phase, problem, level = window.ops[-1]
@@ -256,13 +257,51 @@ def test_review_failure_is_surfaced_not_swallowed(monkeypatch, tmp_path):
     window = _window(tmp_path)
 
     window._schedule_session_review(tmp_path / "s")
-    window._review_thread.join(timeout=10)
+    window._review_queue.join()
     window._poll_review()
 
     _phase, problem, level = window.ops[-1]
     assert "自动复盘失败" in problem
     assert "boom" in problem
     assert level == "error"
+
+
+def test_reviews_use_one_worker_and_preserve_queue_order(monkeypatch, tmp_path):
+    first_entered = Event()
+    release_first = Event()
+    second_entered = Event()
+    calls = []
+
+    def fake_review(session_dir):
+        name = Path(session_dir).name
+        calls.append(name)
+        if name == "s1":
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_entered.set()
+        return {"issue_count": 0, "by_category": {},
+                "report_md": f"{name}.md"}
+
+    monkeypatch.setattr(auto_review, "review_session", fake_review)
+    window = _window(tmp_path)
+
+    window._schedule_session_review(tmp_path / "s1")
+    assert first_entered.wait(timeout=5)
+    worker = window._review_thread
+    window._schedule_session_review(tmp_path / "s2")
+
+    assert window._review_thread is worker
+    assert second_entered.is_set() is False
+    assert window._review_target == tmp_path / "s1"
+
+    release_first.set()
+    window._review_queue.join()
+    window._poll_review()
+
+    assert calls == ["s1", "s2"]
+    assert len(window.ops) == 2
+    assert window._review_target is None
 
 
 def test_follow_stop_schedules_review_for_follow_dir(tmp_path):

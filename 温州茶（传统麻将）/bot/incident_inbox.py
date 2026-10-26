@@ -20,6 +20,10 @@ __all__ = [
     "sanitize_event",
 ]
 
+STATUS_OPEN = "open"
+STATUS_VERIFICATION_PENDING = "verification_pending"
+STATUS_RESOLVED = "resolved"
+
 _EVENT_KEYS = (
     "ts", "at", "event", "status", "gate", "reason", "round_seq", "tick",
     "frame", "after_frame", "device_serial", "serial", "mode", "verified",
@@ -101,11 +105,15 @@ def sanitize_event(item: Mapping[str, Any]) -> dict:
 
 
 def read_repo_version(project_root: str | Path) -> Optional[str]:
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NO_WINDOW", 0x08000000)
     try:
         completed = subprocess.run(
             ["git", "rev-parse", "--short=12", "HEAD"],
             cwd=str(project_root), check=True, capture_output=True,
-            text=True, timeout=3)
+            text=True, timeout=3, **kwargs)
     except (OSError, subprocess.SubprocessError):
         return None
     value = completed.stdout.strip()
@@ -302,7 +310,7 @@ def create_incident(
     payload = {
         "schema": 1,
         "incident_id": incident_id,
-        "status": "open" if not old else old.get("status", "open"),
+        "status": STATUS_OPEN if not old else old.get("status", STATUS_OPEN),
         "created_at": old.get("created_at") if old else now,
         "last_seen_at": now,
         "occurrences": int(old.get("occurrences", 0)) + 1 if old else 1,
@@ -320,9 +328,14 @@ def create_incident(
             "secrets_allowed": False,
         },
     }
-    if old and old.get("status") == "resolved":
+    if old and old.get("status") == STATUS_RESOLVED:
         payload["resolved_at"] = _safe_scalar(old.get("resolved_at"), 100)
         payload["resolution"] = _safe_scalar(old.get("resolution"), 1000)
+    elif old and old.get("status") == STATUS_VERIFICATION_PENDING:
+        payload["verification_pending_at"] = _safe_scalar(
+            old.get("verification_pending_at"), 100)
+        payload["verification_note"] = _safe_scalar(
+            old.get("verification_note"), 1000)
     _atomic_text(folder / "incident.json", json.dumps(
         payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     _atomic_text(folder / "README.md", _render_readme(payload))
@@ -336,19 +349,9 @@ def mark_incident_resolved(
     *,
     resolution: str,
 ) -> dict:
-    root = Path(incident_root)
-    path = root / incident_id / "incident.json"
-    payload = _read_json(path)
-    if payload is None:
-        raise FileNotFoundError(path)
-    payload["status"] = "resolved"
-    payload["resolved_at"] = _now()
-    payload["resolution"] = str(resolution)[:1000]
-    _atomic_text(path, json.dumps(payload, ensure_ascii=False,
-                                  indent=2, sort_keys=True) + "\n")
-    _atomic_text(path.parent / "README.md", _render_readme(payload))
-    _update_index(root, payload)
-    return payload
+    return _mark_incident_status(
+        incident_root, incident_id, status=STATUS_RESOLVED,
+        at_key="resolved_at", note_key="resolution", note=resolution)
 
 
 def mark_incident_verification_pending(
@@ -363,16 +366,35 @@ def mark_incident_verification_pending(
     has not yet passed.  Rescans preserve this status; a distinct later
     session/fingerprint still creates a new ``open`` incident.
     """
+    return _mark_incident_status(
+        incident_root, incident_id, status=STATUS_VERIFICATION_PENDING,
+        at_key="verification_pending_at", note_key="verification_note",
+        note=note)
+
+
+def _mark_incident_status(
+    incident_root: str | Path,
+    incident_id: str,
+    *,
+    status: str,
+    at_key: str,
+    note_key: str,
+    note: str,
+) -> dict:
+    """One atomic state transition path for every incident disposition."""
+    if status not in {STATUS_VERIFICATION_PENDING, STATUS_RESOLVED}:
+        raise ValueError(f"unsupported incident status: {status}")
     root = Path(incident_root)
     path = root / incident_id / "incident.json"
     payload = _read_json(path)
     if payload is None:
         raise FileNotFoundError(path)
-    payload["status"] = "verification_pending"
-    payload["verification_pending_at"] = _now()
-    payload["verification_note"] = str(note)[:1000]
-    payload.pop("resolved_at", None)
-    payload.pop("resolution", None)
+    for key in ("resolved_at", "resolution", "verification_pending_at",
+                "verification_note"):
+        payload.pop(key, None)
+    payload["status"] = status
+    payload[at_key] = _now()
+    payload[note_key] = str(note)[:1000]
     _atomic_text(path, json.dumps(payload, ensure_ascii=False,
                                   indent=2, sort_keys=True) + "\n")
     _atomic_text(path.parent / "README.md", _render_readme(payload))

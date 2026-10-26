@@ -1,4 +1,7 @@
 """Desktop lifecycle requests must reach only the requested UI serial."""
+import json
+import time
+
 import pytest
 
 from window_restore_signal import (acknowledge_control, consume_control,
@@ -97,3 +100,39 @@ def test_legacy_restore_never_erases_structured_quit(tmp_path):
     consumed = consume_control("emulator-5554", tmp_path)
     assert consumed == ticket
     assert consumed.command == "quit"
+
+
+def test_stale_quit_is_not_executed_by_a_new_window(tmp_path):
+    path = restore_path("emulator-5554", tmp_path)
+    path.write_text(json.dumps({
+        "version": 1,
+        "serial": "emulator-5554",
+        "command": "quit",
+        "request_id": "a" * 32,
+        "created_at": time.time() - 60,
+    }), encoding="utf-8")
+
+    assert consume_control("emulator-5554", tmp_path) is None
+    assert not path.exists()
+
+
+def test_new_request_replaces_only_a_provably_stale_mailbox(tmp_path):
+    path = restore_path("emulator-5556", tmp_path)
+    path.write_text(json.dumps({
+        "version": 1,
+        "serial": "emulator-5556",
+        "command": "quit",
+        "request_id": "b" * 32,
+        "created_at": time.time() - 60,
+    }), encoding="utf-8")
+
+    ticket = request_control("emulator-5556", "restore", tmp_path)
+    consumed = consume_control("emulator-5556", tmp_path)
+    assert consumed == ticket
+
+
+def test_fresh_quit_still_blocks_overwrite_and_is_consumed(tmp_path):
+    first = request_control("emulator-5554", "quit", tmp_path)
+    with pytest.raises(RuntimeError, match="已有未处理"):
+        request_control("emulator-5554", "restore", tmp_path)
+    assert consume_control("emulator-5554", tmp_path) == first

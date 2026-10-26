@@ -293,6 +293,89 @@ def test_second_full_auto_click_cancels_the_single_queued_worker(
     assert "取消" in window.full_auto_status.get()
 
 
+def test_uncancellable_start_keeps_worker_identity_until_future_finishes(
+        monkeypatch, tmp_path):
+    loops = []
+
+    class FakeLoop:
+        def __init__(self, **kwargs):
+            self.session_dir = Path(kwargs["session_dir"])
+            self.follow_log_path = self.session_dir / "follow_session.jsonl"
+            self.ledger_path = self.session_dir / "actions.jsonl"
+            self.stop_reasons = []
+            loops.append(self)
+
+        def run(self):
+            return {"actions": 0, "stop_reason": "授权已撤销"}
+
+        def request_stop(self, reason):
+            self.stop_reasons.append(reason)
+
+    class RunningFuture:
+        def __init__(self):
+            self.finished = False
+            self.cancel_calls = 0
+            self.result_calls = 0
+
+        def cancel(self):
+            self.cancel_calls += 1
+            return False
+
+        def done(self):
+            return self.finished
+
+        def result(self):
+            self.result_calls += 1
+            return {"actions": 0, "stop_reason": "授权已撤销"}
+
+    class RunningExecutor:
+        def __init__(self):
+            self.submissions = 0
+            self.future = RunningFuture()
+
+        def submit(self, fn):
+            self.submissions += 1
+            self.fn = fn
+            return self.future
+
+    monkeypatch.setattr(auto_play_loop, "AutoPlayLoop", FakeLoop)
+    monkeypatch.setattr(
+        action_policy, "recommended_runner_config",
+        lambda **kwargs: ("safe-policy", kwargs))
+    window = _window(tmp_path)
+    window.continuous = True
+    window.auto_executor = RunningExecutor()
+    reviews = []
+    window._schedule_session_review = lambda path: reviews.append(Path(path))
+
+    window._toggle_full_auto()
+    old_future = window._auto_future
+    old_loop = window._auto_loop
+    window._auto_start_event.set()  # worker crossed the start handshake
+    window._toggle_full_auto()
+
+    assert window._auto_start_cancel_pending is True
+    assert window._auto_start_pending is True
+    assert window._auto_future is old_future
+    assert window._auto_loop is old_loop
+    assert old_loop.stop_reasons
+    assert window.auto_executor.submissions == 1
+
+    # A new request cannot queue a second worker behind the untracked old one.
+    assert window._start_full_auto() is False
+    assert window.auto_executor.submissions == 1
+
+    old_future.finished = True
+    window._poll_full_auto_start()
+
+    assert window._auto_start_pending is False
+    assert window._auto_start_cancel_pending is False
+    assert window._auto_future is None
+    assert window._auto_loop is None
+    assert old_future.result_calls == 1
+    assert reviews == [Path(window.session_dir)]
+
+
 def test_repeated_resume_is_idempotent_and_stop_targets_the_only_loop(
         monkeypatch, tmp_path):
     loops = []
@@ -644,13 +727,23 @@ def test_stop_revokes_waiting_authority_when_running_future_cannot_cancel(
         def __init__(self, fn):
             self.fn = fn
             self.cancel_calls = 0
+            self.completed = False
+            self.outcome = None
 
         def done(self):
-            return False
+            return self.completed
 
         def cancel(self):
             self.cancel_calls += 1
             return False
+
+        def run(self):
+            self.outcome = self.fn()
+            self.completed = True
+            return self.outcome
+
+        def result(self):
+            return self.outcome
 
     class RunningExecutor:
         def submit(self, fn):
@@ -692,17 +785,19 @@ def test_stop_revokes_waiting_authority_when_running_future_cannot_cancel(
     assert cancel_event.is_set()
     assert window._full_auto_wanted is False
     assert window._auto_resume_pending is False
-    assert window._accepted_round_observing is False
-    assert window._round_transition_future is None
+    assert window._accepted_round_observing is True
+    assert window._round_transition_future is future
     assert window.full_auto_running is False
     assert "全自动跟随中" not in window.full_auto_status.get()
     assert "授权已撤销" in window.full_auto_status.get()
 
-    late_result = future.fn()
+    late_result = future.run()
     assert late_result.status == "accepted_waiting_cancelled"
     scheduled_poll()
 
     assert calls == []
+    assert window._accepted_round_observing is False
+    assert window._round_transition_future is None
     assert window._round_transition.clicks == 1
     assert window.full_auto_running is False
 

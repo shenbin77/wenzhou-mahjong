@@ -28,6 +28,7 @@ BOT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BOT_DIR.parents[1]
 DEFAULT_LOGS_ROOT = BOT_DIR.parent / "采集" / "dev_auto_play"
 DEFAULT_INCIDENT_ROOT = PROJECT_ROOT / "_incidents" / "tea2"
+DEFAULT_INPUT_RESOLVE_INTERVAL_S = 5.0
 
 
 def _header_serial(session_dir: Path) -> Optional[str]:
@@ -79,7 +80,7 @@ class IncidentWatchdog:
         *,
         ldconsole: str | Path,
         interval_s: float = 2.0,
-        input_resolve_interval_s: float = 1.0,
+        input_resolve_interval_s: float = DEFAULT_INPUT_RESOLVE_INTERVAL_S,
     ) -> None:
         self.logs_root = Path(logs_root)
         self.incident_root = Path(incident_root)

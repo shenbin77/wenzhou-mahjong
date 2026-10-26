@@ -26,6 +26,7 @@ from instance_profile import safe_serial
 CONTROL_DIR = Path(__file__).resolve().parents[2] / "_control"
 CONTROL_VERSION = 1
 CONTROL_COMMANDS = frozenset({"restore", "quit"})
+CONTROL_REQUEST_TTL_S = 15.0
 _REQUEST_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 
@@ -143,6 +144,7 @@ def request_control(serial: str, command: str,
         "request_id": request_id,
         "created_at": created_at,
     }
+    _discard_stale_mailbox(value, path, now=created_at)
     try:
         _exclusive_write(path, json.dumps(
             payload, ensure_ascii=True, separators=(",", ":")))
@@ -150,6 +152,32 @@ def request_control(serial: str, command: str,
         raise RuntimeError(
             f"{value} 已有未处理的窗口控制请求；请等待本次操作完成") from exc
     return ControlRequest(value, action, request_id, created_at, path, reply)
+
+
+def _discard_stale_mailbox(serial: str, path: Path, *, now: float) -> bool:
+    """Remove only a provably expired one-slot request before a new write."""
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        modified_at = path.stat().st_mtime
+    except (OSError, UnicodeError):
+        return False
+    created_at = modified_at
+    if raw != "restore":
+        try:
+            payload = json.loads(raw)
+            if safe_serial(str(payload.get("serial"))) != serial:
+                return False
+            created_at = float(payload.get("created_at"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            created_at = modified_at
+    age = now - created_at
+    if age <= CONTROL_REQUEST_TTL_S:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 def consume_control(serial: str,
@@ -179,6 +207,9 @@ def consume_control(serial: str,
     if (version != CONTROL_VERSION or request_serial != value
             or command not in CONTROL_COMMANDS
             or not _REQUEST_ID_RE.fullmatch(request_id)):
+        return None
+    age = time.time() - created_at
+    if age > CONTROL_REQUEST_TTL_S or age < -CONTROL_REQUEST_TTL_S:
         return None
     return ControlRequest(
         value, command, request_id, created_at, path,
@@ -263,6 +294,7 @@ def consume_restore(serial: str, root: Path | None = None) -> bool:
 
 __all__ = [
     "CONTROL_COMMANDS",
+    "CONTROL_REQUEST_TTL_S",
     "ControlAck",
     "ControlRequest",
     "ack_path",

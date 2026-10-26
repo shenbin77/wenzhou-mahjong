@@ -3,18 +3,31 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import human_input_monitor
 from human_input_monitor import (
     ClickTarget,
     HumanInputMonitor,
+    LdPlayerWindowRegistry,
     associate_human_click,
     build_human_click_event,
     load_human_clicks,
     parse_ldplayer_list2,
     resolve_ldplayer_target,
 )
+
+
+def _wait_for_target(resolve, timeout_s: float = 1.0):
+    deadline = time.monotonic() + timeout_s
+    result = None
+    while result is None and time.monotonic() < deadline:
+        result = resolve()
+        if result is None:
+            time.sleep(0.01)
+    return result
 
 
 def test_build_event_is_strictly_target_window_scoped() -> None:
@@ -158,9 +171,11 @@ def test_ldconsole_mapping_requires_exact_default_port_formula(monkeypatch) -> N
     class Done:
         stdout = raw
 
+    human_input_monitor._LDPLAYER_WINDOWS.clear()
     monkeypatch.setattr("human_input_monitor.subprocess.run",
                         lambda *_args, **_kwargs: Done())
-    target = resolve_ldplayer_target("emulator-5556", "ldconsole.exe")
+    target = _wait_for_target(
+        lambda: resolve_ldplayer_target("emulator-5556", "ldconsole.exe"))
     assert target == ClickTarget(
         331880, "emulator-5556", True, "ldconsole_list2_index_port")
     assert resolve_ldplayer_target("127.0.0.1:5556", "ldconsole.exe") is None
@@ -169,18 +184,111 @@ def test_ldconsole_mapping_requires_exact_default_port_formula(monkeypatch) -> N
 
 def test_ldconsole_mapping_hides_background_console_on_windows(monkeypatch) -> None:
     captured = {}
+    completed = threading.Event()
 
     class Done:
         stdout = b"0,LDPlayer,331994,331996,1,25972,1844,1600,900,240\r\n"
 
     def run(*args, **kwargs):
         captured.update(kwargs)
+        completed.set()
         return Done()
 
+    human_input_monitor._LDPLAYER_WINDOWS.clear()
     monkeypatch.setattr("human_input_monitor.os.name", "nt")
     monkeypatch.setattr("human_input_monitor.subprocess.run", run)
     resolve_ldplayer_target("emulator-5554", "ldconsole.exe")
 
+    assert completed.wait(1.0)
     assert captured["creationflags"] == getattr(
         subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
+def test_registry_shares_one_list2_snapshot_across_serials(monkeypatch) -> None:
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+    raw = (b"0,LDPlayer,331994,331996,1,25972,1844,1600,900,240\r\n"
+           b"1,LDPlayer-1,331880,266436,1,2824,20700,1600,900,240\r\n")
+
+    class Done:
+        stdout = raw
+
+    def slow_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        started.set()
+        assert release.wait(1.0)
+        return Done()
+
+    monkeypatch.setattr(human_input_monitor.subprocess, "run", slow_run)
+    registry = LdPlayerWindowRegistry(ttl_s=5.0)
+
+    began = time.monotonic()
+    first = registry.resolve("emulator-5554", "ldconsole.exe")
+    second = registry.resolve("emulator-5556", "ldconsole.exe")
+
+    assert first is None and second is None
+    assert time.monotonic() - began < 0.2
+    assert started.wait(1.0)
+    assert len(calls) == 1
+    release.set()
+
+    first = _wait_for_target(
+        lambda: registry.resolve("emulator-5554", "ldconsole.exe"))
+    second = registry.resolve("emulator-5556", "ldconsole.exe")
+    assert first is not None and first.hwnd == 331994
+    assert second is not None and second.hwnd == 331880
+    assert len(calls) == 1
+
+
+def test_registry_returns_bounded_stale_snapshot_during_refresh(
+        monkeypatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class Done:
+        stdout = b"0,LDPlayer,200,201,1,300,400,1600,900,240\r\n"
+
+    def slow_run(*_args, **_kwargs):
+        started.set()
+        assert release.wait(1.0)
+        return Done()
+
+    monkeypatch.setattr(human_input_monitor.subprocess, "run", slow_run)
+    registry = LdPlayerWindowRegistry(ttl_s=0.1, max_stale_s=1.0)
+    registry._path = "ldconsole.exe"
+    registry._loaded_at = time.monotonic() - 0.2
+    registry._rows = [{
+        "index": 0, "title": "LDPlayer", "hwnd": 100,
+        "renderer_hwnd": 101, "running": True, "pid": 300,
+    }]
+
+    began = time.monotonic()
+    target = registry.resolve("emulator-5554", "ldconsole.exe")
+
+    assert target is not None and target.hwnd == 100
+    assert time.monotonic() - began < 0.2
+    assert started.wait(1.0)
+    release.set()
+
+
+def test_registry_fails_closed_when_stale_snapshot_is_too_old(
+        monkeypatch) -> None:
+    release = threading.Event()
+
+    def slow_run(*_args, **_kwargs):
+        assert release.wait(1.0)
+        raise subprocess.TimeoutExpired("ldconsole", 5)
+
+    monkeypatch.setattr(human_input_monitor.subprocess, "run", slow_run)
+    registry = LdPlayerWindowRegistry(ttl_s=0.1, max_stale_s=0.1)
+    registry._path = "ldconsole.exe"
+    registry._loaded_at = time.monotonic() - 1.0
+    registry._rows = [{
+        "index": 0, "title": "LDPlayer", "hwnd": 100,
+        "renderer_hwnd": 101, "running": True, "pid": 300,
+    }]
+
+    assert registry.resolve("emulator-5554", "ldconsole.exe") is None
+    release.set()
 

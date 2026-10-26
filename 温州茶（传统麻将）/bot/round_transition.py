@@ -292,8 +292,43 @@ class RoundTransitionExecutor:
         """Read-only settlement/next-round probe for the enclosing loop."""
         return self._gates(image)
 
+    @staticmethod
+    def _authorization_revoked(
+            cancel_event=None,
+            authorization_check: Callable[[], bool] | None = None) -> bool:
+        """Return True when the enclosing UI has revoked this one attempt.
+
+        ``cancel_event`` is the cross-thread source of truth.  The optional
+        callback lets non-UI callers add their own live authority check.  Any
+        callback failure is fail-closed: a broken authority channel must never
+        turn into permission to click.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            return True
+        if authorization_check is None:
+            return False
+        try:
+            return not bool(authorization_check())
+        except Exception:
+            return True
+
+    def _cancelled(self, round_no, phase: str, *, clicked: bool = False,
+                   evidence: dict | None = None) -> TransitionResult:
+        status = "cancelled_after_click" if clicked else "cancelled"
+        action = ("点击已发生；只保留点后只读验证，UI 不得续跑"
+                  if clicked else "点击权已撤销，本次零点击")
+        return self._report(TransitionResult(
+            status, f"局间续接已取消（{phase}）：{action}",
+            clicked=clicked, evidence=evidence), round_no)
+
     def attempt(self, *, round_no: Optional[int] = None,
-                round_total: int = MATCH_ROUND_TOTAL) -> TransitionResult:
+                round_total: int = MATCH_ROUND_TOTAL, cancel_event=None,
+                authorization_check: Callable[[], bool] | None = None,
+                ) -> TransitionResult:
+        revoked = lambda: self._authorization_revoked(
+            cancel_event, authorization_check)
+        if revoked():
+            return self._cancelled(round_no, "before_attempt")
         if self.halted:
             return self._report(TransitionResult(
                 "halted", "执行器已因点后状态不确定而停手，不再点击"), round_no)
@@ -308,7 +343,11 @@ class RoundTransitionExecutor:
             return self._report(TransitionResult(
                 "no_click", "template_missing：缺少真实帧裁出的下一局模板，拒绝点击"),
                 round_no)
+        if revoked():
+            return self._cancelled(round_no, "before_first_capture")
         first = self._capture()
+        if revoked():
+            return self._cancelled(round_no, "after_first_capture")
         ok, ev1 = self._gates(first)
         if not ok:
             scene = ev1["scene"]
@@ -327,8 +366,18 @@ class RoundTransitionExecutor:
             return self._report(TransitionResult(
                 "no_click", "fresh 帧未再次确认下一局按钮/局间场景，等待重拍："
                 f"{ev1['button']['reason']} / {scene['reason']}", evidence=ev1), round_no)
+        if revoked():
+            return self._cancelled(round_no, "before_recheck_sleep",
+                                   evidence={"first": ev1})
         self._sleep(self._recheck_delay_s)
+        if revoked():
+            return self._cancelled(round_no, "after_recheck_sleep",
+                                   evidence={"first": ev1})
         second = self._capture()
+        if revoked():
+            return self._cancelled(
+                round_no, "after_recheck_capture",
+                evidence={"first": ev1})
         ok2, ev2 = self._gates(second)
         b1, b2 = ev1["button"], ev2["button"]
         same = (ok2 and b2["box"] is not None
@@ -348,6 +397,9 @@ class RoundTransitionExecutor:
             return self._report(TransitionResult(
                 "no_click", "复核帧未再次确认同一按钮，不点击", evidence=evidence), round_no)
         cx, cy = b2["center"]
+        if revoked():
+            return self._cancelled(
+                round_no, "immediately_before_tap", evidence=evidence)
         # 单击：先登记再点，任何异常都不会导致第二击。
         self.clicks += 1
         if round_no is not None:
@@ -381,6 +433,10 @@ class RoundTransitionExecutor:
                           "departed_streak": departed_streak})
             if gone and new_ok:
                 evidence["post"] = polls
+                if revoked():
+                    return self._cancelled(
+                        round_no, "post_click_new_round_verified",
+                        clicked=True, evidence=evidence)
                 info = {"round_no": round_no, "evidence": label}
                 if self._on_advanced is not None:
                     self._on_advanced(info)
@@ -388,6 +444,10 @@ class RoundTransitionExecutor:
                     "advanced", f"下一局已确认：{label}", clicked=True,
                     evidence=evidence), round_no)
         evidence["post"] = polls
+        if revoked():
+            return self._cancelled(
+                round_no, "post_click_observation_complete",
+                clicked=True, evidence=evidence)
         # 17:13 / 17:28 实机：点击后 10 张原生帧里旧按钮与
         # 结算遮罩都已消失，但对手未就绪时停在绿桌/骰子过场，
         # 尚无“手牌带变亮”。这能证明本端下一局点击已被游戏接受，

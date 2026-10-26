@@ -7,6 +7,7 @@ ADB or operate an emulator.
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import cv2
@@ -203,6 +204,56 @@ def test_revoked_follow_discards_a_late_transition_result():
     window._poll_round_transition()
 
     assert window._round_transition_future is None
+
+
+def test_stop_revokes_running_transition_without_dropping_its_future():
+    class RunningFuture:
+        def __init__(self):
+            self.cancel_calls = 0
+
+        def cancel(self):
+            self.cancel_calls += 1
+            return False
+
+    token = Event()
+    future = RunningFuture()
+    window = TeaAssistWindow.__new__(TeaAssistWindow)
+    window._handoff_to_auto = False
+    window._full_auto_wanted = True
+    window._auto_resume_pending = True
+    window._auto_start_pending = False
+    window._round_transition_cancel_event = token
+    window._round_transition_future = future
+    window._round_transition_future_mode = "follow"
+    window._round_transition_resume_mode = "follow"
+    window._transition_follow_pending = True
+    window._accepted_round_observe_generation = 0
+    window._accepted_round_cancel_event = None
+    window._accepted_round_observe_timer = None
+    window._accepted_round_observing = False
+    window._lobby_active = False
+    window._lobby_in_game_verified = True
+    window.full_auto_running = False
+    window.continuous = False
+    window.continuous_round = object()
+    window.continuous_caishen = "w1"
+    window._follow_pipeline = None
+    window.start_button = None
+    window.display_source = "live"
+    window.live_info = SimpleNamespace(set=lambda value: None)
+    window.timer = None
+    window._refresh_binding_views = lambda: None
+    window._style_start_button = lambda running: None
+    window._set_hud_expanded = lambda running: None
+    window._apply_preview_layout = lambda running: None
+
+    window.stop()
+
+    assert token.is_set()
+    assert future.cancel_calls == 1
+    assert window._round_transition_future is future
+    assert window._round_transition_resume_mode is None
+    assert window._transition_follow_pending is False
 
 
 def test_follow_only_accepted_waiting_never_gains_autoplay_or_second_tap():

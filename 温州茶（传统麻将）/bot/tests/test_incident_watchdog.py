@@ -22,6 +22,14 @@ def _session(root: Path, name: str, serial: str, stamp: int) -> Path:
     return folder
 
 
+def test_default_window_mapping_refresh_is_not_a_one_second_process_loop(
+        tmp_path: Path) -> None:
+    watcher = IncidentWatchdog(
+        tmp_path / "logs", tmp_path / "inbox", ["emulator-5554"],
+        ldconsole="ldconsole.exe")
+    assert watcher.input_resolve_interval_s >= 5.0
+
+
 def test_find_latest_session_uses_verified_header_serial(tmp_path: Path) -> None:
     old = _session(tmp_path, "old", "emulator-5554", 100)
     latest = _session(tmp_path, "latest", "emulator-5554", 200)

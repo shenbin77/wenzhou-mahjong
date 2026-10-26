@@ -6,6 +6,7 @@
 """
 import sys
 from pathlib import Path
+from threading import Event
 
 import cv2
 import numpy as np
@@ -113,6 +114,48 @@ def test_recheck_moved_or_gone_no_click():
     taps = []
     r = _exe([_settle_frame(), _settle_frame(with_button=False)], taps).attempt(round_no=2)
     assert r.status == "no_click" and not taps
+
+
+def test_revocation_during_recheck_sleep_prevents_the_tap():
+    taps = []
+    cancelled = Event()
+
+    def revoke(_seconds):
+        cancelled.set()
+
+    exe = rt.RoundTransitionExecutor(
+        capture=Seq([_settle_frame(), _settle_frame()]),
+        tap=lambda x, y: taps.append((x, y)), sleep=revoke,
+        template=_button(), post_polls=1)
+
+    result = exe.attempt(round_no=2, cancel_event=cancelled)
+
+    assert result.status == "cancelled"
+    assert result.clicked is False
+    assert "after_recheck_sleep" in result.reason
+    assert taps == []
+
+
+def test_revocation_after_committed_tap_only_verifies_and_never_advances():
+    taps, advanced = [], []
+    cancelled = Event()
+
+    def tap(x, y):
+        taps.append((x, y))
+        cancelled.set()
+
+    exe = rt.RoundTransitionExecutor(
+        capture=Seq([_settle_frame(), _settle_frame(), _new_round_frame()]),
+        tap=tap, sleep=lambda _seconds: None, template=_button(),
+        post_polls=1, on_advanced=advanced.append)
+
+    result = exe.attempt(round_no=2, cancel_event=cancelled)
+
+    assert result.status == "cancelled_after_click"
+    assert result.clicked is True
+    assert len(taps) == 1
+    assert advanced == []
+    assert result.evidence["post"]
 
 
 def test_outer_match_then_fresh_score_drop_is_not_terminal(monkeypatch):

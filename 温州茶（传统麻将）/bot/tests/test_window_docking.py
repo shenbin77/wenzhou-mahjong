@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import threading
+import time
 
 from window_docking import (
+    AsyncDockTargetReader,
     DockFollower,
     DockTarget,
     Rect,
@@ -156,4 +159,47 @@ def test_withdrawn_main_window_preserves_tray_and_orb_semantics():
     follower.set_enabled(True)
     assert follower.tick() == "assistant_withdrawn"
     assert host.geometries == []
+
+
+def test_async_reader_never_blocks_tk_on_slow_process_discovery():
+    release = threading.Event()
+    calls = []
+
+    def slow_resolver(serial):
+        calls.append(serial)
+        release.wait(1.0)
+        return target()
+
+    reader = AsyncDockTargetReader(
+        resolver=slow_resolver, refresher=lambda value: value)
+    started = time.monotonic()
+    assert reader("emulator-5554") is None
+    assert time.monotonic() - started < 0.2
+    release.set()
+    deadline = time.monotonic() + 1.0
+    result = None
+    while time.monotonic() < deadline and result is None:
+        result = reader("emulator-5554")
+        time.sleep(0.01)
+    assert result is not None
+    assert calls == ["emulator-5554"]
+
+
+def test_async_reader_reuses_verified_hwnd_without_repeat_discovery():
+    calls = []
+    current = target()
+    reader = AsyncDockTargetReader(
+        resolver=lambda serial: calls.append(serial) or current,
+        refresher=lambda value: replace(
+            value, rect=Rect(200, 100, 1000, 700)))
+
+    assert reader("emulator-5554") is None
+    deadline = time.monotonic() + 1.0
+    result = None
+    while time.monotonic() < deadline and result is None:
+        result = reader("emulator-5554")
+        time.sleep(0.01)
+    assert result is not None and result.rect == Rect(200, 100, 1000, 700)
+    assert reader("emulator-5554") is not None
+    assert calls == ["emulator-5554"]
 

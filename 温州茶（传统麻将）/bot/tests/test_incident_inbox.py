@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
+import incident_inbox
 from incident_inbox import (
     create_incident,
     mark_incident_verification_pending,
     mark_incident_resolved,
+    read_repo_version,
     sanitize_event,
 )
 
@@ -20,6 +23,24 @@ def _issue() -> dict:
                     "reason": "same state", "token": "must-not-copy",
                     "state_signature": {"gate": "bright", "cookie": "no"}},
     }
+
+
+def test_repo_version_probe_is_invisible_on_windows(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    class Done:
+        stdout = "abc123\n"
+
+    def run(*args, **kwargs):
+        captured.update(kwargs)
+        return Done()
+
+    monkeypatch.setattr(incident_inbox.os, "name", "nt")
+    monkeypatch.setattr(incident_inbox.subprocess, "run", run)
+
+    assert read_repo_version(tmp_path) == "abc123"
+    assert captured["creationflags"] == getattr(
+        subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 
 def test_sanitize_event_is_allowlist_not_recursive_dump() -> None:
@@ -92,6 +113,9 @@ def test_verification_pending_is_preserved_until_live_retest(
         _issue(), session, [], incident_root=root,
         serial="emulator-5554")
     assert rescanned["status"] == "verification_pending"
+    assert rescanned["verification_pending_at"] == (
+        pending["verification_pending_at"])
+    assert rescanned["verification_note"] == "patched; N1 pending"
     index = json.loads((root / "index.json").read_text(encoding="utf-8"))
     assert index["incidents"][0]["status"] == "verification_pending"
 
