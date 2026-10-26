@@ -636,13 +636,9 @@ class TeaAssistWindow:
             controls, text="身份/玩法核验", width=12,
             command=self._verify_identity_and_mode)
         self.preflight_button.grid(row=0, column=9, padx=2)
-        self.collapse_button = ttk.Button(
-            controls, text="收起到右下角", width=13,
-            command=self.collapse_to_floating_bar)
-        self.collapse_button.grid(row=0, column=10, padx=2)
         ttk.Button(controls, text="更多", width=5, command=self._open_menu).grid(
-            row=0, column=11, sticky="e")
-        controls.grid_columnconfigure(11, weight=1)
+            row=0, column=10, sticky="e")
+        controls.grid_columnconfigure(10, weight=1)
         ttk.Label(
             controls,
             text=("填写当前游戏玩家昵称；程序会读取左下本人昵称并匹配，"
