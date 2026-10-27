@@ -1,4 +1,4 @@
-"""Screenshot tile detection and conservative, colour-aware template classification.
+﻿"""Screenshot tile detection and conservative, colour-aware template classification.
 
 The 34-label visual vocabulary includes honours for rejecting sample-mode frames;
 the target game's engine vocabulary remains 27 suits plus winds (61-64) and white (67) for Wenzhou tea.
@@ -567,32 +567,99 @@ class TileVision:
         （原框已读到高分却被拒的，如人工降分/margin 不足，照旧弃权）；
         框必须属于几何组大小 3/4 的副露组。重对齐本身见 _realign_meld_box。
         """
-        group_sizes = []
-        for size in (self.detection_diagnostics or {}).get(
-                'meld_groups') or []:
-            group_sizes.extend([int(size)] * int(size))
-        if len(group_sizes) != len(self.meld_diagnostics):
+        sizes = [int(s) for s in
+                 (self.detection_diagnostics or {}).get('meld_groups') or []]
+        if sum(sizes) != len(self.meld_diagnostics):
             return
-        for index, d in enumerate(self.meld_diagnostics):
-            if group_sizes[index] not in (3, 4) or d.get('accepted'):
+        # 全帧副露框的典型中心距（原始检测口径，中位数抗坏组污染），
+        # 供重对齐后的组级几何校验（见 _meld_group_geometry_ok）。
+        all_boxes = [tuple(b) for b in self.last_meld_boxes]
+        pitches = [
+            (nxt[0] + nxt[2] - prev[0] - prev[2]) / 2.0
+            for prev, nxt in zip(all_boxes, all_boxes[1:])]
+        typical_pitch = float(np.median(pitches)) if pitches else 0.0
+        offset = 0
+        for size in sizes:
+            group = list(range(offset, offset + size))
+            offset += size
+            if size not in (3, 4):
                 continue
-            if d.get('reason') != 'low_score':
-                continue
-            if float(d.get('score') or 0.0) >= self.min_score:
-                continue
-            box = self.last_meld_boxes[index]
-            realigned = self._realign_meld_box(
-                img, box, caishen_label, typical_width=typical_width,
-                next_left=next_left.get(tuple(box)))
-            if realigned is None:
-                continue
-            result, used_box = realigned
-            result['original_label'] = d.get('label')
-            result['original_score'] = d.get('score')
-            result['box'] = list(used_box)
-            result['region'] = 'exposed'
-            self.meld_diagnostics[index] = result
-            self.last_meld_boxes[index] = list(used_box)
+            saved_diags = [dict(self.meld_diagnostics[i]) for i in group]
+            saved_boxes = [list(self.last_meld_boxes[i]) for i in group]
+            realigned_positions = []
+            for pos, i in enumerate(group):
+                d = self.meld_diagnostics[i]
+                if d.get('accepted'):
+                    continue
+                if d.get('reason') != 'low_score':
+                    continue
+                if float(d.get('score') or 0.0) >= self.min_score:
+                    continue
+                box = self.last_meld_boxes[i]
+                realigned = self._realign_meld_box(
+                    img, box, caishen_label, typical_width=typical_width,
+                    next_left=next_left.get(tuple(box)))
+                if realigned is None:
+                    continue
+                result, used_box = realigned
+                # 多重搜索的统计代价用增益门补：救回分数必须比原框
+                # 读数高出明确幅度，"勉强过线"不算对准证据。
+                if float(result.get('score') or 0.0) \
+                        - float(d.get('score') or 0.0) < 0.10:
+                    continue
+                result['original_label'] = d.get('label')
+                result['original_score'] = d.get('score')
+                result['box'] = list(used_box)
+                result['region'] = 'exposed'
+                self.meld_diagnostics[i] = result
+                self.last_meld_boxes[i] = list(used_box)
+                realigned_positions.append(pos)
+            if len(realigned_positions) >= 2 and not (
+                    self._meld_group_geometry_ok(
+                        [(pos, self.last_meld_boxes[group[pos]])
+                         for pos in realigned_positions],
+                        typical_width=typical_width,
+                        typical_pitch=typical_pitch)):
+                for k, i in enumerate(group):
+                    self.meld_diagnostics[i] = saved_diags[k]
+                    self.last_meld_boxes[i] = saved_boxes[k]
+
+    @staticmethod
+    def _meld_group_geometry_ok(positioned_boxes, *, typical_width,
+                                typical_pitch):
+        """重对齐后（组内）联合几何校验：防多框各自串读邻牌。
+
+        单框的中心护栏只能防单个框跑偏；整组多框若各自独立搜索，
+        理论上可能串位还各自高分。这里只校验本次被重对齐的框彼此
+        之间：x 单调递增、相邻不重叠、宽度合帧内典型值、组内相邻
+        框的中心距合典型中心距。任一不合 → 整组重对齐作废、恢复
+        原弃权（由调用方恢复快照）。
+        """
+        # 相邻框允许小幅重叠：搜索宽（典型宽）大于实际牌距时，对准的
+        # 框天然交叠数像素（实机碰白例 5px）；串读邻牌的位移是半张牌
+        # 量级，由中心距带宽兜底，不靠这条。
+        overlap_tol = max(4.0, typical_width * 0.12) if typical_width else 4.0
+        pts = [(pos, float(b[0]), float(b[2]))
+               for pos, b in positioned_boxes]
+        for (_p0, x0, _x1), (_p1, nx0, _nx1) in zip(pts, pts[1:]):
+            if nx0 <= x0:
+                return False
+            if nx0 < _x1 - overlap_tol:
+                return False
+        if typical_width > 0:
+            for _pos, x0, x1 in pts:
+                if not typical_width * 0.75 <= x1 - x0 \
+                        <= typical_width * 1.3:
+                    return False
+        if typical_pitch > 0:
+            for (p0, x0, x1), (p1, nx0, nx1) in zip(pts, pts[1:]):
+                if p1 - p0 != 1:
+                    continue
+                pitch = (nx0 + nx1 - x0 - x1) / 2.0
+                if not typical_pitch * 0.8 <= pitch \
+                        <= typical_pitch * 1.3:
+                    return False
+        return True
 
     def _realign_meld_box(self, img, box, caishen_label, *,
                           typical_width, next_left=None):

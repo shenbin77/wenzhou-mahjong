@@ -672,3 +672,62 @@ def test_meld_realign_cannot_read_the_neighbour(monkeypatch):
     found = vision._realign_meld_box(
         img, box, None, typical_width=89, next_left=300)
     assert found is None
+
+
+def test_realign_delta_gate_rejects_marginal_gain(monkeypatch):
+    """增益门：重对齐候选虽过原阈值，但只比原框读数高 0.07 → 不采用。
+
+    多重搜索（多横移×多宽度取最优）会稀释原门槛的统计效力；用
+    「救回分数 − 原分数 ≥ 0.10」补这笔代价。假分类器把分数压在
+    0.80+0.07×fill：最对准的裁框 fill=1.0 得 0.87，原诊断分 0.80，
+    增益 0.07 不足 → 调度层必须保持原弃权。
+    """
+    vision = make_vision()
+
+    def fake_classify(crop, caishen_label=None):
+        fill = float(crop.mean()) / 200.0 if crop.size else 0.0
+        accepted = fill >= 0.95
+        return {"accepted": accepted, "tile_id": 67 if accepted else None,
+                "label": "bai", "score": round(0.80 + 0.07 * fill, 3),
+                "margin": 0.6 if accepted else 0.05,
+                "reason": "accepted" if accepted else "low_score"}
+
+    monkeypatch.setattr(vision, "classify_crop", fake_classify)
+    box = (92, 50, 154, 164)
+    vision.last_meld_boxes = [list(box), list(box), list(box)]
+    vision.detection_diagnostics = {"meld_groups": [3]}
+    vision.meld_diagnostics = [
+        {"accepted": False, "reason": "low_score", "score": 0.80,
+         "label": "bai", "tile_id": None, "box": list(box),
+         "region": "exposed"},
+        {"accepted": True, "reason": "accepted", "score": 0.95,
+         "label": "bai", "tile_id": 67, "box": list(box),
+         "region": "exposed"},
+        {"accepted": True, "reason": "accepted", "score": 0.95,
+         "label": "bai", "tile_id": 67, "box": list(box),
+         "region": "exposed"},
+    ]
+    vision._realign_failed_meld_boxes(
+        _shifted_blank_image(), None, typical_width=89,
+        next_left={box: 300})
+    first = vision.meld_diagnostics[0]
+    assert first["accepted"] is False
+    assert first["score"] == 0.80
+    assert first["reason"] == "low_score"
+
+
+def test_meld_group_geometry_ok_bands():
+    """组级几何门：整齐间距通过；重叠/间距离谱必须否决。"""
+    ok = TileVision._meld_group_geometry_ok
+    good = [(0, (100, 0, 189, 10)), (1, (192, 0, 281, 10)),
+            (2, (284, 0, 373, 10))]
+    assert ok(good, typical_width=89, typical_pitch=92) is True
+    overlapped = [(0, (100, 0, 189, 10)), (1, (150, 0, 239, 10)),
+                  (2, (284, 0, 373, 10))]
+    assert ok(overlapped, typical_width=89, typical_pitch=92) is False
+    stretched = [(0, (100, 0, 189, 10)), (1, (192, 0, 281, 10)),
+                 (2, (420, 0, 509, 10))]
+    assert ok(stretched, typical_width=89, typical_pitch=92) is False
+    narrow = [(0, (100, 0, 150, 10)), (1, (192, 0, 281, 10)),
+              (2, (284, 0, 373, 10))]
+    assert ok(narrow, typical_width=89, typical_pitch=92) is False
