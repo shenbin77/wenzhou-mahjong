@@ -720,6 +720,27 @@ def test_refresh_view_renders_hand_advice_top3_and_visibility():
     assert calls[2][1] == ({"tile": 1},)
 
 
+def test_live_state_renders_ui_only_unknown_tiles_without_action_authority():
+    result = {
+        "status": "abstain",
+        "mode": "tea_2p",
+        "caishen": "s9",
+        "caishen_id": 49,
+        "reason": "识牌不完整，停止决策",
+        "display_hand_labels": ["w2"] * 8 + ["__autoplay_unrecognized__"] * 9,
+        "display_title": "暗牌确认中",
+        "display_reason": "已检测 17/17 个物理牌框；不会按残缺手牌算牌。",
+    }
+
+    state = LiveRefreshState().update(result, now=1.0)
+
+    assert len(state.hand_labels) == 17
+    assert state.hand_labels.count("__autoplay_unrecognized__") == 9
+    assert state.title == "暗牌确认中"
+    assert "不会按残缺手牌算牌" in state.reason
+    assert state.actionable is False
+
+
 def test_saved_bright_frame_renders_in_real_hidden_tk_window(tea_raw, log_dir):
     import time
     import tkinter as tk

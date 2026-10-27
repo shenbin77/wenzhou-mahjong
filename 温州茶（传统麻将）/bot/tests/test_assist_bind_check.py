@@ -626,7 +626,7 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
                 labels.append(label)
                 raw_index[label] = index
         assert labels == [
-            "打开下一个雷电辅助器", "房间号", "窗口置顶", "贴靠雷电窗口",
+            "打开下一个雷电辅助器", "房间号", "窗口置顶",
             "手动指定财神", "财神牌（茶）",
             "离线预检（旧截图）", "抓图并分析", "导入截图", "修正手牌并重算",
             "历史逐帧复核", "导入录像复核（每秒1帧）", "停止录像复核",

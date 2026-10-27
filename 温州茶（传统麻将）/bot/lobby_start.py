@@ -19,7 +19,7 @@ import numpy as np
 
 from player_identity import PlayerIdentity, detect_player_identity
 from session_watch import WatchState, classify_watch, detect_waiting_room
-from tile_vision import detect_hand
+from tile_vision import TileVision
 
 
 TEMPLATE_PATH = (
@@ -193,8 +193,10 @@ def game_started_evidence(image: np.ndarray | None) -> tuple[bool, dict]:
     watch = classify_watch(image)
     waiting = waiting_room_visual_evidence(image)
     try:
-        ok, encoded = cv2.imencode(".png", image)
-        hand = detect_hand(encoded.tobytes()) if ok else []
+        vision = TileVision()
+        concealed_count, _concealed_boxes = vision.count_tiles(image)
+        exposed_count = len(vision.last_meld_boxes or ())
+        physical_count = int(concealed_count) + int(exposed_count)
     except Exception as exc:  # configuration/vision faults remain visible
         return False, {
             "watch": watch.state.value,
@@ -205,12 +207,21 @@ def game_started_evidence(image: np.ndarray | None) -> tuple[bool, dict]:
     evidence = {
         "watch": watch.state.value,
         "start_button": waiting["matched"],
-        "hand_count": len(hand),
+        # Keep ``hand_count`` for existing ledgers while making its meaning
+        # explicit.  A mid-hand restart may already have melds, and a dimmed
+        # local hand may have valid physical boxes even when strict tile-label
+        # classification deliberately abstains.  The lobby bridge only needs
+        # proof that dealing happened; the normal follow/auto gates still
+        # re-read every tile before making a decision.
+        "hand_count": physical_count,
+        "concealed_count": int(concealed_count),
+        "exposed_box_count": int(exposed_count),
     }
     matched = (
         watch.state == WatchState.IN_GAME
         and not waiting["matched"]
-        and len(hand) in (16, 17)
+        and physical_count in (16, 17)
+        and exposed_count % 3 == 0
     )
     evidence["reason"] = "dealt_hand" if matched else "not_dealt"
     return matched, evidence

@@ -126,6 +126,58 @@ def test_execute_non_host_ready_animation_waits_for_real_deal(
     assert "等待房主" in result.detail
 
 
+def test_game_started_uses_physical_boxes_when_strict_labels_abstain(
+        monkeypatch):
+    """A dealt dark/uncertain hand must leave the waiting-room loop.
+
+    Tile identities are intentionally *not* trusted here.  The ordinary live
+    pipeline re-runs strict recognition before it may advise or click.
+    """
+    image = np.zeros((900, 1600, 3), np.uint8)
+    monkeypatch.setattr(
+        lobby_start, "classify_watch",
+        lambda _image: SimpleNamespace(state=WatchState.IN_GAME))
+    monkeypatch.setattr(
+        lobby_start, "waiting_room_visual_evidence",
+        lambda _image: {"matched": False})
+
+    class PhysicalHand:
+        last_meld_boxes = []
+
+        def count_tiles(self, _image):
+            return 17, [(index, 0, index + 1, 1) for index in range(17)]
+
+    monkeypatch.setattr(lobby_start, "TileVision", PhysicalHand)
+    matched, evidence = lobby_start.game_started_evidence(image)
+    assert matched is True
+    assert evidence["hand_count"] == 17
+    assert evidence["concealed_count"] == 17
+    assert evidence["exposed_box_count"] == 0
+
+
+def test_game_started_accepts_melded_physical_total(monkeypatch):
+    image = np.zeros((900, 1600, 3), np.uint8)
+    monkeypatch.setattr(
+        lobby_start, "classify_watch",
+        lambda _image: SimpleNamespace(state=WatchState.IN_GAME))
+    monkeypatch.setattr(
+        lobby_start, "waiting_room_visual_evidence",
+        lambda _image: {"matched": False})
+
+    class MeldedHand:
+        last_meld_boxes = [(0, 0, 1, 1)] * 3
+
+        def count_tiles(self, _image):
+            return 13, [(index, 0, index + 1, 1) for index in range(13)]
+
+    monkeypatch.setattr(lobby_start, "TileVision", MeldedHand)
+    matched, evidence = lobby_start.game_started_evidence(image)
+    assert matched is True
+    assert evidence["hand_count"] == 16
+    assert evidence["concealed_count"] == 13
+    assert evidence["exposed_box_count"] == 3
+
+
 def test_execute_post_click_uncertainty_is_terminal_and_never_retries(
         monkeypatch, tmp_path):
     _ready_patches(monkeypatch)

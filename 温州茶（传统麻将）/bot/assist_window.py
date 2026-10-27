@@ -60,7 +60,6 @@ from system_tray import (TRAY_ACTION_QUIT, TRAY_ACTION_RESTORE,
                          WindowsTrayIcon)
 from window_restore_signal import (acknowledge_control, consume_control,
                                    request_restore)
-from window_docking import DockFollower
 
 
 TEA_ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +108,77 @@ TILE_CHOICES = {
     f"{tile_name(vision_to_engine(tid))} ({label})": label
     for label, tid in TILE_IDS.items() if tid in TARGET_IDS
 }
+AUTOPLAY_UNKNOWN_TILE = "__autoplay_unrecognized__"
+
+
+def autoplay_hand_display(event: dict, analysis: dict) -> dict:
+    """Build UI-only evidence for a physically complete but unreadable hand.
+
+    Autoplay can safely see all 16/17 physical tile boxes while a dim/animated
+    frame only yields some tile identities.  Keep those two facts separate in
+    the main window: placeholders make the physical count visible, but are
+    never written back to ``hand``/``hand_ids`` and therefore cannot influence
+    the engine or click policy.
+    """
+    if not isinstance(event, dict) or not isinstance(analysis, dict):
+        return {}
+    turn_gate = event.get("turn_gate") or {}
+    evidence = turn_gate.get("evidence") or {}
+    try:
+        physical = int(evidence.get("physical_boxes") or 0)
+        accepted = int(evidence.get("accepted_tiles") or 0)
+    except (TypeError, ValueError):
+        return {}
+    if physical not in (16, 17) or accepted < 0 or accepted >= physical:
+        return {}
+
+    diagnostics = analysis.get("vision_diagnostics") or []
+    labels = [str(item.get("label")) for item in diagnostics
+              if item.get("accepted", True) and item.get("label")]
+    if not labels:
+        labels = [str(label) for label in (analysis.get("hand") or []) if label]
+    labels = labels[:physical]
+    placeholders = max(0, physical - len(labels))
+    display_labels = labels + [AUTOPLAY_UNKNOWN_TILE] * placeholders
+
+    kind = str(event.get("event") or "idle")
+    marker = event.get("bright_subset_cut") or event.get("single_bright_cut") or {}
+    if kind == "action":
+        title = "动作已验证"
+        progress = "已按亮牌安全通道完成点击并做点后验证"
+    elif marker.get("confirmed"):
+        title = "暗牌确认中"
+        progress = "亮牌范围已确认，正在复核算牌结果"
+    elif marker.get("hit"):
+        title = "暗牌确认中"
+        streak = int(marker.get("streak") or 0)
+        progress = f"亮牌范围正在独立帧确认（{streak}/2）"
+    else:
+        title = "暗牌确认中"
+        progress = "等待下一张清晰画面或亮牌安全通道"
+    reason = (
+        f"已检测 {physical}/{physical} 个物理牌框；牌面直读 "
+        f"{accepted}/{physical}，{physical - accepted} 张受压暗/动画影响；"
+        f"{progress}。不会按残缺手牌算牌。"
+    )
+    return {
+        "display_hand_labels": display_labels,
+        "display_hand_text": (
+            f"手牌：物理牌框 {physical}/{physical}；牌面直读 "
+            f"{accepted}/{physical}；待确认 {physical - accepted} 张"
+        ),
+        "display_title": title,
+        "display_reason": reason,
+    }
+
+
+def _native_main_window_visible() -> bool:
+    """Confirm that Windows published this process' assistant main window."""
+    if os.name != "nt":
+        return True
+    from app_entry import has_visible_main_window
+
+    return bool(has_visible_main_window(os.getpid()))
 
 
 def stacked_kong_summary(result: dict) -> str:
@@ -620,8 +690,6 @@ class TeaAssistWindow:
         self.caishen = tk.StringVar()
         self.caishen_title = tk.StringVar(value="财神：—")
         self.always_on_top = tk.BooleanVar(value=bool(state.get("topmost", True)))
-        self.dock_to_emulator = tk.BooleanVar(
-            value=bool(state.get("dock_to_emulator", True)))
         self.manual_caishen = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="选择玩法、绑定雷电设备；开始跟随会自动找位、坐下、凑齐后开局，再进入持续推荐。")
         self.hand = tk.StringVar(value="手牌：—")
@@ -682,14 +750,12 @@ class TeaAssistWindow:
         self._tray_started = False
         #: Guards :meth:`quit_app` against a second teardown pass.
         self._quitting = False
+        self._quit_completed = False
+        self._quit_poll_timer: str | None = None
         self._collapsed_geometry = format_window_geometry(width, height, x, y)
         self._collapsed_topmost = bool(state.get("topmost", True))
         self._restore_binding()
         self._build()
-        self._dock_follower = DockFollower(
-            self.root, self._profile_paths.serial,
-            on_manual_detach=self._on_manual_dock_detach)
-        self._dock_follower.set_enabled(self.dock_to_emulator.get())
         self._tray_started = self._system_tray.start()
         self._warn_when_adb_missing()
         self._refresh_binding_views()
@@ -943,9 +1009,6 @@ class TeaAssistWindow:
         self.menu.add_command(label="房间号", command=self._edit_room)
         self.menu.add_checkbutton(label="窗口置顶", variable=self.always_on_top,
                                   command=self._set_always_on_top)
-        self.menu.add_checkbutton(label="贴靠雷电窗口",
-                                  variable=self.dock_to_emulator,
-                                  command=self._on_dock_toggle)
         self.menu.add_separator()
         # 财神组：自动识别模板缺口的逃生门，保持原 radio 结构与门控语义。
         self.menu.add_checkbutton(label="手动指定财神", variable=self.manual_caishen,
@@ -1191,36 +1254,6 @@ class TeaAssistWindow:
             self.status.set("当前没有发现新的在线雷电；无需手填设备编号。")
         except Exception as exc:
             self.status.set(f"打开下一台雷电辅助器失败：{exc}")
-
-    def _persist_dock_preference(self) -> None:
-        state = load_window_state(self._geometry_file())
-        state["dock_to_emulator"] = bool(self.dock_to_emulator.get())
-        save_window_state(state, self._geometry_file())
-
-    def _on_dock_toggle(self) -> None:
-        follower = getattr(self, "_dock_follower", None)
-        enabled = bool(self.dock_to_emulator.get())
-        if follower is not None:
-            follower.set_enabled(enabled)
-        self._persist_dock_preference()
-        self.status.set(
-            "已开启贴靠：优先停靠雷电右侧，其次下方；屏幕受限时选择不遮挡的一侧。"
-            if enabled else "已关闭贴靠；辅助器窗口可独立移动。")
-
-    def _on_manual_dock_detach(self) -> None:
-        """A deliberate drag disables docking instead of pulling back."""
-        self.dock_to_emulator.set(False)
-        self._persist_dock_preference()
-        self.status.set("检测到手动拖开辅助器，已暂停贴靠；可在“更多”重新开启。")
-
-    def _poll_window_docking(self) -> None:
-        follower = getattr(self, "_dock_follower", None)
-        if follower is None:
-            return
-        try:
-            follower.tick()
-        except tk.TclError:
-            return
 
     def _edit_room(self) -> None:
         value = simpledialog.askstring("房间号（可空）", "房间号",
@@ -2725,15 +2758,31 @@ class TeaAssistWindow:
             except tk.TclError:
                 pass
 
-    def restore_from_floating_orb(self, _event=None) -> None:
-        """Restore geometry/topmost state and remove the mascot orb."""
+    def _restored_window_visible(self) -> bool:
+        """Require both Tk and the native Windows window list to see the UI."""
+        try:
+            self.root.update_idletasks()
+            state = str(self.root.state()).lower()
+            if state in {"withdrawn", "iconic"}:
+                return False
+            if not bool(self.root.winfo_viewable()):
+                return False
+        except (AttributeError, tk.TclError):
+            return False
+        return _native_main_window_visible()
+
+    def restore_from_floating_orb(self, _event=None) -> bool:
+        """Restore the main UI and return only after visibility is proven.
+
+        The orb is intentionally kept until the proof succeeds.  A failed
+        restore remains recoverable and cannot be acknowledged as visible.
+        """
         try:
             screen = (self.root.winfo_screenwidth(),
                       self.root.winfo_screenheight())
             geometry = restore_window_geometry(
                 getattr(self, "_collapsed_geometry", ""), screen)
             topmost = bool(getattr(self, "_collapsed_topmost", True))
-            self._destroy_floating_orb()
             if geometry is not None:
                 self.root.geometry(geometry)
                 self._collapsed_geometry = geometry
@@ -2742,8 +2791,18 @@ class TeaAssistWindow:
             self.root.attributes("-topmost", topmost)
             self.root.lift()
             self.root.focus_force()
-        except tk.TclError:
-            self._floating_orb = None
+            if not self._restored_window_visible():
+                status = getattr(self, "status", None)
+                if status is not None:
+                    status.set("主窗口恢复失败：窗口尚未真正显示，保留托盘与悬浮球。")
+                return False
+            self._destroy_floating_orb()
+            return True
+        except tk.TclError as exc:
+            status = getattr(self, "status", None)
+            if status is not None:
+                status.set(f"主窗口恢复失败：{exc}")
+            return False
 
     def _drain_system_tray_actions(self) -> bool:
         """Run queued tray commands on the Tk thread.
@@ -3023,6 +3082,52 @@ class TeaAssistWindow:
                 "当前是结算/模态画面，但没有合法「下一局」三重门；"
                 "可能为等待超时解散、末局或被遮挡页面，拒绝所有点击",
                 evidence=evidence)
+
+        # 显式重按“开始跟随/开启全自动”时，牌局可能仍在本把中。旧逻辑把
+        # 所有非结算帧都送去大厅找位，导致正在打牌的桌面被当成等候室并卡在
+        # start_button_geometry_rejected。这里只做零点击的正证据分流；真正接管
+        # 仍须重新通过 start() 里的本人身份、玩法和自动点击门禁。
+        try:
+            from lobby_start import waiting_room_visual_evidence
+            from mode_vision import visible_caishen_label
+            from session_watch import WatchState, classify_watch
+            from tile_vision import TileVision
+
+            watch = classify_watch(frame)
+            waiting = waiting_room_visual_evidence(frame)
+            mode_key, mode_detail = detect_table_mode(frame)
+            vision = TileVision()
+            concealed_count, physical_boxes = vision.count_tiles(frame)
+            exposed_count = len(vision.last_meld_boxes or ())
+            physical_total = int(concealed_count) + exposed_count
+            caishen = visible_caishen_label(frame)
+            in_game_evidence = {
+                "watch": watch.state.value,
+                "start_button": bool(waiting.get("matched")),
+                "mode": mode_key,
+                "mode_detail": mode_detail,
+                "caishen": caishen,
+                "concealed_count": int(concealed_count),
+                "exposed_box_count": exposed_count,
+                "physical_hand_count": physical_total,
+                "physical_hand_boxes": [list(map(int, box[:4]))
+                                        for box in (physical_boxes or ())],
+            }
+            if (watch.state == WatchState.IN_GAME
+                    and not waiting.get("matched")
+                    and mode_key == "tea_2p"
+                    and caishen is not None
+                    and physical_total in (16, 17)
+                    and exposed_count % 3 == 0):
+                return TransitionResult(
+                    "startup_in_game",
+                    "已确认当前仍在温州茶2人牌桌；零大厅点击，重读当下状态后接管",
+                    evidence={**(evidence or {}),
+                              "active_table": in_game_evidence})
+            evidence = {**(evidence or {}), "active_table": in_game_evidence}
+        except Exception as exc:  # noqa: BLE001 - 读不全就不走局中快捷分流
+            evidence = {**(evidence or {}), "active_table": {
+                "reason": f"active_table_probe_failed:{type(exc).__name__}:{exc}"}}
         return TransitionResult(
             "startup_not_settlement",
             "当前画面不是可续接的局间结算页，转入既有大厅/等候室门禁",
@@ -3285,6 +3390,15 @@ class TeaAssistWindow:
         # the old in-process contract for injected callers and older tests.
         if mode is None and not status.startswith("startup_"):
             mode = "full_auto"
+        if status == "startup_in_game":
+            self._transition_follow_pending = False
+            self._lobby_in_game_verified = True
+            self._round_transition_resume_mode = None
+            self.full_auto_status.set(reason)
+            # 不直接创建 BOT，也不继承旧识牌结果；沿既有 start() 重新读取
+            # 本人身份、玩法、财神和当前手牌，全部通过后才交出点击权。
+            self.start()
+            return
         if status == "startup_not_settlement":
             self._transition_follow_pending = False
             self._round_transition_resume_mode = None
@@ -3961,7 +4075,8 @@ class TeaAssistWindow:
         render_preview = getattr(self, "_render_live_frame", None)
         if render_preview is not None:
             render_preview(result)
-        hand_text = "手牌：" + (" ".join(state.hand_labels) or "未完整识别")
+        hand_text = str(result.get("display_hand_text") or (
+            "手牌：" + (" ".join(state.hand_labels) or "未完整识别")))
         kong_text = stacked_kong_summary(result)
         if kong_text:
             hand_text += f"；已识别明牌：{kong_text}"
@@ -4403,9 +4518,6 @@ class TeaAssistWindow:
         drain_tray = getattr(self, "_drain_system_tray_actions", None)
         if callable(drain_tray) and not drain_tray():
             return
-        poll_docking = getattr(self, "_poll_window_docking", None)
-        if callable(poll_docking):
-            poll_docking()
         now = time.perf_counter()
         source = getattr(self, "display_source", None)
         if source in OFFLINE_SOURCES:
@@ -4458,8 +4570,11 @@ class TeaAssistWindow:
                 acknowledge_control(request, ok=True, detail="ready")
                 return True
             if request.command == "restore":
-                self.restore_from_floating_orb()
-                acknowledge_control(request, ok=True, detail="restored")
+                restored = bool(self.restore_from_floating_orb())
+                acknowledge_control(
+                    request, ok=restored,
+                    detail=("restored" if restored
+                            else "主窗口尚未通过可见性复核"))
                 return True
             if request.command == "quit":
                 ok, detail = self._persist_quit_intent()
@@ -5023,6 +5138,7 @@ class TeaAssistWindow:
                     raw, Path(frame), result, mode="tea_2p", source="live")
             except OSError:
                 pass
+            result.update(autoplay_hand_display(event, result))
             self._show(result, time.perf_counter())
 
         loop = getattr(self, "_auto_loop", None)
@@ -5222,13 +5338,11 @@ class TeaAssistWindow:
             width, height, x, y = parsed
             topmost = (bool(getattr(self, "_collapsed_topmost", True))
                        if is_withdrawn else bool(self.always_on_top.get()))
-            dock_var = getattr(self, "dock_to_emulator", None)
-            dock_enabled = bool(dock_var.get()) if dock_var is not None else False
             state.update({
                 "geometry": format_window_geometry(width, height, x, y),
                 "x": x, "y": y, "w": width, "h": height,
                 "topmost": topmost,
-                "dock_to_emulator": dock_enabled,
+                "dock_to_emulator": False,
             })
         except tk.TclError:
             return
@@ -5256,26 +5370,29 @@ class TeaAssistWindow:
             return False, f"无法保存退出状态，已取消退出：{type(exc).__name__}: {exc}"
         return True, ""
 
-    def quit_app(self, *, intent_persisted: bool = False) -> bool:
-        """Really exit the assistant: stop work, flush logs, destroy the root.
+    def _poll_quit_auto_worker(self) -> None:
+        """Keep the Tk host alive until the autoplay Future really exits."""
+        self._quit_poll_timer = None
+        future = getattr(self, "_auto_future", None)
+        if future is not None and not future.done():
+            self._quit_poll_timer = self.root.after(
+                50, self._poll_quit_auto_worker)
+            return
+        if future is not None:
+            try:
+                future.result()
+            except Exception:
+                # Termination, not a successful result, is the teardown gate.
+                pass
+            self._auto_future = None
+        self._auto_loop = None
+        self.full_auto_running = False
+        self._finalize_quit()
 
-        Reached only through explicit entry points: the tray/orb context menu
-        and the main window's 更多 menu.
-        """
-        if getattr(self, "_quitting", False):
+    def _finalize_quit(self) -> bool:
+        """Destroy Tk only after autoplay has relinquished its worker."""
+        if getattr(self, "_quit_completed", False):
             return True
-        if not intent_persisted:
-            persisted, detail = self._persist_quit_intent()
-            if not persisted:
-                status = getattr(self, "status", None)
-                if status is not None:
-                    status.set(detail)
-                restore = getattr(self, "restore_from_floating_orb", None)
-                if callable(restore):
-                    restore()
-                return False
-        self._quitting = True
-        self._cancel_accepted_round_observation()
         self._destroy_floating_orb()
         tray = getattr(self, "_system_tray", None)
         if tray is not None:
@@ -5286,9 +5403,6 @@ class TeaAssistWindow:
             except tk.TclError:
                 pass
             self._adb_diagnostic_timer = None
-        self._suppress_review = True
-        self.stop()
-        self.stop_video_review()
         if getattr(self, "_auto_poll_timer", None) is not None:
             try:
                 self.root.after_cancel(self._auto_poll_timer)
@@ -5328,12 +5442,58 @@ class TeaAssistWindow:
                 for row in self.latency_log:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         self.executor.shutdown(wait=False, cancel_futures=True)
-        self.auto_executor.shutdown(wait=False, cancel_futures=True)
+        # No action-executor task may survive the Tk host.  The tracked
+        # autoplay Future is already done before this synchronous drain.
+        self.auto_executor.shutdown(wait=True, cancel_futures=True)
         check_executor = getattr(self, "_check_executor", None)
         if check_executor is not None:
             check_executor.shutdown(wait=False, cancel_futures=True)
+        self._quit_completed = True
         self.root.destroy()
         return True
+
+    def quit_app(self, *, intent_persisted: bool = False) -> bool:
+        """Revoke authority, then exit only after autoplay really stops."""
+        if getattr(self, "_quit_completed", False):
+            return True
+        if getattr(self, "_quitting", False):
+            # A second tray/menu event must not bypass the worker-exit gate.
+            return False
+        if not intent_persisted:
+            persisted, detail = self._persist_quit_intent()
+            if not persisted:
+                status = getattr(self, "status", None)
+                if status is not None:
+                    status.set(detail)
+                restore = getattr(self, "restore_from_floating_orb", None)
+                if callable(restore):
+                    restore()
+                return False
+        self._quitting = True
+        self._cancel_accepted_round_observation()
+        self._suppress_review = True
+        loop = getattr(self, "_auto_loop", None)
+        if loop is not None:
+            loop.request_stop("用户退出辅助器；等待当前动作验证完成")
+        self.stop()
+        self.stop_video_review()
+        future = getattr(self, "_auto_future", None)
+        if future is not None and not future.done():
+            status = getattr(self, "status", None)
+            if status is not None:
+                status.set("正在安全退出：等待全自动 worker 完成停手与证据落盘。")
+            self._quit_poll_timer = self.root.after(
+                50, self._poll_quit_auto_worker)
+            return False
+        if future is not None:
+            try:
+                future.result()
+            except Exception:
+                pass
+            self._auto_future = None
+        self._auto_loop = None
+        self.full_auto_running = False
+        return self._finalize_quit()
 
 
 #: Whether ``adb_runtime`` is importable in this checkout.  Importing the

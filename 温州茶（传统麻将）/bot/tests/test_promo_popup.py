@@ -41,6 +41,13 @@ from tap_executor import (  # noqa: E402
 #: 实机探针帧目录（``<仓库根>/_takeover/probe``）。
 PROBE_DIR = BOT_DIR.parent.parent / "_takeover" / "probe"
 
+# 用户 2026-10-27 指认的真实停手画面；弹窗本身出现在原生帧 16:34:21。
+USER_REPORTED_POPUP = (
+    BOT_DIR.parent / "采集" / "dev_auto_play" /
+    "ui_20261026_162126_emulator5554_玉姐" / "frames" /
+    "20261026_163421_316891_before_4364bf.png"
+)
+
 #: BOSS 原图 + 实机落点：1600x900 下关闭按钮中心实测 (1466,190)。
 EXPECTED_CENTER = (1466, 190)
 CENTER_TOLERANCE = 3
@@ -76,6 +83,25 @@ def test_popup_frame_publishes_close_center_at_measured_spot():
     x0, y0, x1, y1 = state.close_box
     assert x0 + 2 <= state.close_center[0] <= x1 - 2
     assert y0 + 2 <= state.close_center[1] <= y1 - 2
+
+
+@pytest.mark.skipif(
+    not USER_REPORTED_POPUP.is_file(),
+    reason="缺少用户指认的 16:34:21 促销弹窗原生帧",
+)
+def test_user_reported_stopped_popup_frame_is_actionable_by_current_detector():
+    image = cv2.imdecode(
+        np.fromfile(str(USER_REPORTED_POPUP), dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    state = read_promo_popup(image)
+
+    assert state.present is True
+    assert state.struct_ok is True
+    assert state.fingerprint_ok is True
+    assert state.close_center is not None, state.reason
+    assert abs(state.close_center[0] - EXPECTED_CENTER[0]) <= CENTER_TOLERANCE
+    assert abs(state.close_center[1] - EXPECTED_CENTER[1]) <= CENTER_TOLERANCE
 
 
 def test_popup_frame_ledger_is_json_serializable():

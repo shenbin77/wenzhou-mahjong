@@ -231,6 +231,26 @@ def test_button_and_old_summary_gone_means_accepted_waiting_not_halted():
     assert len(taps) == 1
 
 
+def test_verified_gameplay_rearms_same_local_round_for_next_settlement():
+    """A missed visual round reset must not block the following settlement."""
+    taps = []
+    wait = _waiting_peer_frame()
+    exe = _exe([_settle_frame(), _settle_frame(), wait, wait, wait], taps)
+
+    first = exe.attempt(round_no=4)
+
+    assert first.status == "accepted_waiting"
+    assert exe.attempt(round_no=4).status == "no_click"
+    assert exe.note_verified_gameplay(4) is True
+    assert exe.note_verified_gameplay(4) is False
+
+    exe._capture = Seq([_settle_frame(), _settle_frame(), _new_round_frame()])
+    second = exe.attempt(round_no=4)
+
+    assert second.status == "advanced"
+    assert len(taps) == 2
+
+
 def test_button_gone_but_old_summary_remains_is_still_uncertain():
     """只丢按钮不够：旧结算页仍在时必须 fail-closed。"""
     taps = []

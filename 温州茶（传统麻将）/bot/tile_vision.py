@@ -508,7 +508,8 @@ class TileVision:
         return len(ids) == 3 and cls._same_suit_run(ids)
 
     def _classify_detected_box(self, img, box, caishen_label, *,
-                               typical_width, next_left=None):
+                               typical_width, next_left=None,
+                               allow_dim_right_edge_retry=False):
         """Classify one detected box, repairing only a clipped blank tile.
 
         白板中间几乎没有墨迹，竖边检测偶尔会在右侧过早结束。只有原裁框明显
@@ -519,6 +520,26 @@ class TileVision:
         result = self.classify_crop(img[y0:y1, x0:x1],
                                     caishen_label=caishen_label)
         width = x1 - x0
+        # 只给多亮压暗补读器一个受限的几何复核：实机连续 23 帧里同一张
+        # 九条的右边界少 1px，原分 0.819996 仅因四舍五入前低于 0.82 被拒；
+        # 补 1px 后同一 top-1 升到 0.881145。阈值与模板都不改，只在原判
+        # low_score、分数紧邻门槛、右侧确有 1px 空位且重拍被正常阈值接受时
+        # 采用。普通识牌和副露识牌完全不走这条分支。
+        retry_limit = img.shape[1] if next_left is None else int(next_left)
+        if (allow_dim_right_edge_retry and self.dim_gain_all
+                and not result.get('accepted')
+                and result.get('reason') == 'low_score'
+                and result.get('label')
+                and float(result.get('score') or 0.0) >= self.min_score - .005
+                and x1 + 1 <= retry_limit):
+            retry = self.classify_crop(img[y0:y1, x0:x1 + 1],
+                                       caishen_label=caishen_label)
+            if (retry.get('accepted')
+                    and retry.get('label') == result.get('label')):
+                retry['reason'] = 'accepted_dim_right_edge_retry'
+                retry['original_box'] = list(box)
+                retry['original_score'] = result.get('score')
+                return retry, (x0, y0, x1 + 1, y1)
         if (result.get('accepted') or result.get('label') != 'bai'
                 or typical_width <= 0 or width >= typical_width * .80):
             return result, tuple(box)
@@ -785,7 +806,8 @@ class TileVision:
                 continue
             d, fixed_box = self._classify_detected_box(
                 img, box, label, typical_width=typical_width,
-                next_left=next_left.get(tuple(box)))
+                next_left=next_left.get(tuple(box)),
+                allow_dim_right_edge_retry=True)
             d['box'] = list(fixed_box)
             d['region'] = 'concealed'
             self.diagnostics.append(d)

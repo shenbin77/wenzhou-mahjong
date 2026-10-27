@@ -87,6 +87,11 @@ import cv2
 import numpy as np
 
 from action_guard import detect_action_ui
+from action_policy import (
+    TEMPLATE_STATUS_MATCHED,
+    match_button_glyph,
+    verified_claim_templates,
+)
 from claim_vision import (
     KIND_CANCEL,
     KIND_GOLD,
@@ -755,8 +760,8 @@ class TapExecutor:
             evidence.after = after
             metrics = self._target_column_metrics(before, after, box)
             evidence.first_click_metrics = metrics
-            claim_record["buttons_after"] = self._claim_buttons_record(
-                read_claims(after))
+            after_state = read_claims(after)
+            claim_record["buttons_after"] = self._claim_buttons_record(after_state)
             claim_record["action_ui_after"] = self._action_ui_evidence(after)
             if not metrics["changed"]:
                 # 同槽位新窗口：目标圆盘像素不变，但行动行以外已经推进
@@ -788,6 +793,24 @@ class TapExecutor:
                     b for b in still_there
                     if b.get("kind") == KIND_CANCEL
                 ]
+            if still_there and not same_slot_new_window and not allow_selection_cancel:
+                # 吃/碰/杠共用金色圆盘种类；成功点击后下一行动窗口可能把另一
+                # 个金盘放回同一槽位。只有“桌面已推进 + 前后中央字形均由生产
+                # 模板明确识别且动作已改变”同时成立，才认作新窗口。
+                wide = self._outside_action_row_metrics(before, after)
+                overlapping_after = [
+                    candidate for candidate in (after_state.buttons or ())
+                    if self._claim_point_in_box((x, y), candidate.box)
+                ]
+                glyph_transition = self._same_slot_action_transition(
+                    before, after, button, overlapping_after, label)
+                claim_record["same_slot_action_transition"] = {
+                    "outside_action_row": wide,
+                    "glyph": glyph_transition,
+                }
+                if wide.get("changed") and glyph_transition.get("changed"):
+                    claim_record["claim_result"] = "same_slot_new_window"
+                    same_slot_new_window = True
             if still_there and not same_slot_new_window:
                 raise TapUnverified(
                     f"行动行点击 ({x},{y}) 后目标圆盘仍实测存在于 "
@@ -809,8 +832,8 @@ class TapExecutor:
             # 语义级（真的碰成了/胡进结算了）本模块证明不了，绝不谎称。
             "semantic_verified": False,
             "semantic_verifier": "action_policy.verify_after_click",
-            "reason": (f"行动 {label} 已点击 ({x},{y})，目标圆盘区域画面已变化、"
-                       "目标圆盘已从画面消失（UI 响应确认）；语义级验证须由 "
+            "reason": (f"行动 {label} 已点击 ({x},{y})，行动窗口已发生可验证变化"
+                       "（UI 响应确认）；语义级验证须由 "
                        "action_policy.verify_after_click 完成"),
         }
         evidence.dump("clicked", outcome["reason"])
@@ -1793,6 +1816,56 @@ class TapExecutor:
         return [{"kind": button.kind, "box": list(button.box),
                  "center": list(button.center)}
                 for button in (state.buttons or ())]
+
+    @staticmethod
+    def _same_slot_action_transition(
+        before: np.ndarray,
+        after: np.ndarray,
+        before_button: ClaimButton,
+        after_buttons: Sequence[ClaimButton],
+        action: str,
+    ) -> dict:
+        """证明同一槽位已从刚点击的动作切换为另一个动作。
+
+        ``claim_vision`` 只能把吃/碰/杠都定位成金盘。实机里点中碰或吃后，
+        下一窗口的杠盘会立刻落到完全相同的槽位；仅按几何看会把新杠盘误判
+        成旧圆盘仍在。本判据额外要求前后两帧的中央字形都通过生产模板，且
+        前帧必须就是请求动作、后帧必须是不同动作。任一模板证据不足均保持
+        fail-closed。
+        """
+        canonical = {
+            "吃": "chi", "碰": "peng", "杠": "kong", "胡": "hu", "过": "pass",
+        }.get(str(action), str(action).lower())
+        evidence = {
+            "changed": False,
+            "requested_action": canonical,
+            "before": None,
+            "after": [],
+            "next_action": None,
+        }
+        try:
+            templates = verified_claim_templates()
+            if not templates:
+                evidence["reason"] = "no_verified_claim_templates"
+                return evidence
+            before_match = match_button_glyph(before, before_button, templates)
+            evidence["before"] = before_match
+            for candidate in after_buttons:
+                matched = match_button_glyph(after, candidate, templates)
+                evidence["after"].append(matched)
+                if (before_match.get("status") == TEMPLATE_STATUS_MATCHED
+                        and before_match.get("best") == canonical
+                        and matched.get("status") == TEMPLATE_STATUS_MATCHED
+                        and matched.get("best") != canonical):
+                    evidence["changed"] = True
+                    evidence["next_action"] = matched.get("best")
+                    evidence["reason"] = "verified_action_glyph_changed_in_same_slot"
+                    return evidence
+            evidence["reason"] = "action_glyph_transition_not_verified"
+            return evidence
+        except Exception as exc:  # noqa: BLE001 — 识别异常只能拒绝，不能放行
+            evidence["reason"] = f"glyph_verification_error:{type(exc).__name__}"
+            return evidence
 
     def _claim_record(
         self,

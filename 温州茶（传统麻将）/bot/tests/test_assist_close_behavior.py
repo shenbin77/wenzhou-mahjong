@@ -84,6 +84,11 @@ class _TearDownRoot:
     def __init__(self) -> None:
         self.cancelled = []
         self.destroyed = 0
+        self.scheduled = []
+
+    def after(self, delay, callback):
+        self.scheduled.append((delay, callback))
+        return f"after-{len(self.scheduled)}"
 
     def after_cancel(self, handle):
         self.cancelled.append(handle)
@@ -98,6 +103,64 @@ class _Executor:
 
     def shutdown(self, **kwargs):
         self.shutdowns.append(kwargs)
+
+
+class _RestoreRoot:
+    def __init__(self, *, viewable: bool) -> None:
+        self.viewable = viewable
+        self.geometry_value = None
+        self.updated = 0
+
+    def winfo_screenwidth(self):
+        return 1600
+
+    def winfo_screenheight(self):
+        return 900
+
+    def geometry(self, value):
+        self.geometry_value = value
+
+    def deiconify(self):
+        return None
+
+    def attributes(self, *_args):
+        return None
+
+    def lift(self):
+        return None
+
+    def focus_force(self):
+        return None
+
+    def update_idletasks(self):
+        self.updated += 1
+
+    def state(self):
+        return "normal"
+
+    def winfo_viewable(self):
+        return self.viewable
+
+
+class _PendingFuture:
+    def __init__(self) -> None:
+        self.finished = False
+        self.result_calls = 0
+
+    def done(self):
+        return self.finished
+
+    def result(self):
+        self.result_calls += 1
+        return {"stop_reason": "用户退出"}
+
+
+class _AutoLoop:
+    def __init__(self) -> None:
+        self.reasons = []
+
+    def request_stop(self, reason):
+        self.reasons.append(reason)
 
 
 class _Closable:
@@ -255,11 +318,68 @@ def test_structured_restore_acknowledges_after_window_is_restored(monkeypatch):
         assist_module, "acknowledge_control",
         lambda received, *, ok, detail="": events.append(
             ("ack", received, ok, detail)))
-    window.restore_from_floating_orb = lambda: events.append(("restore",))
+    window.restore_from_floating_orb = lambda: events.append(("restore",)) or True
 
     assert window._process_window_control() is True
     assert events[0] == ("restore",)
     assert events[1][0:3] == ("ack", request, True)
+
+
+def test_restore_failure_is_negative_ack_not_fake_success(monkeypatch):
+    window = _bare_window()
+    window.serial = _Value("emulator-5556")
+    request = SimpleNamespace(command="restore")
+    acknowledgements = []
+    monkeypatch.setattr(
+        assist_module, "consume_control", lambda serial: request)
+    monkeypatch.setattr(
+        assist_module, "acknowledge_control",
+        lambda received, *, ok, detail="": acknowledgements.append(
+            (received, ok, detail)))
+    window.restore_from_floating_orb = lambda: False
+
+    assert window._process_window_control() is True
+    assert acknowledgements == [
+        (request, False, "主窗口尚未通过可见性复核")]
+
+
+def test_restore_keeps_orb_until_tk_and_native_visibility_pass(monkeypatch):
+    window = _bare_window()
+    orb = _ExistingOrb()
+    window._floating_orb = orb
+    window.root = _RestoreRoot(viewable=False)
+    window._collapsed_geometry = "1180x860+10+10"
+    window._collapsed_topmost = True
+    window.always_on_top = _Value(True)
+    window.status = _Value()
+    monkeypatch.setattr(assist_module, "_native_main_window_visible",
+                        lambda: True)
+
+    assert window.restore_from_floating_orb() is False
+    assert orb.destroyed == 0
+    assert "尚未真正显示" in window.status.get()
+
+    window.root.viewable = True
+    assert window.restore_from_floating_orb() is True
+    assert orb.destroyed == 1
+
+
+def test_restore_rejects_tk_visible_when_native_window_is_still_hidden(
+        monkeypatch):
+    window = _bare_window()
+    orb = _ExistingOrb()
+    window._floating_orb = orb
+    window.root = _RestoreRoot(viewable=True)
+    window._collapsed_geometry = "1180x860+10+10"
+    window._collapsed_topmost = True
+    window.always_on_top = _Value(True)
+    window.status = _Value()
+    monkeypatch.setattr(assist_module, "_native_main_window_visible",
+                        lambda: False)
+
+    assert window.restore_from_floating_orb() is False
+    assert orb.destroyed == 0
+    assert "尚未真正显示" in window.status.get()
 
 
 def test_structured_ping_acknowledges_without_restoring_window(monkeypatch):
@@ -336,6 +456,12 @@ def _quit_ready_window(tmp_path) -> TeaAssistWindow:
     window.executor = _Executor()
     window.auto_executor = _Executor()
     window._check_executor = _Executor()
+    window._quit_completed = False
+    window._quit_poll_timer = None
+    window._auto_future = None
+    window._auto_loop = None
+    window.full_auto_running = False
+    window.status = _Value()
     window.embedded_follow_log = _Closable()
     window.follow_session_log = _Closable()
     window.stopped = 0
@@ -370,9 +496,12 @@ def test_quit_app_keeps_full_teardown_and_removes_tray(tmp_path):
     assert window.recorder_timer is None and window.ticker is None
     assert window.root.cancelled == [
         "adb", "auto", "check", "review", "recorder", "ticker"]
-    for executor in (window.executor, window.auto_executor,
-                     window._check_executor):
-        assert executor.shutdowns == [{"wait": False, "cancel_futures": True}]
+    assert window.executor.shutdowns == [
+        {"wait": False, "cancel_futures": True}]
+    assert window.auto_executor.shutdowns == [
+        {"wait": True, "cancel_futures": True}]
+    assert window._check_executor.shutdowns == [
+        {"wait": False, "cancel_futures": True}]
     assert window.root.destroyed == 1
     latency = window.session_dir / "live_latency.jsonl"
     rows = [json.loads(line) for line in
@@ -386,6 +515,33 @@ def test_quit_app_is_idempotent(tmp_path):
     window.quit_app()
     assert window.stopped == 1
     assert window._system_tray.stopped == 1
+    assert window.root.destroyed == 1
+
+
+def test_quit_keeps_tk_alive_until_auto_future_is_done(tmp_path):
+    window = _quit_ready_window(tmp_path)
+    future = _PendingFuture()
+    loop = _AutoLoop()
+    window._auto_future = future
+    window._auto_loop = loop
+    window.full_auto_running = True
+
+    assert window.quit_app() is False
+    assert window.root.destroyed == 0
+    assert loop.reasons == ["用户退出辅助器；等待当前动作验证完成"]
+    assert "等待全自动 worker" in window.status.get()
+    assert len(window.root.scheduled) == 1
+
+    # Repeated exit input cannot bypass the outstanding worker gate.
+    assert window.quit_app(intent_persisted=True) is False
+    assert window.root.destroyed == 0
+
+    future.finished = True
+    _delay, callback = window.root.scheduled.pop()
+    callback()
+
+    assert future.result_calls == 1
+    assert window._auto_future is None
     assert window.root.destroyed == 1
 
 

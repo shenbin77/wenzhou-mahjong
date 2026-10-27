@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import action_policy
 import auto_play_loop
 import full_auto_control
-from assist_window import TeaAssistWindow
+from assist_window import (AUTOPLAY_UNKNOWN_TILE, TeaAssistWindow,
+                           autoplay_hand_display)
 
 
 class Var:
@@ -22,6 +23,41 @@ class Var:
 
     def set(self, value):
         self.value = value
+
+
+def test_autoplay_underread_display_keeps_physical_count_without_guessing():
+    analysis = {
+        "status": "abstain",
+        "reason": "识牌不完整，停止决策",
+        "vision_diagnostics": [
+            {"accepted": True, "label": "w2"} for _ in range(8)
+        ],
+    }
+    event = {
+        "event": "idle",
+        "turn_gate": {"evidence": {
+            "physical_boxes": 17,
+            "accepted_tiles": 8,
+        }},
+        "bright_subset_cut": {"hit": True, "confirmed": False, "streak": 1},
+    }
+
+    display = autoplay_hand_display(event, analysis)
+
+    assert len(display["display_hand_labels"]) == 17
+    assert display["display_hand_labels"].count(AUTOPLAY_UNKNOWN_TILE) == 9
+    assert "物理牌框 17/17" in display["display_hand_text"]
+    assert "牌面直读 8/17" in display["display_hand_text"]
+    assert "不会按残缺手牌算牌" in display["display_reason"]
+    assert analysis.get("hand") is None and analysis.get("hand_ids") is None
+
+
+def test_autoplay_complete_read_needs_no_display_override():
+    event = {"turn_gate": {"evidence": {
+        "physical_boxes": 17,
+        "accepted_tiles": 17,
+    }}}
+    assert autoplay_hand_display(event, {"status": "advise"}) == {}
 
 
 class Button:

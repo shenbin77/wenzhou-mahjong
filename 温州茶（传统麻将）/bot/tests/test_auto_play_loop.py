@@ -2163,6 +2163,14 @@ DIM_GAIN_REAL_FRAMES = (
     / "ui_20261026_172351_emulator5554_玉姐" / "frames"
     / "20261026_173703_517647_before_65fe30.png",
 )
+DIM_GAIN_EDGE_DIR = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261027_095253_emulator5556_烘熊瞎" / "frames"
+)
+DIM_GAIN_EDGE_FRAMES = tuple(sorted(
+    path for path in DIM_GAIN_EDGE_DIR.glob("20261027_100*_before_*.png")
+    if "100032" <= path.name[9:15] <= "100125"
+))
 
 
 def _fake_subset(tile_ids, *, expected=17, hit=True, unresolved=False):
@@ -2219,6 +2227,33 @@ def test_dim_gain_real_frames_only_fill_hand_then_choose_inside_whitelist(
     assert loop._dim_gain_evidence["outcome"] == "advice"
     # 补读本身只产出受限建议；点击仍必须另走 fresh-frame/TapExecutor。
     assert tap.execute_calls == [] and tap.plan_calls == []
+
+
+@pytest.mark.skipif(
+    len(DIM_GAIN_EDGE_FRAMES) != 23,
+    reason="10:00:32-10:01:25 dim-edge real frames missing",
+)
+def test_dim_gain_right_edge_retry_recovers_all_23_real_frames_without_new_thresholds():
+    """实机暗牌：只补裁框右边 1px；0.82/0.055 与模板保持原样。"""
+    from tea_bot import _TEMPLATE_DIR
+    from tile_vision import TileVision
+
+    for path in DIM_GAIN_EDGE_FRAMES:
+        image = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+        vision = TileVision(template_dir=_TEMPLATE_DIR)
+        vision.dim_gain_all = True
+        hand = vision.recognize_hand(image, caishen_label="t5")
+
+        assert vision.min_score == pytest.approx(.82)
+        assert vision.min_margin == pytest.approx(.055)
+        assert vision.last_complete is True, path.name
+        assert len(hand) == 17, path.name
+        repaired = [d for d in vision.diagnostics
+                    if d.get("reason") == "accepted_dim_right_edge_retry"]
+        assert len(repaired) == 1, path.name
+        assert repaired[0]["label"] == "t9"
+        assert repaired[0]["original_box"] == [1206, 768, 1289, 891]
+        assert repaired[0]["box"] == [1206, 768, 1290, 891]
 
 
 @pytest.mark.skipif(
@@ -2669,6 +2704,38 @@ class FakeRoundTransition:
     def attempt(self, **kwargs):
         self.attempt_kwargs.append(kwargs)
         return self.outcome
+
+
+class RearmRoundTransition(FakeRoundTransition):
+    def __init__(self, outcome):
+        super().__init__(outcome)
+        self.rearmed = []
+
+    def note_verified_gameplay(self, round_no):
+        self.rearmed.append(round_no)
+        return True
+
+
+def test_verified_action_rearms_previous_round_transition_lock(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    transition = RearmRoundTransition(TransitionResult("no_click", "unused"))
+    loop._round_transition = transition
+
+    event = loop._event({"event": "action", "verified": True})
+
+    assert transition.rearmed == [loop.round.seq]
+    assert event["round_transition_rearmed"] is True
+
+
+def test_unverified_action_never_rearms_round_transition_lock(tmp_path):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    transition = RearmRoundTransition(TransitionResult("no_click", "unused"))
+    loop._round_transition = transition
+
+    event = loop._event({"event": "action", "verified": False})
+
+    assert transition.rearmed == []
+    assert "round_transition_rearmed" not in event
 
 
 def test_round_transition_transient_fresh_miss_keeps_loop_alive(tmp_path):

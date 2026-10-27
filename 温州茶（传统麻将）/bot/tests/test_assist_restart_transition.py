@@ -30,6 +30,11 @@ REAL_TABLE = (
     "ui_20261025_165115_emulator5556_玉姐" / "frames" /
     "20261025_165416_996466_before_29c49d.png"
 )
+REAL_STOPPED_MIDHAND = (
+    TEA_ROOT / "采集" / "dev_auto_play" /
+    "ui_20261027_101013_emulator5554_玉姐" / "frames" /
+    "20261027_103931_593362_after_claim_b6d2f2.png"
+)
 REAL_DISSOLVED = (
     TEA_ROOT / "采集" / "dev_auto_play" /
     "ui_20261026_170909_emulator5556_烘熊瞎" / "frames" /
@@ -110,7 +115,7 @@ def test_real_match_end_refuses_return_share_and_continue_buttons():
     assert taps == []
 
 
-def test_real_table_is_not_mistaken_for_restart_settlement():
+def test_real_table_without_visible_two_player_text_does_not_midhand_reattach():
     frame = _read(REAL_TABLE)
     taps = []
     executor = RoundTransitionExecutor(
@@ -122,7 +127,46 @@ def test_real_table_is_not_mistaken_for_restart_settlement():
     result = TeaAssistWindow._recover_startup_round_transition(executor)
 
     assert result.status == "startup_not_settlement"
+    assert result.evidence["active_table"]["mode"] is None
     assert taps == []
+
+
+def test_real_stopped_midhand_can_reattach_without_lobby_clicks():
+    frame = _read(REAL_STOPPED_MIDHAND)
+    taps = []
+    executor = RoundTransitionExecutor(
+        capture=Sequence([frame]),
+        tap=lambda x, y: taps.append((x, y)),
+        sleep=lambda _seconds: None,
+    )
+
+    result = TeaAssistWindow._recover_startup_round_transition(executor)
+
+    assert result.status == "startup_in_game"
+    assert result.evidence["active_table"]["mode"] == "tea_2p"
+    assert result.evidence["active_table"]["caishen"] is not None
+    assert result.evidence["active_table"]["concealed_count"] == 11
+    assert result.evidence["active_table"]["exposed_box_count"] == 6
+    assert result.evidence["active_table"]["physical_hand_count"] == 17
+    assert taps == []
+
+
+def test_startup_in_game_bypasses_lobby_and_reenters_normal_start_gates():
+    calls = []
+    window = TeaAssistWindow.__new__(TeaAssistWindow)
+    window._round_transition_resume_mode = "full_auto"
+    window._transition_follow_pending = False
+    window._lobby_in_game_verified = False
+    window.full_auto_status = SimpleNamespace(set=lambda value: calls.append(value))
+    window.start = lambda: calls.append("start")
+    window._begin_lobby_follow = lambda: calls.append("lobby")
+
+    window._on_round_transition_result(SimpleNamespace(
+        status="startup_in_game", reason="midhand"))
+
+    assert window._lobby_in_game_verified is True
+    assert "start" in calls
+    assert "lobby" not in calls
 
 
 def test_repeated_explicit_start_submits_only_one_recovery(tmp_path):

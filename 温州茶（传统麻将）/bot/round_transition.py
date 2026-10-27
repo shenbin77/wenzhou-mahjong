@@ -268,6 +268,23 @@ class RoundTransitionExecutor:
         self.clicks = 0
         self._clicked_rounds: set = set()
 
+    def note_verified_gameplay(self, round_no: Optional[int]) -> bool:
+        """Release one stale settlement lock after proven live gameplay.
+
+        ``round_no`` is only a local observation sequence.  A mid-session
+        round detector can miss the first dealt frame, so the next real hand
+        may keep the same local number.  In that case using the number as a
+        permanent dedupe key blocks the *next* settlement forever.  A
+        verified BOT gameplay action is stronger evidence: the old summary
+        has gone, a live hand existed, and the following summary is a new
+        click window.  Nothing weaker (animation, recognition, green table)
+        is allowed to release the lock.
+        """
+        if round_no is None or round_no not in self._clicked_rounds:
+            return False
+        self._clicked_rounds.remove(round_no)
+        return True
+
     # ------------------------------------------------------------------
     def _report(self, result: TransitionResult, round_no) -> TransitionResult:
         if self._report_dir is not None:

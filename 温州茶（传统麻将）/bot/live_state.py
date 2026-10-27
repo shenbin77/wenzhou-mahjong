@@ -244,10 +244,14 @@ class LiveRefreshState:
         self.last_frame_at = now
         mode = str(result.get("mode") or "")
         diagnostics = result.get("vision_diagnostics") or []
-        labels = [str(item.get("label")) for item in diagnostics
-                  if item.get("accepted", True) and item.get("label")]
-        if not labels:
-            labels = [str(label) for label in (result.get("hand") or []) if label]
+        display_labels = result.get("display_hand_labels")
+        if isinstance(display_labels, (list, tuple)):
+            labels = [str(label) for label in display_labels if label]
+        else:
+            labels = [str(item.get("label")) for item in diagnostics
+                      if item.get("accepted", True) and item.get("label")]
+            if not labels:
+                labels = [str(label) for label in (result.get("hand") or []) if label]
         candidates = tuple(dict(row) for row in (result.get("candidates") or [])[:3])
         caishen = result.get("caishen") or None
         caishen_source = result.get("caishen_source")
@@ -302,6 +306,10 @@ class LiveRefreshState:
             status = "abstain"
             title = "识别中"
             reason = str(result.get("reason") or "画面不可用")
+
+        if not actionable:
+            title = str(result.get("display_title") or title)
+            reason = str(result.get("display_reason") or reason)
 
         self.state = build(
             status, title, None if actionable else reason,

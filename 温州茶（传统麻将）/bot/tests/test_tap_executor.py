@@ -25,6 +25,16 @@ import tap_executor as tap_executor_module  # noqa: E402
 
 FRAME = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261023_201640"
          / "live" / "tea_2p" / "20261023_205409_557426_31fea1.png")
+SAME_SLOT_PENG_TO_KONG = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261027_095253_emulator5556_烘熊瞎" / "tap_probe"
+    / "20261027_101520_160030"
+)
+SAME_SLOT_CHI_TO_KONG = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261027_101735_emulator5556_烘熊瞎" / "tap_probe"
+    / "20261027_102719_646097"
+)
 
 
 @pytest.fixture(scope="module")
@@ -764,6 +774,48 @@ def test_claim_pass_accepts_new_window_in_same_slot(monkeypatch, tmp_path):
     data = _read_evidence(tmp_path)
     assert data["claim"]["claim_result"] == "same_slot_new_window"
     assert data["claim"]["same_slot_new_window"]["changed"] is True
+
+
+def test_claim_peng_accepts_verified_kong_window_in_same_slot(
+        monkeypatch, tmp_path):
+    """实机回归：碰已落定，同一槽位随即出现杠，不能误报“碰没点中”。"""
+    before = (SAME_SLOT_PENG_TO_KONG / "before.png").read_bytes()
+    after = (SAME_SLOT_PENG_TO_KONG / "after.png").read_bytes()
+    fake = FakeAdb([before, after])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    outcome = executor.execute_claim((1241, 597), action="peng")
+
+    assert outcome["executed"] is True
+    assert outcome["same_slot_new_window"] is True
+    assert len(fake.tap_commands()) == 1
+    data = _read_evidence(tmp_path)
+    transition = data["claim"]["same_slot_action_transition"]
+    assert transition["outside_action_row"]["changed"] is True
+    assert transition["glyph"]["changed"] is True
+    assert transition["glyph"]["before"]["best"] == "peng"
+    assert transition["glyph"]["next_action"] == "kong"
+
+
+def test_claim_chi_accepts_verified_kong_window_in_same_slot(
+        monkeypatch, tmp_path):
+    """第二张实机停手图：吃已点中，随即同槽出现杠，不能中断动作链。"""
+    before = (SAME_SLOT_CHI_TO_KONG / "before.png").read_bytes()
+    after = (SAME_SLOT_CHI_TO_KONG / "after.png").read_bytes()
+    fake = FakeAdb([before, after])
+    executor = _claim_executor(monkeypatch, fake, tmp_path)
+
+    outcome = executor.execute_claim((1242, 598), action="chi")
+
+    assert outcome["executed"] is True
+    assert outcome["same_slot_new_window"] is True
+    assert len(fake.tap_commands()) == 1
+    data = _read_evidence(tmp_path)
+    transition = data["claim"]["same_slot_action_transition"]
+    assert transition["outside_action_row"]["changed"] is True
+    assert transition["glyph"]["changed"] is True
+    assert transition["glyph"]["before"]["best"] == "chi"
+    assert transition["glyph"]["next_action"] == "kong"
 
 
 def test_claim_pass_rejects_when_nothing_changed_anywhere(

@@ -3900,6 +3900,18 @@ class AutoPlayLoop:
                 "action_id",
                 f"{serial}:r{round_seq}:t{tick}:{uuid.uuid4().hex[:12]}",
             )
+            # A verified in-hand action after an accepted ``下一局`` proves
+            # that the old settlement is over.  The visual round detector can
+            # miss the first dealt frame and leave ``round.seq`` unchanged;
+            # without releasing that *old* local-key lock the next settlement
+            # is falsely rejected forever as a duplicate.
+            if event.get("verified") is True:
+                note_gameplay = getattr(
+                    getattr(self, "_round_transition", None),
+                    "note_verified_gameplay", None)
+                if callable(note_gameplay):
+                    event["round_transition_rearmed"] = bool(
+                        note_gameplay(getattr(self.round, "seq", None)))
         event.setdefault("card_count", self.card_count)
         event["consecutive_errors"] = self.consecutive_errors
         self._write_event(event)
