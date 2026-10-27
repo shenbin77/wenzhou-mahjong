@@ -244,6 +244,9 @@ def strip_claim_marker(crop):
 
     Returns ``(crop, found)``. ``crop`` is the untouched input object when no
     marker is present, so callers without a marker see identical pixels.
+    Only observed yellow pixels are opaque-triangle evidence. Dilating this
+    paint mask can erase adjacent visible information and change a readable
+    glyph; leave that unproven halo untouched in both marker layouts.
     """
     if crop is None or crop.size == 0 or crop.ndim != 3:
         return crop, False
@@ -292,8 +295,7 @@ def strip_claim_marker(crop):
             return crop, False
         out = crop.copy()
         tri = np.zeros((h, w), bool)
-        tri[:band_h] = cv2.dilate(
-            yellow.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        tri[:band_h] = yellow
         lower = crop[band_h:]
         face_pixels = lower[hsv[band_h:, :, 2] >= background*.95]
         if not len(face_pixels):
@@ -314,7 +316,7 @@ def strip_claim_marker(crop):
     out[inside] = np.clip(out[inside].astype(np.float32)/factor, 0, 255).astype(np.uint8)
     # The opaque triangle hides whatever is below it: paint plain face colour.
     tri = np.zeros((h, w), bool)
-    tri[:band_h] = cv2.dilate(yellow.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    tri[:band_h] = yellow
     lower = crop[band_h:]
     face_pixels = lower[hsv[band_h:, :, 2] >= background*.95]
     if len(face_pixels):

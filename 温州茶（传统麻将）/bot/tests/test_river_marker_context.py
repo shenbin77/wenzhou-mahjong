@@ -149,7 +149,16 @@ def test_default_meld_preprocessing_is_retained_and_bank_sharing_has_no_context_
     assert default.allow_claim_marker is True
     assert specialized.allow_claim_marker is False
     assert default._matrix is specialized._matrix
-    assert old["claim_marker"] is True and old["accepted"] is False
+    assert old["claim_marker"] is True
+    # A cleanup improvement may make this observed nine readable in both
+    # contexts. Preserve preprocessing and isolation, not the old rejection.
+    assert old["label"] == "w9" and old["tile_id"] == 9
+    assert old["accepted"] is True
+    assert old["score"] >= default.min_score
+    assert old["margin"] >= default.min_margin
+    explicit_cleaned = specialized.classify_crop(cleaned)
+    assert {key: value for key, value in old.items()
+            if key != "claim_marker"} == explicit_cleaned
     assert fixed["label"] == "w9" and fixed["accepted"] is True
     assert "claim_marker" not in fixed
     # Calling the river classifier must not change the hand/meld instance.
