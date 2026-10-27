@@ -2155,6 +2155,20 @@ class TeaAssistWindow:
             "身份待核验", "核验超时", level="wait")
         self._refresh_binding_views()
 
+    def _abort_identity_round(self) -> None:
+        """授权撤销（stop）时终止进行中的全自动身份回合。
+
+        在途读数以 generation+1 作废，pending/预算清空；已排定的 retry
+        回调与迟到的 match 都不得再取得点击权。状态文案由 stop 路径
+        自己写入，这里只做静默拆解；非 full_auto 回合不受影响。"""
+        if getattr(self, "_identity_pending", None) != "full_auto":
+            return
+        self._identity_generation = getattr(self, "_identity_generation", 0) + 1
+        self._identity_state = "unknown"
+        self._identity_pending = None
+        self._identity_retry_deadline = None
+        self._identity_verified_at = None
+
     def _retry_identity_check(self) -> None:
         """核验回合内的续读：三件防呆（仍在核验中/上下文未变/预算未过）。"""
         self._identity_retry_timer = None
@@ -3587,6 +3601,7 @@ class TeaAssistWindow:
                 or getattr(self, "_round_transition_resume_mode", None) == "full_auto"
                 or getattr(self, "_accepted_round_observing", False)
                 or getattr(self, "_accepted_round_observe_timer", None) is not None):
+            self._abort_identity_round()
             if getattr(self, "full_auto_running", False):
                 self._stop_full_auto()
             else:
@@ -3656,6 +3671,8 @@ class TeaAssistWindow:
 
     def _begin_lobby_follow(self) -> None:
         """Guarded tea-2p seating/start; never recharge/wash/cut/leave."""
+        self._lobby_invitation_authority = Event()
+        self._lobby_invitation_authority.set()
         self._lobby_active = True
         self._lobby_in_game_verified = False
         self._lobby_room_cards = None
@@ -3683,7 +3700,8 @@ class TeaAssistWindow:
                 self.session_dir,
                 allow_start=True,
                 expected_account=self.account.get().strip(),
-                room_cards_snapshot=getattr(self, "_lobby_room_cards", None))
+                room_cards_snapshot=getattr(self, "_lobby_room_cards", None),
+                invitation_authorized=self._lobby_invitation_authority.is_set)
         if not self._lobby_future.done():
             self._schedule_lobby_probe(120)
             return
@@ -3727,6 +3745,9 @@ class TeaAssistWindow:
         self._schedule_lobby_probe(1200)
 
     def _stop_lobby_follow(self) -> None:
+        authority = getattr(self, "_lobby_invitation_authority", None)
+        if authority is not None:
+            authority.clear()
         self._lobby_active = False
         self._lobby_in_game_verified = False
         self._lobby_future = None

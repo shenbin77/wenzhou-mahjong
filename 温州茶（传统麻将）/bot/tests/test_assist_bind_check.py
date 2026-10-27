@@ -789,6 +789,45 @@ def test_identity_rebegin_does_not_extend_expired_inflight_check():
     assert starts == []
 
 
+def test_identity_stop_aborts_round_and_late_match_cannot_start():
+    """控制 stop 后身份回合必须终止：已排定的 retry 不得续读，
+    迟到的 match 不得把全自动复活（Codex 终审 P0-2）。"""
+    import full_auto_control
+    starts = []
+    window, calls = _identity_sequence_window([_UNKNOWN, _MATCH], starts)
+    window._full_auto_wanted = True
+    window._auto_resume_pending = True
+    window.full_auto_status = window.status  # fixture lacks this var
+    window._begin_identity_check(pending="full_auto")
+    window._poll_identity_check()  # unknown -> checking + retry scheduled
+    assert window._identity_state == "checking"
+    assert len(calls) == 1
+    old_generation = window._identity_generation
+
+    original = full_auto_control.consume_command
+    full_auto_control.consume_command = lambda serial: "stop"
+    try:
+        window._poll_full_auto_control()
+    finally:
+        full_auto_control.consume_command = original
+
+    assert window._identity_pending is None
+    assert window._identity_state == "unknown"
+    assert window._full_auto_wanted is False
+    assert window._identity_generation > old_generation
+
+    # 已排定的 retry 回调触发：不得续读。
+    window._retry_identity_check()
+    assert len(calls) == 1
+
+    # 在途 match 以旧 generation 迟到：poll 消费后不得启动。
+    window._identity_events.put(
+        (old_generation, window._identity_context(), _MATCH, 0.1))
+    window._poll_identity_check()
+    assert starts == []
+    assert window._full_auto_wanted is False
+
+
 def test_identity_retry_budget_not_refreshed_by_rebegin():
     """重复 begin（控制轮询重入）不许刷新预算，防无限重试。"""
     starts = []
