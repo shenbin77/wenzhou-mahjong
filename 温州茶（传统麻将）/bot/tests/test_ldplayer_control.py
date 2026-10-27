@@ -92,6 +92,8 @@ def test_offline_instance_is_verified_launched_and_waited():
     assert [call[0] for call in commands] == [
         ["ldconsole.exe", "list2"],
         ["ldconsole.exe", "launch", "--index", "1"],
+        ["ldconsole.exe", "adb", "--index", "1", "--command",
+         "get-state"],
     ]
     assert all(call[1]["shell"] is False for call in commands)
     if os.name == "nt":
@@ -116,6 +118,103 @@ def test_running_instance_waits_for_adb_without_duplicate_launch():
     assert result.status == "started"
     assert result.command_sent is False
     assert [call[0] for call in commands] == [["ldconsole.exe", "list2"]]
+
+
+def test_exact_instance_adb_probe_registers_expected_serial():
+    commands = []
+    online = set()
+
+    def runner(argv, **kwargs):
+        commands.append((argv, kwargs))
+        if argv[1] == "list2":
+            return _done(_list2(index=0, running=1))
+        if argv[1] == "adb":
+            online.add("emulator-5554")
+            return _done(stdout=b"device\r\n")
+        pytest.fail(f"unexpected command: {argv}")
+
+    result = start_and_wait_online(
+        "emulator-5554", ldconsole="ldconsole.exe",
+        online_serials=lambda: online, runner=runner,
+        sleep=lambda _s: None)
+
+    assert result.status == "started"
+    assert result.command_sent is False
+    assert [call[0] for call in commands] == [
+        ["ldconsole.exe", "list2"],
+        ["ldconsole.exe", "adb", "--index", "0", "--command",
+         "get-state"],
+    ]
+    assert all(call[1]["shell"] is False for call in commands)
+
+
+def test_probe_device_output_cannot_bypass_exact_global_serial_gate():
+    commands = []
+    clock = iter([0.0, 0.0, 0.0, 1.0, 1.0])
+
+    def runner(argv, **kwargs):
+        commands.append(argv)
+        if argv[1] == "list2":
+            return _done(_list2(index=0, running=1))
+        return _done(stdout=b"device\r\n")
+
+    result = start_and_wait_online(
+        "emulator-5554", ldconsole="ldconsole.exe",
+        online_serials=lambda: ["emulator-5556"], timeout_s=0.5,
+        runner=runner, sleep=lambda _s: None,
+        monotonic=lambda: next(clock, 1.0))
+
+    assert result.status == "error"
+    assert "stdout=device" in result.detail
+    assert commands.count(
+        ["ldconsole.exe", "adb", "--index", "0", "--command",
+         "get-state"]) == 1
+    assert not any(command[1] == "launch" for command in commands)
+
+
+def test_early_probe_failure_is_reported_if_global_serial_never_arrives():
+    clock = iter([0.0, 0.0, 0.0, 1.0, 1.0])
+
+    def runner(argv, **kwargs):
+        if argv[1] == "list2":
+            return _done(_list2(index=0, running=1))
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    result = start_and_wait_online(
+        "emulator-5554", ldconsole="ldconsole.exe",
+        online_serials=lambda: [], timeout_s=0.5,
+        runner=runner, sleep=lambda _s: None,
+        monotonic=lambda: next(clock, 1.0))
+
+    assert result.status == "error"
+    assert "TimeoutExpired" in result.detail
+    assert "探测失败1次" in result.detail
+    assert "最近一次官方ADB探测" in result.detail
+
+
+def test_earlier_probe_failure_survives_later_device_probe_on_timeout():
+    commands = []
+    clock = iter([0.0, 0.0, 0.0, 0.2, 0.31, 0.31, 1.0, 1.0])
+
+    def runner(argv, **kwargs):
+        commands.append(argv)
+        if argv[1] == "list2":
+            return _done(_list2(index=0, running=1))
+        probe_number = sum(command[1] == "adb" for command in commands)
+        if probe_number == 1:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return _done(stdout=b"device\r\n")
+
+    result = start_and_wait_online(
+        "emulator-5554", ldconsole="ldconsole.exe",
+        online_serials=lambda: [], timeout_s=0.8,
+        adb_probe_interval_s=0.1, runner=runner,
+        sleep=lambda _s: None, monotonic=lambda: next(clock, 1.0))
+
+    assert result.status == "error"
+    assert "最近一次官方ADB探测：exit=0, stdout=device" in result.detail
+    assert "探测失败1次" in result.detail
+    assert "TimeoutExpired" in result.detail
 
 
 @pytest.mark.parametrize("serial", [
@@ -204,6 +303,7 @@ def test_wait_timeout_does_not_send_second_launch():
     assert result.command_sent is True
     assert "不会重复启动" in result.detail
     assert commands.count(["ldconsole.exe", "launch", "--index", "0"]) == 1
+    assert not any(command[1] == "adb" for command in commands)
 
 
 def test_subprocess_timeout_is_returned_as_error():

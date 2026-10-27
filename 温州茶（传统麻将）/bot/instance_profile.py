@@ -103,6 +103,37 @@ def discover_profile_bindings(base: Path) -> dict[str, dict]:
     return found
 
 
+def discover_reserved_profile_serials(base: Path) -> set[str]:
+    """Return every serial reserved by binding or assistant lifecycle state.
+
+    Instance-copy safety uses this stricter inventory instead of the forgiving
+    binding reader.  If a persisted file cannot be mapped back to its exact
+    serial-specific path, callers cannot prove a future LDPlayer index is free
+    of old assistant state, so the inventory fails closed without deleting it.
+    """
+    profiles = Path(base) / "profiles"
+    if not profiles.is_dir():
+        return set()
+    reserved: set[str] = set()
+    for filename, attribute in (
+            ("binding.json", "binding"),
+            ("assistant_state.json", "assistant_state")):
+        for candidate in profiles.glob(f"*/{filename}"):
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+                serial = safe_serial(
+                    raw.get("serial") if isinstance(raw, dict) else "")
+                expected = getattr(profile_paths(Path(base), serial), attribute)
+                if candidate.resolve() != expected.resolve():
+                    raise ValueError("profile path does not match serial")
+            except (OSError, UnicodeError, ValueError, TypeError) as exc:
+                raise RuntimeError(
+                    f"存在无法核验的辅助器配置 {candidate}；拒绝复制雷电实例"
+                ) from exc
+            reserved.add(serial)
+    return reserved
+
+
 def read_assistant_desired_open(base: Path, serial: str, *,
                                 default: bool = False) -> bool:
     """Read validated lifecycle intent; only a missing legacy file uses default."""

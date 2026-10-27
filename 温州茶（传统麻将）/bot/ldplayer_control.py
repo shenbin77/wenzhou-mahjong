@@ -20,6 +20,9 @@ from human_input_monitor import parse_ldplayer_list2
 
 _EMULATOR_SERIAL = re.compile(r"^emulator-(\d+)$")
 _FIRST_LDPLAYER_PORT = 5554
+_DEFAULT_START_TIMEOUT_S = 120.0
+_ADB_PROBE_INTERVAL_S = 2.0
+_ADB_PROBE_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -76,13 +79,47 @@ def _online_now(online_serials: Callable[[], Collection[str]],
     return serial in {str(value) for value in online_serials()}
 
 
+def _probe_instance_adb(runner, console: str, index: int) -> tuple[bool, str]:
+    """Ask LDPlayer's exact instance to expose ADB; never treats it as proof.
+
+    ``ldconsole adb ... get-state`` is read-only, but on a cold boot it also
+    makes LDPlayer register the instance with the shared ADB server.  The
+    caller must still require the expected ``emulator-*`` serial from its
+    independent global detector before declaring success.
+    """
+
+    command = [
+        console, "adb", "--index", str(index), "--command", "get-state",
+    ]
+    try:
+        completed = _run_console(
+            runner, command, timeout_s=_ADB_PROBE_TIMEOUT_S)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+    def snippet(value) -> str:
+        if isinstance(value, bytes):
+            text = value.decode(errors="replace")
+        else:
+            text = str(value or "")
+        return " ".join(text.split())[:160] or "-"
+
+    return (int(getattr(completed, "returncode", 1)) == 0
+            and snippet(getattr(completed, "stdout", b"")).lower() == "device"), (
+        f"exit={int(getattr(completed, 'returncode', 1))}, "
+        f"stdout={snippet(getattr(completed, 'stdout', b''))}, "
+        f"stderr={snippet(getattr(completed, 'stderr', b''))}"
+    )
+
+
 def start_and_wait_online(
         serial: str,
         *,
         ldconsole: str | Path,
         online_serials: Callable[[], Collection[str]],
-        timeout_s: float = 45.0,
+        timeout_s: float = _DEFAULT_START_TIMEOUT_S,
         poll_interval_s: float = 0.5,
+        adb_probe_interval_s: float = _ADB_PROBE_INTERVAL_S,
         runner=None,
         sleep=None,
         monotonic=None,
@@ -152,19 +189,46 @@ def start_and_wait_online(
                 )
 
         deadline = now() + max(0.0, float(timeout_s))
+        next_adb_probe = now()
+        last_adb_probe = "尚未执行"
+        adb_probe_failures = 0
+        last_adb_probe_failure = "无"
         while True:
             if _online_now(online_serials, value):
                 detail = ("雷电已启动且 ADB 已上线" if command_sent else
                           "雷电进程已存在，ADB 已上线")
                 return LdPlayerStartResult(
                     "started", value, index, command_sent, detail)
-            if now() >= deadline:
+            current = now()
+            if current >= deadline:
                 action = "启动命令已发送" if command_sent else "雷电进程已存在"
                 return LdPlayerStartResult(
                     "error", value, index, command_sent,
-                    f"{action}，但等待 ADB 上线超时；不会重复启动",
+                    f"{action}，但等待 ADB 上线超时；不会重复启动；"
+                    f"最近一次官方ADB探测：{last_adb_probe}；"
+                    f"探测失败{adb_probe_failures}次，最近失败："
+                    f"{last_adb_probe_failure}",
                 )
-            pause(max(0.01, float(poll_interval_s)))
+            if current >= next_adb_probe:
+                probe_ok, last_adb_probe = _probe_instance_adb(
+                    run, console, index)
+                if not probe_ok:
+                    adb_probe_failures += 1
+                    last_adb_probe_failure = last_adb_probe
+                # The official probe is only a bounded readiness nudge.  It
+                # cannot substitute for the exact global serial gate.
+                if _online_now(online_serials, value):
+                    detail = ("雷电已启动且 ADB 已上线" if command_sent else
+                              "雷电进程已存在，ADB 已上线")
+                    return LdPlayerStartResult(
+                        "started", value, index, command_sent, detail)
+                current = now()
+                next_adb_probe = current + max(
+                    0.1, float(adb_probe_interval_s))
+                if current >= deadline:
+                    continue
+            remaining = max(0.01, deadline - current)
+            pause(min(max(0.01, float(poll_interval_s)), remaining))
     except Exception as exc:
         return LdPlayerStartResult(
             "error", value, index, command_sent,

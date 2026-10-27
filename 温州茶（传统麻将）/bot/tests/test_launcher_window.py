@@ -880,6 +880,129 @@ def test_online_or_unknown_row_never_submits_ldplayer_start():
     launcher._start_offline_device("emulator-5558")
 
 
+def _instance_admin_launcher(*, online=False, pid=None):
+    launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
+    launcher.root = SimpleNamespace()
+    launcher._closed = False
+    launcher._busy_serials = set()
+    launcher._rows = [manager.DeviceRow(
+        "emulator-5556", "烘熊瞎", "tea_2p", pid, online=online)]
+    launcher._buttons = {"emulator-5556": [
+        SimpleNamespace(configure=lambda **_kwargs: None)]}
+    launcher.status_var = SimpleNamespace(set=lambda _value: None)
+    return launcher
+
+
+def test_copy_instance_requires_explicit_name_and_confirmation(monkeypatch):
+    launcher = _instance_admin_launcher()
+    prompts = []
+    confirmations = []
+    monkeypatch.setattr(
+        manager.simpledialog, "askstring",
+        lambda title, prompt, **kwargs:
+            prompts.append((title, prompt, kwargs)) or "wzmj-copy-1")
+    monkeypatch.setattr(
+        manager.messagebox, "askyesno",
+        lambda title, message, **kwargs:
+            confirmations.append((title, message, kwargs)) or True)
+    submitted = []
+    launcher._submit = lambda *args: submitted.append(args)
+
+    launcher._request_copy_instance("emulator-5556")
+    launcher._request_copy_instance("emulator-5556")
+
+    assert len(prompts) == 1
+    assert "辅助器不会继承昵称" in confirmations[0][1]
+    assert "全自动" in confirmations[0][1]
+    assert submitted == [(
+        "copy-instance:emulator-5556", manager.copy_instance_for_admin,
+        "emulator-5556", "wzmj-copy-1")]
+
+
+def test_cancelled_copy_never_submits(monkeypatch):
+    launcher = _instance_admin_launcher()
+    monkeypatch.setattr(
+        manager.simpledialog, "askstring", lambda *_args, **_kwargs: None)
+    launcher._submit = lambda *_args: pytest.fail("cancelled copy submitted")
+
+    launcher._request_copy_instance("emulator-5556")
+
+    assert launcher._busy_serials == set()
+
+
+def test_remove_first_inspects_then_confirms_exact_identity(monkeypatch):
+    launcher = _instance_admin_launcher()
+    submitted = []
+    launcher._submit = lambda *args: submitted.append(args)
+    prompts = []
+    monkeypatch.setattr(
+        manager.messagebox, "askyesno",
+        lambda title, message, **kwargs:
+            prompts.append((title, message, kwargs)) or True)
+
+    launcher._request_remove_instance("emulator-5556")
+    assert submitted == [(
+        "inspect-remove:emulator-5556", manager.describe_instance_for_admin,
+        "emulator-5556")]
+
+    exact = SimpleNamespace(
+        title="ld-copy", serial="emulator-5556", index=1, running=False)
+    launcher._finish_remove_inspection("emulator-5556", exact, None)
+
+    assert "实例名：ld-copy" in prompts[0][1]
+    assert "设备：emulator-5556" in prompts[0][1]
+    assert "index：1" in prompts[0][1]
+    assert "不可撤销" in prompts[0][1]
+    assert "昵称和设置会保留" in prompts[0][1]
+    assert submitted[-1] == (
+        "remove-instance:emulator-5556", manager.remove_instance_for_admin,
+        "emulator-5556")
+
+
+@pytest.mark.parametrize(("online", "pid", "running"), [
+    (True, None, False),
+    (False, 2200, False),
+    (False, None, True),
+])
+def test_remove_running_online_or_assistant_row_never_prompts_or_submits(
+        monkeypatch, online, pid, running):
+    launcher = _instance_admin_launcher(online=online, pid=pid)
+    launcher._busy_serials.add("emulator-5556")
+    monkeypatch.setattr(
+        manager.messagebox, "askyesno",
+        lambda *_args, **_kwargs: pytest.fail("unsafe delete confirmation"))
+    launcher._submit = lambda *_args: pytest.fail("unsafe delete submitted")
+
+    exact = SimpleNamespace(
+        title="victim", serial="emulator-5556", index=1,
+        running=running)
+    launcher._finish_remove_inspection("emulator-5556", exact, None)
+
+    assert launcher._busy_serials == set()
+
+
+def test_admin_completions_refresh_once_without_changing_profile_state():
+    launcher = _instance_admin_launcher()
+    refreshes = []
+    launcher.refresh = lambda **kwargs: refreshes.append(kwargs)
+    launcher._busy_serials.add("emulator-5556")
+    copied = SimpleNamespace(created=SimpleNamespace(
+        title="copy-1", serial="emulator-5558", index=2))
+
+    launcher._finish_instance_copy("emulator-5556", copied, None)
+
+    assert launcher._rows[0].account == "烘熊瞎"
+    assert "未创建辅助器绑定" in refreshes[0]["status_after"]
+    launcher._busy_serials.add("emulator-5556")
+    removed = SimpleNamespace(removed=SimpleNamespace(
+        title="victim", serial="emulator-5556", index=1))
+
+    launcher._finish_instance_remove("emulator-5556", removed, None)
+
+    assert launcher._rows[0].account == "烘熊瞎"
+    assert "昵称与设置仍保留" in refreshes[1]["status_after"]
+
+
 def test_identical_refresh_rows_do_not_rebuild_widgets():
     launcher = manager.MahjongLauncher.__new__(manager.MahjongLauncher)
     launcher._rendered_rows = None

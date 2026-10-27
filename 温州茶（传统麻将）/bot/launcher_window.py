@@ -13,16 +13,21 @@ import tkinter as tk
 from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
-from tkinter import ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from adb_runtime import resolve_adb_path_cached
 from app_entry import (choose_existing_for_restore, existing_window_pids,
                        pid_owns_assist_window)
 from harvest_tea import DEFAULT_SERIAL
 from instance_profile import (discover_profile_bindings,
+                              discover_reserved_profile_serials,
                               read_assistant_desired_open, safe_serial,
                               set_assistant_desired_open)
 from launch_multi import connected_devices, start_window
+from ldplayer_instance_admin import (copy_ldplayer_instance,
+                                     describe_ldplayer_instance,
+                                     MUTATION_OUTCOME_UNKNOWN_MARKER,
+                                     remove_ldplayer_instance)
 from window_restore_signal import (consume_restore, request_control,
                                    request_restore, wait_for_ack)
 
@@ -182,6 +187,33 @@ def start_ldplayer_and_assistant(serial: str) -> tuple[str, str, int]:
         raise RuntimeError(result.detail or f"{serial} 雷电启动失败")
     action, pid = open_or_restore(serial)
     return result.status, action, pid
+
+
+def describe_instance_for_admin(serial: str):
+    """Read the exact official instance identity for the confirmation UI."""
+    return describe_ldplayer_instance(serial, ldconsole=LDCONSOLE_PATH)
+
+
+def copy_instance_for_admin(serial: str, new_name: str):
+    """Copy one exact instance without creating any assistant state."""
+    return copy_ldplayer_instance(
+        serial,
+        new_name,
+        ldconsole=LDCONSOLE_PATH,
+        online_serials=lambda: connected_devices(_adb_path()),
+        assistant_serials=lambda: existing_window_pids(DEFAULT_SERIAL),
+        reserved_serials=lambda: discover_reserved_profile_serials(PROFILE_BASE),
+    )
+
+
+def remove_instance_for_admin(expected):
+    """Remove one stopped instance while preserving assistant settings."""
+    return remove_ldplayer_instance(
+        expected,
+        ldconsole=LDCONSOLE_PATH,
+        online_serials=lambda: connected_devices(_adb_path()),
+        assistant_serials=lambda: existing_window_pids(DEFAULT_SERIAL),
+    )
 
 
 def _revoke_stale_click_authority(serial: str) -> None:
@@ -384,8 +416,11 @@ class MahjongLauncher:
         self._refreshing = False
         self._closed = False
         self._rows: list[DeviceRow] = []
-        self._buttons: dict[str, list[tk.Button]] = {}
+        self._buttons: dict[str, list[tk.Widget]] = {}
+        self._admin_buttons: dict[str, tk.Menubutton] = {}
         self._busy_serials: set[str] = set()
+        self._instance_admin_transaction: str | None = None
+        self._instance_admin_fused_reason: str | None = None
         self._activation_pending = True
         self._rendered_rows: tuple[DeviceRow, ...] | None = None
         self._post_refresh_status: str | None = None
@@ -501,6 +536,180 @@ class MahjongLauncher:
 
     def _open_device(self, serial: str) -> None:
         self._operate_device(serial, "open")
+
+    def _set_serial_busy(self, serial: str, busy: bool) -> None:
+        if busy:
+            self._busy_serials.add(serial)
+        else:
+            self._busy_serials.discard(serial)
+        state = "disabled" if busy else "normal"
+        for button in self._buttons.get(serial, []):
+            button.configure(state=state)
+        self._sync_instance_admin_buttons()
+
+    def _sync_instance_admin_buttons(self) -> None:
+        globally_blocked = bool(
+            getattr(self, "_instance_admin_transaction", None)
+            or getattr(self, "_instance_admin_fused_reason", None))
+        for serial, button in getattr(self, "_admin_buttons", {}).items():
+            button.configure(state=(
+                "disabled" if globally_blocked or serial in self._busy_serials
+                else "normal"))
+
+    def _begin_instance_admin(self, serial: str, operation: str) -> bool:
+        fused = getattr(self, "_instance_admin_fused_reason", None)
+        if fused:
+            self.status_var.set(
+                f"实例管理已安全熔断：{fused}；重启管理器前禁止重复操作。")
+            return False
+        active = getattr(self, "_instance_admin_transaction", None)
+        if active:
+            self.status_var.set(
+                f"实例管理事务 {active} 正在执行；不会并发提交 {serial}。")
+            return False
+        if serial in self._busy_serials:
+            self.status_var.set(f"{serial} 正在处理中；不会重复提交操作。")
+            return False
+        self._instance_admin_transaction = f"{operation}:{serial}"
+        self._set_serial_busy(serial, True)
+        self._sync_instance_admin_buttons()
+        return True
+
+    def _end_instance_admin(self, serial: str) -> None:
+        self._instance_admin_transaction = None
+        self._set_serial_busy(serial, False)
+        self._sync_instance_admin_buttons()
+
+    def _fuse_instance_admin(self, serial: str, reason: str) -> None:
+        self._instance_admin_transaction = None
+        self._instance_admin_fused_reason = reason
+        self._set_serial_busy(serial, False)
+        self._sync_instance_admin_buttons()
+
+    @staticmethod
+    def _admin_outcome_unknown(error: str | None) -> bool:
+        return bool(error and MUTATION_OUTCOME_UNKNOWN_MARKER in error)
+
+    @staticmethod
+    def _display_admin_error(error: str) -> str:
+        return error.replace(MUTATION_OUTCOME_UNKNOWN_MARKER, "").strip()
+
+    def _request_copy_instance(self, serial: str) -> None:
+        if self._closed:
+            return
+        if (getattr(self, "_instance_admin_fused_reason", None)
+                or getattr(self, "_instance_admin_transaction", None)
+                or serial in self._busy_serials):
+            self._begin_instance_admin(serial, "copy")
+            return
+        suffix = serial.removeprefix("emulator-") or "instance"
+        default_name = f"wzmj-copy-{suffix}-{time.strftime('%H%M%S')}"
+        new_name = simpledialog.askstring(
+            "复制雷电实例",
+            "输入新实例名称（仅英文字母、数字、点、横线、下划线）：",
+            initialvalue=default_name,
+            parent=self.root,
+        )
+        if new_name is None:
+            return
+        confirmed = messagebox.askyesno(
+            "确认复制雷电实例",
+            f"将从 {serial} 复制一个雷电实例：\n\n"
+            f"新名称：{new_name.strip()}\n\n"
+            "雷电会复制实例内部的应用和登录数据；辅助器不会继承昵称、"
+            "跟随、全自动或窗口生命周期授权。是否继续？",
+            parent=self.root,
+        )
+        if not confirmed:
+            self.status_var.set(f"{serial}：已取消复制。")
+            return
+        if not self._begin_instance_admin(serial, "copy"):
+            return
+        self.status_var.set(f"正在复制 {serial}；请勿重复点击或关闭多开器…")
+        self._submit(
+            f"copy-instance:{serial}", copy_instance_for_admin,
+            serial, new_name)
+
+    def _request_remove_instance(self, serial: str) -> None:
+        if self._closed:
+            return
+        if not self._begin_instance_admin(serial, "remove"):
+            return
+        self.status_var.set(f"正在核验 {serial} 的雷电实例身份…")
+        self._submit(
+            f"inspect-remove:{serial}", describe_instance_for_admin, serial)
+
+    def _finish_remove_inspection(self, serial: str, result,
+                                  error: str | None) -> None:
+        if error:
+            self._end_instance_admin(serial)
+            self.status_var.set(f"{serial}：不能删除：{error}")
+            return
+        if self._closed:
+            return
+        row = next((item for item in self._rows
+                    if item.serial == serial), None)
+        if result.running or (row is not None and (row.online or row.pid is not None)):
+            self._end_instance_admin(serial)
+            self.status_var.set(
+                f"{serial}：雷电或辅助器仍在运行，请先明确退出后再删除。")
+            return
+        confirmed = messagebox.askyesno(
+            "永久删除雷电实例",
+            "即将永久删除以下雷电实例及其内部应用、登录与用户数据：\n\n"
+            f"实例名：{result.title}\n设备：{result.serial}\n"
+            f"index：{result.index}\n\n"
+            "辅助器保存的昵称和设置会保留，不会静默删除。"
+            "此操作不可撤销，确认删除？",
+            parent=self.root,
+        )
+        if not confirmed:
+            self._end_instance_admin(serial)
+            self.status_var.set(f"{serial}：已取消删除。")
+            return
+        self.status_var.set(
+            f"正在删除 {result.title}（{serial} / index {result.index}）…")
+        self._submit(
+            f"remove-instance:{serial}", remove_instance_for_admin, result)
+
+    def _finish_instance_copy(self, serial: str, result,
+                              error: str | None) -> None:
+        if error:
+            detail = self._display_admin_error(error)
+            if self._admin_outcome_unknown(error):
+                self._fuse_instance_admin(serial, detail)
+                message = (
+                    f"{serial}：复制状态未知，实例管理已熔断：{detail}")
+            else:
+                self._end_instance_admin(serial)
+                message = f"{serial}：复制未完成：{detail}"
+        else:
+            self._end_instance_admin(serial)
+            created = result.created
+            message = (
+                f"复制完成：{created.title}（{created.serial} / index "
+                f"{created.index}）。未创建辅助器绑定；请手工启动新实例、"
+                "刷新设备并填写昵称。")
+        self.refresh(status_after=message)
+
+    def _finish_instance_remove(self, serial: str, result,
+                                error: str | None) -> None:
+        if error:
+            detail = self._display_admin_error(error)
+            if self._admin_outcome_unknown(error):
+                self._fuse_instance_admin(serial, detail)
+                message = (
+                    f"{serial}：删除状态未知，实例管理已熔断：{detail}")
+            else:
+                self._end_instance_admin(serial)
+                message = f"{serial}：删除未完成：{detail}"
+        else:
+            self._end_instance_admin(serial)
+            removed = result.removed
+            message = (
+                f"已删除雷电实例 {removed.title}（{serial} / index "
+                f"{removed.index}）；辅助器昵称与设置仍保留。")
+        self.refresh(status_after=message)
 
     def _reset_recovery_state(self, serial: str) -> None:
         getattr(self, "_recovery_failures", {}).pop(serial, None)
@@ -991,7 +1200,7 @@ class MahjongLauncher:
                      font=("Microsoft YaHei UI", 9)).pack(side="left", padx=12)
             controls = tk.Frame(panel, bg=SURFACE)
             controls.pack(side="right")
-            buttons: list[tk.Button] = []
+            buttons: list[tk.Widget] = []
             if can_start_offline_device(row):
                 button = tk.Button(
                     controls, text="启动雷电＋辅助器",
@@ -1039,6 +1248,25 @@ class MahjongLauncher:
             else:
                 tk.Label(controls, text="配置保留中", bg=SURFACE, fg=MUTED,
                          font=("Microsoft YaHei UI", 9)).pack(side="left")
+            more = tk.Menubutton(
+                controls, text="更多", bg=SURFACE_LIGHT, fg=TEXT,
+                activebackground="#465168", activeforeground=TEXT,
+                relief="flat", padx=10, pady=8,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                state=("disabled" if row.serial in self._busy_serials
+                       else "normal"))
+            menu = tk.Menu(more, tearoff=False)
+            menu.add_command(
+                label="复制雷电",
+                command=lambda serial=row.serial:
+                    self._request_copy_instance(serial))
+            menu.add_command(
+                label="删除雷电实例",
+                command=lambda serial=row.serial:
+                    self._request_remove_instance(serial))
+            more.configure(menu=menu)
+            more.pack(side="left", padx=(5, 0))
+            buttons.append(more)
             self._buttons[row.serial] = buttons
 
     def _render_if_changed(self, rows: list[DeviceRow]) -> bool:
@@ -1105,6 +1333,15 @@ class MahjongLauncher:
             elif tag.startswith("recover:"):
                 serial = tag.split(":", 1)[1]
                 self._finish_assistant_recovery(serial, result, error)
+            elif tag.startswith("inspect-remove:"):
+                serial = tag.split(":", 1)[1]
+                self._finish_remove_inspection(serial, result, error)
+            elif tag.startswith("copy-instance:"):
+                serial = tag.split(":", 1)[1]
+                self._finish_instance_copy(serial, result, error)
+            elif tag.startswith("remove-instance:"):
+                serial = tag.split(":", 1)[1]
+                self._finish_instance_remove(serial, result, error)
             elif any(tag.startswith(f"{operation}:")
                      for operation in ("open", "quit", "restart")):
                 operation, serial = tag.split(":", 1)

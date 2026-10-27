@@ -8,7 +8,8 @@ import sys
 import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from instance_profile import (discover_profile_bindings, profile_paths,
+from instance_profile import (discover_profile_bindings,
+                              discover_reserved_profile_serials, profile_paths,
                               read_assistant_desired_open,
                               read_binding_for_serial, safe_serial,
                               set_assistant_desired_open)
@@ -155,6 +156,33 @@ def test_network_adb_serial_makes_windows_safe_profile(tmp_path):
     assert ":" not in p.binding.parent.name
     assert p.serial=="127.0.0.1:5555"
     assert p.binding != profile_paths(tmp_path,"127.0.0.1_5555").binding
+
+
+def test_reserved_profile_serials_include_binding_and_lifecycle_only_state(
+        tmp_path):
+    binding = profile_paths(tmp_path, "emulator-5554")
+    binding.binding.parent.mkdir(parents=True)
+    binding.binding.write_text(json.dumps({
+        "serial": "emulator-5554", "account": "玉姐", "mode": "tea_2p",
+    }), encoding="utf-8")
+    lifecycle = profile_paths(tmp_path, "emulator-5558")
+    lifecycle.assistant_state.parent.mkdir(parents=True)
+    lifecycle.assistant_state.write_text(json.dumps({
+        "schema": "assistant_state/v1", "serial": "emulator-5558",
+        "desired_open": False,
+    }), encoding="utf-8")
+
+    assert discover_reserved_profile_serials(tmp_path) == {
+        "emulator-5554", "emulator-5558"}
+
+
+def test_reserved_profile_serials_fail_closed_on_unmappable_state(tmp_path):
+    corrupt = tmp_path / "profiles" / "unknown" / "assistant_state.json"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="无法核验的辅助器配置"):
+        discover_reserved_profile_serials(tmp_path)
 
 
 def test_migrating_legacy_binding_does_not_resurrect_after_unbind(tmp_path,monkeypatch):
