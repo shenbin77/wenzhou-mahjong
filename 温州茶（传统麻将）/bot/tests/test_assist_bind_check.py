@@ -648,3 +648,110 @@ def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
         assert "玩家昵称为空" in window.status.get()
     finally:
         window.close()
+
+
+# ------------------------------------------------- identity bounded retry
+import time as _time
+
+
+def _identity_sequence_window(results, starts):
+    """在 _identity_window 上换序列 reader，并模拟全自动意图已置位。"""
+    window = _identity_window(results[0], starts)
+    remaining = list(results)
+    calls = []
+
+    def reader(_serial, _account):
+        calls.append(1)
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    window._identity_reader = reader
+    window._start_full_auto = lambda: starts.append("full_auto")
+    window._full_auto_wanted = True
+    window._auto_resume_pending = False
+    return window, calls
+
+
+def _pump_retry(window):
+    retries = [cb for delay, cb in window.root.after_calls
+               if delay == assist_window.IDENTITY_RETRY_INTERVAL_MS]
+    assert retries, "应已排定身份重试"
+    window.root.after_calls.clear()
+    retries[-1]()
+
+
+_UNKNOWN = PlayerIdentity("unknown", "玉姐", None, 0.0, 0.0,
+                          "左下本人昵称未显示或被遮挡")
+_MATCH = PlayerIdentity("match", "玉姐", "玉姐", 1.0, .45,
+                        "画面本人昵称已核验为“玉姐”")
+_MISMATCH = PlayerIdentity("mismatch", "玉姐", "拾则", .99, .44,
+                           "配置玩家是“玉姐”，画面本人是“拾则”")
+
+
+def test_identity_unknown_retries_then_match_starts_full_auto():
+    """单帧 unknown 不再是终局：回合内续读，读中即按 pending 接管。"""
+    starts = []
+    window, calls = _identity_sequence_window(
+        [_UNKNOWN, _UNKNOWN, _MATCH], starts)
+    window._begin_identity_check(pending="full_auto")
+    window._poll_identity_check()
+    assert window._identity_state == "checking"
+    assert window._full_auto_wanted is True
+    assert "自动重试中" in window.status.get()
+    _pump_retry(window)
+    window._poll_identity_check()
+    assert window._identity_state == "checking"
+    _pump_retry(window)
+    window._poll_identity_check()
+    assert window._identity_gate_ok()
+    assert starts == ["full_auto"]
+    assert len(calls) == 3
+
+
+def test_identity_mismatch_never_retries():
+    """自信认出他人是硬安全失败：零重试、意图立即撤销。"""
+    starts = []
+    window, calls = _identity_sequence_window([_MISMATCH], starts)
+    window._begin_identity_check(pending="full_auto")
+    window._poll_identity_check()
+    assert window._identity_state == "mismatch"
+    assert window._full_auto_wanted is False
+    assert not [1 for delay, _cb in window.root.after_calls
+                if delay == assist_window.IDENTITY_RETRY_INTERVAL_MS]
+    assert len(calls) == 1
+
+
+def test_identity_retry_timeout_fails_closed():
+    """预算耗尽仍未读到：终局 fail-closed + 明确超时文案。"""
+    starts = []
+    window, calls = _identity_sequence_window([_UNKNOWN], starts)
+    window._begin_identity_check(pending="full_auto")
+    window._poll_identity_check()
+    assert window._identity_state == "checking"
+    window._identity_retry_deadline = _time.perf_counter() - 1
+    _pump_retry(window)
+    assert window._identity_state == "unknown"
+    assert window._full_auto_wanted is False
+    assert "核验超时" in window.status.get()
+    assert len(calls) == 1
+
+
+def test_identity_retry_budget_not_refreshed_by_rebegin():
+    """重复 begin（控制轮询重入）不许刷新预算，防无限重试。"""
+    starts = []
+    window, _calls = _identity_sequence_window([_UNKNOWN], starts)
+    window._begin_identity_check(pending="full_auto")
+    deadline = window._identity_retry_deadline
+    assert deadline is not None
+    window._begin_identity_check(pending="full_auto")
+    assert window._identity_retry_deadline == deadline
+
+
+def test_identity_retry_aborts_when_context_changes():
+    """账号上下文变了，排定的重试不得复活旧核验。"""
+    starts = []
+    window, calls = _identity_sequence_window([_UNKNOWN], starts)
+    window._begin_identity_check(pending="full_auto")
+    window._poll_identity_check()
+    window.account.set("烘熊瞎")
+    _pump_retry(window)
+    assert len(calls) == 1

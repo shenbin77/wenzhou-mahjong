@@ -91,6 +91,8 @@ _WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^\s*(?P<width>\d+)x(?P<height>\d+)"
     r"(?P<x>[+-]\d+)(?P<y>[+-]\d+)\s*$")
 STALE_SECONDS = 3.0
+IDENTITY_RETRY_INTERVAL_MS = 2000
+IDENTITY_RETRY_BUDGET_SECONDS = 60.0
 OFFLINE_SOURCES = {"offline_preflight", "imported_image", "mp4_1fps", "manual_correction"}
 OFFLINE_NOTICES = {
     "offline_preflight": "旧截图结果：不能用于当前对局，仅供检查识牌链路。",
@@ -2047,6 +2049,8 @@ class TeaAssistWindow:
         self._identity_detected = None
         self._identity_verified_at = None
         self._identity_pending = None
+        self._identity_retry_deadline = None
+        self._identity_retry_attempts = 0
 
     def _identity_gate_ok(self, *, max_age_seconds: float | None = None) -> bool:
         matched = (
@@ -2062,6 +2066,15 @@ class TeaAssistWindow:
     def _begin_identity_check(self, pending: str | None = None) -> None:
         """Read the local-seat nickname before any advice or click authority."""
         context = self._identity_context()
+        if pending == "full_auto":
+            # 全自动接管是无人值守路径：给本轮核验一个有界重试预算。
+            # 只在无预算/预算过期时新建，重复 begin 不许刷新（防无限重试）。
+            now = time.perf_counter()
+            deadline = getattr(self, "_identity_retry_deadline", None)
+            if deadline is None or now > deadline:
+                self._identity_retry_deadline = (
+                    now + IDENTITY_RETRY_BUDGET_SECONDS)
+                self._identity_retry_attempts = 0
         if getattr(self, "_identity_state", "unchecked") == "checking" \
                 and getattr(self, "_identity_key", None) == context:
             if pending:
@@ -2089,7 +2102,16 @@ class TeaAssistWindow:
         self._set_operational_status(
             "玩家核验", "只读抓图，不发送点击", level="wait")
         self._refresh_binding_views()
+        self._submit_identity_read(context, generation)
+        root = getattr(self, "root", None)
+        if root is not None:
+            self._identity_poll_timer = root.after(
+                120, self._poll_identity_check)
+
+    def _submit_identity_read(self, context, generation) -> None:
+        """提交一次身份读到核验执行器；结果以事件回投 _identity_events。"""
         account, serial = context
+        events = self._identity_events
         reader = getattr(self, "_identity_reader", None)
         if not callable(reader):
             reader = read_player_identity
@@ -2114,6 +2136,39 @@ class TeaAssistWindow:
                 "身份核验执行器不可用"), 0))
         else:
             executor.submit(work)
+
+    def _retry_identity_check(self) -> None:
+        """核验回合内的续读：三件防呆（仍在核验中/上下文未变/预算未过）。"""
+        self._identity_retry_timer = None
+        if getattr(self, "_identity_state", None) != "checking":
+            return
+        deadline = getattr(self, "_identity_retry_deadline", None)
+        if deadline is None:
+            return
+        if time.perf_counter() > deadline:
+            # 预算耗尽：与 poll 终局同语义 fail-closed 收尾。
+            pending = getattr(self, "_identity_pending", None)
+            self._identity_state = "unknown"
+            self._identity_pending = None
+            self._identity_retry_deadline = None
+            if pending == "full_auto" \
+                    or getattr(self, "_auto_resume_pending", False):
+                self._full_auto_wanted = False
+                self._auto_resume_pending = False
+            self.status.set(
+                "玩家身份核验超时：多次自动重试仍未读到本人昵称；"
+                "请关闭遮挡本人昵称的面板后重新开启全自动，或再发一次 resume。")
+            self._set_operational_status(
+                "身份待核验", "核验超时", level="wait")
+            self._refresh_binding_views()
+            return
+        if not self._is_bound() \
+                or getattr(self, "_identity_key", None) \
+                != self._identity_context():
+            return
+        self._submit_identity_read(
+            self._identity_key,
+            getattr(self, "_identity_generation", 0))
         root = getattr(self, "root", None)
         if root is not None:
             self._identity_poll_timer = root.after(
@@ -2152,6 +2207,7 @@ class TeaAssistWindow:
         self._identity_pending = None
         if result.matched:
             self._identity_verified_at = time.perf_counter()
+            self._identity_retry_deadline = None
             self.status.set(
                 f"玩家身份已核验：{result.detail}（只读 {elapsed}ms，未点击）。")
             self._set_operational_status(
@@ -2164,19 +2220,50 @@ class TeaAssistWindow:
             elif pending == "mode_check":
                 self._begin_mode_check(pending=None)
             return
+        if (result.status == "unknown" and pending == "full_auto"
+                and getattr(self, "_identity_retry_deadline", None) is not None
+                and time.perf_counter() <= self._identity_retry_deadline):
+            # 有界重试回合内：单帧 unknown 不是终局（实机 2026-10-27
+            # 17:32 单帧未读到即 pending 被丢、意图被清，永久卡死）。
+            # 归还 pending、保持 checking、2 秒后续读；mismatch（自信
+            # 认出他人）与 unsupported（模板缺失）绝不进这里。
+            self._identity_retry_attempts = (
+                getattr(self, "_identity_retry_attempts", 0) + 1)
+            self._identity_state = "checking"
+            self._identity_pending = "full_auto"
+            self.status.set(
+                f"玩家身份暂未读到（第 {self._identity_retry_attempts} 次未中）："
+                f"{result.detail}；自动重试中…")
+            self._set_operational_status(
+                "玩家核验", "单帧未读到，自动重试中", level="wait")
+            self._refresh_binding_views()
+            root = getattr(self, "root", None)
+            if root is not None:
+                self._identity_retry_timer = root.after(
+                    IDENTITY_RETRY_INTERVAL_MS, self._retry_identity_check)
+            return
         if result.status == "mismatch":
             self.status.set(f"玩家身份不一致：{result.detail}；已阻止跟随和代打。")
             self._set_operational_status(
                 "身份不一致", result.detail, level="error")
         else:
-            self.status.set(
-                f"玩家身份未核验：{result.detail}；已阻止推荐和代打。"
-                "请关闭遮挡本人昵称的面板或进入牌桌后重试。")
+            if (pending == "full_auto"
+                    and getattr(self, "_identity_retry_deadline", None)
+                    is not None):
+                self.status.set(
+                    f"玩家身份核验超时：{result.detail}；多次自动重试仍未读到，"
+                    "已阻止推荐和代打。请关闭遮挡本人昵称的面板后重新开启"
+                    "全自动，或再发一次 resume。")
+            else:
+                self.status.set(
+                    f"玩家身份未核验：{result.detail}；已阻止推荐和代打。"
+                    "请关闭遮挡本人昵称的面板或进入牌桌后重试。")
             self._set_operational_status(
                 "身份待核验", result.detail, level="wait")
         if pending == "full_auto" or getattr(self, "_auto_resume_pending", False):
             self._full_auto_wanted = False
             self._auto_resume_pending = False
+        self._identity_retry_deadline = None
         self._refresh_binding_views()
 
     def _verify_identity_and_mode(self) -> None:
