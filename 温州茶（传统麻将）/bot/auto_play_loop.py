@@ -44,9 +44,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
+import threading
 import time
 import traceback
 import uuid
@@ -543,6 +545,7 @@ class AutoPlayLoop:
         max_actions: int = 20,
         duration_s: float = 600.0,
         interval_s: float = DEFAULT_INTERVAL_S,
+        target_period_s: float | None = None,
         tap_executor: TapExecutor | None = None,
         shot_fn: Callable[[], bytes] | None = None,
         analyze_fn: Callable[[bytes, Path], dict] | None = None,
@@ -580,6 +583,14 @@ class AutoPlayLoop:
         self.max_actions = max(1, int(max_actions))
         self.duration_s = max(0.0, float(duration_s))
         self.interval_s = max(0.0, float(interval_s))
+        if target_period_s is not None:
+            if isinstance(target_period_s, bool) or not isinstance(target_period_s, (int, float)):
+                raise TypeError("target_period_s must be a finite positive number or None")
+            if not math.isfinite(target_period_s) or target_period_s <= 0:
+                raise ValueError("target_period_s must be a finite positive number")
+        self.target_period_s = float(target_period_s) if target_period_s is not None else None
+        # Outer-loop pacing only. Post-click/settle waits keep their existing _sleep.
+        self._pacing_wakeup = threading.Event()
         self._tap = tap_executor or TapExecutor(
             enabled=enabled, adb_path=self.adb_path, serial=self.serial)
         self._shot = shot_fn or self._adb_screenshot
@@ -1160,6 +1171,7 @@ class AutoPlayLoop:
         terminal ``user_stop`` event before returning.
         """
         self._stop_requested_reason = str(reason or "用户停止全自动代打")
+        self._pacing_wakeup.set()
 
     def _save_frame(self, raw: bytes, tag: str) -> Path:
         self._ensure_dirs()
@@ -4697,6 +4709,12 @@ class AutoPlayLoop:
             if self._stop_requested_reason:
                 self._stop("user_stop", self._stop_requested_reason)
                 break
+            # None keeps the legacy tail-delay API and clock-call sequence.
+            cycle_started = self._clock() if self.target_period_s is not None else None
+            if (cycle_started is not None and self.duration_s
+                    and cycle_started - began >= self.duration_s):
+                self._stop("duration", f"达到运行时长 {self.duration_s:.0f}s")
+                break
             try:
                 self.tick()
             except Exception as exc:  # noqa: BLE001 - 先落台账，再保留原异常语义
@@ -4717,7 +4735,14 @@ class AutoPlayLoop:
             if self.duration_s and self._clock() - began >= self.duration_s:
                 self._stop("duration", f"达到运行时长 {self.duration_s:.0f}s")
                 break
-            if self.interval_s:
+            if self.target_period_s is not None:
+                now = self._clock()
+                remaining = max(0.0, self.target_period_s - (now - cycle_started))
+                if self.duration_s:
+                    remaining = min(remaining, max(0.0, self.duration_s - (now - began)))
+                if remaining:
+                    self._pacing_wakeup.wait(remaining)
+            elif self.interval_s:
                 self._sleep(self.interval_s)
         return {
             "session": str(self.session_dir),

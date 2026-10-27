@@ -5154,6 +5154,7 @@ class TeaAssistWindow:
             max_actions=5000,
             duration_s=12 * 60 * 60,
             interval_s=1.2,
+            target_period_s=2.0,
             claim_auto_click=True,
             claim_policy=recommended_runner_config(
                 auto_click_enabled=True, include_chi=True),
