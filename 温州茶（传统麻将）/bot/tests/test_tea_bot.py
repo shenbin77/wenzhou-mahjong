@@ -62,6 +62,36 @@ def test_white_tile_is_converted_to_engine_id(tmp_path):
     assert bot.see(b"offline")[-1] == 73
 
 
+def test_white_exposed_meld_is_translated_at_engine_boundary(tmp_path):
+    hand = [5, 2, 2, 7, 9, 42, 44, 45, 47, 48, 25, 25, 28, 29]
+    bot = TeaBot(vision_fn=lambda _: hand, caishen_id=5, log_dir=str(tmp_path))
+    bot.meld_groups = [[67, 67, 67]]
+    assert bot.see(b"offline") == hand
+    assert bot.think(hand).discard in hand
+    # Public melds stay in vision encoding for the rest of the UI/auto loop.
+    assert bot.meld_groups == [[67, 67, 67]]
+
+
+def test_white_meld_and_concealed_tiles_still_obey_four_tile_limit(tmp_path):
+    hand = [67, 67, 2, 7, 9, 42, 44, 45, 47, 48, 25, 25, 28, 29]
+    bot = TeaBot(vision_fn=lambda _: hand, caishen_id=5, log_dir=str(tmp_path))
+    bot.meld_groups = [[67, 67, 67]]
+    with pytest.raises(ValueError, match="最多4张"):
+        bot.see(b"offline")
+
+
+def test_real_white_peng_frame_reaches_advice_with_visual_melds(tmp_path):
+    from assist_tea import analyze_snapshot
+    frame = (BOT_DIR.parent / "采集" / "dev_auto_play" /
+             "ui_20261027_203046_emulator5556_烘熊瞎" / "frames" /
+             "20261027_204212_111706_before_cf8a94.png")
+    analysis = analyze_snapshot(frame, caishen_label="", confirmed_two_player=True,
+                                log_dir=tmp_path)
+    assert analysis["status"] == "advise"
+    assert analysis["melds"] == [[67, 67, 67]]
+    assert len(analysis["hand_ids"]) == 14
+
+
 def test_rejects_live_mode_and_missing_offline_screenshot(tmp_path):
     with pytest.raises(ValueError, match="dry_run"):
         TeaBot(dry_run=False, log_dir=str(tmp_path))

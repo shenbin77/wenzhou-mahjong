@@ -426,15 +426,16 @@ class TeaBot:
         png = screenshot if screenshot is not None else self._shot()
         vision_ids = self.vision_fn(png)
         engine_ids = vision_hand_to_engine(vision_ids)
+        engine_melds = [vision_hand_to_engine(group) for group in self.meld_groups]
         # 张数守恒按逻辑位：每组副露（含杠）只占一个面子=3 逻辑位。
         # 杠的第 4 张不回灌、不额外扣暗手；等待=16-3n，刚摸=17-3n。
-        concealed_wait = expected_concealed_count(melds=self.meld_groups, drawn=False)
-        concealed_turn = expected_concealed_count(melds=self.meld_groups, drawn=True)
+        concealed_wait = expected_concealed_count(melds=engine_melds, drawn=False)
+        concealed_turn = expected_concealed_count(melds=engine_melds, drawn=True)
         expected = (concealed_wait, concealed_turn)
         if len(engine_ids) not in expected:
             raise ValueError(f"暗手应为{expected[0]}或{expected[1]}张，识别到{len(engine_ids)}张")
         validate_tiles(engine_ids, caishen_id=self.caishen_id,
-                       melds=self.meld_groups)
+                       melds=engine_melds)
         self.log(f"[see] vision={hand_str(vision_ids)} → engine={hand_str(engine_ids)}")
         return engine_ids
 
@@ -444,20 +445,23 @@ class TeaBot:
         n = len(hand)
         result = ThinkResult(hand=list(hand), n_tiles=n, shanten=99,
                              is_hu=False)
+        # Public meld_groups remain in visual encoding for the UI and action
+        # ledger; the engine must receive the same encoding as the hand.
+        engine_melds = [vision_hand_to_engine(group) for group in self.meld_groups]
 
         # 与 see()/validate_tiles 同一套逻辑位：杠也只占 3，不按实物 4 扣暗手。
-        concealed_wait = expected_concealed_count(melds=self.meld_groups, drawn=False)
-        concealed_turn = expected_concealed_count(melds=self.meld_groups, drawn=True)
+        concealed_wait = expected_concealed_count(melds=engine_melds, drawn=False)
+        concealed_turn = expected_concealed_count(melds=engine_melds, drawn=True)
         if n not in (concealed_wait, concealed_turn):
             raise ValueError(f"暗手应为{concealed_wait}或{concealed_turn}张，得到{n}张")
         validate_tiles(hand, caishen_id=self.caishen_id,
-                       melds=self.meld_groups)
+                       melds=engine_melds)
         hu_info = (_pa_analyze(hand, caishen_id=self.caishen_id)
                    if n == 17 and not self.meld_groups else {})
         result.hu_info = hu_info
 
         sh = calc_shanten(hand, caishen_id=self.caishen_id,
-                          melds=self.meld_groups)
+                          melds=engine_melds)
         result.shanten = sh
         if self.meld_groups and sh == -1:
             raise RuntimeError("副露胡牌尚未独立验收，停止决策")
@@ -478,13 +482,13 @@ class TeaBot:
         if n == concealed_wait and sh == 0:
             result.ting_tiles = sorted(
                 calc_ting_tiles(hand, caishen_id=self.caishen_id,
-                                melds=self.meld_groups)
+                                melds=engine_melds)
             )
 
         # 3. 打牌决策（刚摸牌：打一张）
         if n == concealed_turn:
             cands = best_discard_by_efficiency(
-                hand, caishen_id=self.caishen_id, melds=self.meld_groups
+                hand, caishen_id=self.caishen_id, melds=engine_melds
             )
             result.discard_candidates = cands
             if cands:
