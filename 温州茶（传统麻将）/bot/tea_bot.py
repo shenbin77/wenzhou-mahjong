@@ -40,6 +40,7 @@ from brain_v0.engine.tea.shanten import (  # noqa: E402
     calc_shanten,
     calc_ting_tiles,
     expected_concealed_count,
+    is_win,
     validate_tiles,
 )
 from brain_v0.engine.tea.pattern_analyzer import analyze as _pa_analyze  # noqa: E402
@@ -440,7 +441,13 @@ class TeaBot:
         return engine_ids
 
     # -- think: 决策 --
-    def think(self, hand: list[int]) -> ThinkResult:
+    def think(self, hand: list[int], *, incoming_tile: int | None = None,
+              incoming_source: str | None = None) -> ThinkResult:
+        """Return advice with an optional, already confirmed engine incoming tile.
+
+        Melded wins use the same is_win(melds=...) contract as claim L2.
+        Incoming evidence never fills an unread hand or produces score estimates.
+        """
         t0 = time.time()
         n = len(hand)
         result = ThinkResult(hand=list(hand), n_tiles=n, shanten=99,
@@ -463,8 +470,32 @@ class TeaBot:
         sh = calc_shanten(hand, caishen_id=self.caishen_id,
                           melds=engine_melds)
         result.shanten = sh
-        if self.meld_groups and sh == -1:
-            raise RuntimeError("副露胡牌尚未独立验收，停止决策")
+        if self.meld_groups:
+            winning_hand = None
+            win_source = None
+            if n == concealed_turn:
+                winning_hand = hand
+                win_source = "self_draw"
+            elif (n == concealed_wait and incoming_tile is not None
+                  and incoming_source == "opponent"):
+                if isinstance(incoming_tile, bool) or not isinstance(incoming_tile, int):
+                    raise ValueError("来牌必须是已核实的引擎牌编码")
+                winning_hand = hand + [incoming_tile]
+                win_source = "opponent"
+            if winning_hand is not None and is_win(
+                    winning_hand, caishen_id=self.caishen_id, melds=engine_melds):
+                # The closed pattern analyzer cannot score a melded hand.
+                result.is_hu = True
+                result.shanten = -1
+                result.hu_info = {"hu": True, "source": "shanten.is_win",
+                                  "win_source": win_source,
+                                  "scoring_validated": False}
+                result.reason = (
+                    "副露手+已确认对手来牌成胡" if win_source == "opponent"
+                    else "副露手当前整手成胡") + "（计分未验证）"
+                result.elapsed_ms = (time.time() - t0) * 1000
+                self.log(f"[think] {hand_str(hand)} | {result.reason}")
+                return result
         if not self.meld_groups and n == 17 and bool(hu_info.get("hu", False)) != (sh == -1):
             raise RuntimeError("胡牌分析器与向听引擎结论不一致，停止决策")
         result.is_hu = n == 17 and bool(hu_info.get("hu", False))
@@ -511,11 +542,8 @@ class TeaBot:
         else:
             result.reason = f"张数异常{n}，向听{sh}"
 
-        # 副露局面的胡牌/计分判定未经验收：显式标注，绝不静默当成"没胡"。
         if self.meld_groups and not result.is_hu:
-            result.reason += "；副露局面胡牌判定未验证"
-            if sh == -1:
-                result.reason = "疑似胡牌（副露局面胡牌判定未验证，不计分）"
+            result.reason += "；副露计分未验证"
 
         result.elapsed_ms = (time.time() - t0) * 1000
         self.log(

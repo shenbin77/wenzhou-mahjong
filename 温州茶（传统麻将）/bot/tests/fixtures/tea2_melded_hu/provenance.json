@@ -1,0 +1,23 @@
+{
+  "purpose": "Native tea2 frames for melded win advice regression; replay only, no device input.",
+  "frames": [
+    {
+      "file": "20261027_020226_207971_before_f7e6b4.png",
+      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_015814_emulator5556_烘熊瞎\\frames\\20261027_020226_207971_before_f7e6b4.png",
+      "sha256": "9e1ecc6818b5293a6ae81eb7a81aa6207cad610e80a31f71c72958a2d5954cf0",
+      "size": 982756
+    },
+    {
+      "file": "20261027_020712_698703_before_8b941d.png",
+      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_015814_emulator5556_烘熊瞎\\frames\\20261027_020712_698703_before_8b941d.png",
+      "sha256": "e8abf9342dce4965e64761f9e7d83614c07486655bbb53b7877f386683c36926",
+      "size": 940432
+    },
+    {
+      "file": "20261027_020223_972223_before_9e5984.png",
+      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_015814_emulator5556_烘熊瞎\\frames\\20261027_020223_972223_before_9e5984.png",
+      "sha256": "37d9e102e88d230999a857a84c761cda1b5e70249478a74d6f47e7ac56539b68",
+      "size": 897210
+    }
+  ]
+}

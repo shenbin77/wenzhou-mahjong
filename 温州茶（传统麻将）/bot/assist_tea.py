@@ -384,7 +384,15 @@ def analyze_snapshot(
             conflict = _badge_glyph_conflict(bot._vision, caishen_label)
             if conflict:
                 raise ValueError(conflict)
-            thought = bot.think(hand)
+            # Only the strict discard reader may supply ron evidence; shadow
+            # candidates never enter DiscardState or this engine input.
+            if (bot.meld_groups and discards.incoming_tile is not None
+                    and discards.incoming_source == "opponent"):
+                thought = bot.think(
+                    hand, incoming_tile=vision_to_engine(discards.incoming_tile),
+                    incoming_source=discards.incoming_source)
+            else:
+                thought = bot.think(hand)
         except (ValueError, RuntimeError) as exc:
             vision = bot._vision
             diagnostics, hand_ids = _recording_vision(vision)
@@ -449,6 +457,7 @@ def analyze_snapshot(
             "hand": [d["label"] for d in diagnostics],
             **_caishen_fields(caishen_label, observed),
             "shanten": thought.shanten,
+            "hu_info": dict(thought.hu_info),
             "suggestion": tile_name(thought.discard) if thought.discard is not None else None,
             "suggestion_id": suggested_id,
             "suggested_boxes": suggested_boxes,
