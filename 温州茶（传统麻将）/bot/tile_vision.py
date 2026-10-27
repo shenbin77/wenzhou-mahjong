@@ -540,6 +540,34 @@ class TileVision:
                 retry['original_box'] = list(box)
                 retry['original_score'] = result.get('score')
                 return retry, (x0, y0, x1 + 1, y1)
+        # 有些压暗框被右边亮牌的强边缘截窄（20:57 实机为 83px 对同手
+        # 中位宽 88px，右间隔 9px）。仅当本框确实短且右侧间隔多出空间，
+        # 用两种仅扩大 1/2px 的裁框重新走原分类器；两者均须以原有分数及
+        # margin 门槛直接通过、且与原 top1 一致。没有邻框时无法证明空间，
+        # 或任一次变牌/歧义/失败，一律沿用原弃权；不改普通识牌或副露。
+        if (allow_dim_right_edge_retry and self.dim_gain_all
+                and not result.get('accepted')
+                and result.get('reason') == 'low_score'
+                and result.get('label')
+                and typical_width > 0
+                and typical_width - width >= max(4, round(typical_width * .04))
+                and next_left is not None
+                and next_left - x1 >= max(8, round(typical_width * .09))
+                and x1 + 2 < next_left):
+            first = self.classify_crop(img[y0:y1, x0:x1 + 1],
+                                       caishen_label=caishen_label)
+            second = self.classify_crop(img[y0:y1, x0:x1 + 2],
+                                        caishen_label=caishen_label)
+            if all(read.get('accepted') and read.get('reason') == 'accepted'
+                   and read.get('label') == result.get('label')
+                   and float(read.get('score') or 0.0) >= self.min_score
+                   and float(read.get('margin') or 0.0) >= self.min_margin
+                   for read in (first, second)):
+                second['reason'] = 'accepted_dim_geometric_edge_retry'
+                second['original_box'] = list(box)
+                second['original_score'] = result.get('score')
+                second['retry_one_score'] = first.get('score')
+                return second, (x0, y0, x1 + 2, y1)
         if (result.get('accepted') or result.get('label') != 'bai'
                 or typical_width <= 0 or width >= typical_width * .80):
             return result, tuple(box)

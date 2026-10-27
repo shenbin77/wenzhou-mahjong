@@ -2200,6 +2200,30 @@ def _dim_gain_result(caishen="s2"):
     }
 
 
+def test_dim_gain_2057_real_frames_restore_whitelisted_advice(tmp_path):
+    """用户20:57暗牌停手：两张原生帧均补齐才可给西/北白名单建议。"""
+    paths = [BOT_DIR.parent / "采集" / "dev_auto_play" /
+             "ui_20261027_205027_emulator5556_烘熊瞎" / "frames" / name
+             for name in ("20261027_205753_417490_before_c2bce7.png",
+                          "20261027_205755_910170_before_c9499a.png")]
+    assert all(path.is_file() for path in paths)
+    loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
+    loop.round.caishen = "t5"
+    subset = _fake_subset([63, 64])
+    images = [cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+              for path in paths]
+    first = loop._dim_gain_whitelist_advice(
+        images[0], subset, _dim_gain_result("t5"), frame=str(paths[0]))
+    second = loop._dim_gain_whitelist_advice(
+        images[1], subset, _dim_gain_result("t5"), frame=str(paths[1]))
+    assert first is None
+    assert second is not None
+    assert second["hand"] == [25, 4, 8, 8, 8, 41, 41, 42, 44, 47, 21, 21, 23, 24, 29, 63, 64]
+    assert second["tile_id"] in (63, 64)
+    assert second["source"] == "dim_gain_independent_frames"
+    assert tap.execute_calls == [] and tap.plan_calls == []
+
+
 @pytest.mark.skipif(
     not all(path.is_file() for path in DIM_GAIN_REAL_FRAMES),
     reason="17:37 dim-gain real frames missing",
