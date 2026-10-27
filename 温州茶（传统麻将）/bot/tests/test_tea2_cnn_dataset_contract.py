@@ -295,16 +295,47 @@ def test_output_never_overwrites_or_writes_into_capture_tree(tmp_path, capture, 
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
-def test_symlink_audit_is_rejected(tmp_path, capture, policy):
-    frame = create_frame(capture, "20261023_120000")
+@pytest.mark.parametrize("outside_tree", [False, True], ids=["inside", "outside"])
+def test_directory_alias_audit_is_rejected(tmp_path, capture, policy, outside_tree):
+    """Use a real NTFS junction on Windows and a directory symlink elsewhere.
+
+    Both resolve to another physical directory. The builder rejects either alias
+    before opening its audit; no administrator permission or mocked paths needed.
+    """
+    source_root = tmp_path / "external_capture" if outside_tree else capture
+    frame = create_frame(source_root, "20261023_120000")
     audit = audit_for(frame, [event(frame)])
+    original = audit.read_bytes()
     alias_dir = capture / "assist_sessions" / "20261023_120001"
-    try:
+    alias_dir.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(audit.parent), str(alias_dir))
+    else:
         alias_dir.symlink_to(audit.parent, target_is_directory=True)
-    except OSError:
-        pytest.skip("OS does not permit unprivileged symlinks")
-    identity, reason = builder.classify_audit(alias_dir / "recognition_audit.jsonl", capture.resolve(), policy)
-    assert identity is None and reason == "aliased_or_symlink_path"
+    try:
+        assert alias_dir.samefile(audit.parent)
+        assert alias_dir.resolve() == audit.parent.resolve()
+        assert (alias_dir / "recognition_audit.jsonl").read_bytes() == original
+        identity, reason = builder.classify_audit(
+            alias_dir / "recognition_audit.jsonl", capture.resolve(), policy)
+        assert identity is None and reason == "aliased_or_symlink_path"
+        direct_identity, direct_reason = builder.classify_audit(
+            audit, capture.resolve(), policy)
+        if outside_tree:
+            assert direct_identity is None
+            assert direct_reason == "outside_canonical_capture_tree"
+        else:
+            assert direct_identity is not None and direct_reason is None
+    finally:
+        # Remove the alias itself; never recursively delete through a junction.
+        if sys.platform == "win32":
+            alias_dir.rmdir()
+        else:
+            alias_dir.unlink()
+    assert audit.read_bytes() == original
+    assert frame.is_file()
+    assert not alias_dir.exists()
 
 
 def test_policy_cannot_relax_mode_or_promote_gold(tmp_path, policy):
