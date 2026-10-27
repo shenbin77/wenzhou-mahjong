@@ -440,3 +440,235 @@ def test_platform_hand_gap_returns_to_normal_after_fragment_recovery():
     assert result["status"] == "advise"
     assert len(result["hand_ids"]) == 11
     assert result["suggested_boxes"]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-27 claim 复核事故：碰白板成第二副露组，新组三框被列游程切分带偏
+# （首框 62px、后两框左移 13-18px），牌面分类全灭 -> assist 层整组扣留 ->
+# 复核读到「副露组数 1->0，预期 +1」停手。两账号同签名、连拍两帧同读、
+# 100 秒后帧同读：确定性坏读，不是落定动画。修复 = 副露框有界重对齐
+# （_realign_meld_box）：换裁框仍走原 min_score/min_margin，阈值未动。
+# ---------------------------------------------------------------------------
+_DEV_AUTO = BOT_DIR.parent / "采集" / "dev_auto_play"
+PENG_BAI_CASE1_DIR = (_DEV_AUTO / "ui_20261027_174410_emulator5556_烘熊瞎"
+                      / "frames")
+PENG_BAI_CASE2_DIR = (_DEV_AUTO / "ui_20261027_174759_emulator5554_玉姐"
+                      / "frames")
+PENG_BAI_CASE1_BEFORE = (PENG_BAI_CASE1_DIR
+                         / "20261027_180503_660854_before_8342dc.png")
+PENG_BAI_CASE1_AFTER = [
+    PENG_BAI_CASE1_DIR / "20261027_180511_888985_after_claim_3a7f4c.png",
+    PENG_BAI_CASE1_DIR / "20261027_180513_041932_after_claim_07fe39.png",
+]
+PENG_BAI_CASE2_BEFORE = (PENG_BAI_CASE2_DIR
+                         / "20261027_182028_244398_before_fc3f19.png")
+PENG_BAI_CASE2_AFTER = [
+    PENG_BAI_CASE2_DIR / "20261027_182034_196846_after_claim_b844e1.png",
+    PENG_BAI_CASE2_DIR / "20261027_182035_477946_after_claim_48f3e2.png",
+]
+
+
+def _board_from_frame(frame: Path, log_dir: Path):
+    """与 auto_play_loop._board_from_frame 相同的生产读路。"""
+    from live_capture import analyze_bytes
+    from action_policy import HandState, BoardState
+    from claim_vision import read_claims
+
+    raw = frame.read_bytes()
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    result = analyze_bytes(raw, mode="tea_2p", image_path=frame,
+                           log_dir=log_dir)
+    claims = read_claims(image)
+    hand = HandState.from_analysis(result)
+    return BoardState.from_hand_state(
+        hand, claim_buttons=len(claims.buttons), note="regression")
+
+
+def _vision_meld_label_groups(frame: Path):
+    vision = make_vision()
+    img = cv2.imdecode(np.fromfile(str(frame), np.uint8), cv2.IMREAD_COLOR)
+    vision.recognize_hand(img)
+    groups, pos = [], 0
+    for size in vision.detection_diagnostics["meld_groups"]:
+        groups.append([d.get("label") if d.get("accepted") else None
+                       for d in vision.meld_diagnostics[pos:pos + size]])
+        pos += size
+    return vision, groups
+
+
+@pytest.mark.parametrize("frame", PENG_BAI_CASE1_AFTER)
+def test_peng_bai_case1_after_frames_publish_two_groups(frame):
+    """例 1（烘熊瞎第 7 局）复核帧：白板组必须读出，不再整组扣留。"""
+    need(frame)
+    vision, groups = _vision_meld_label_groups(frame)
+    assert groups == [["s2", "s3", "s4"], ["bai", "bai", "bai"]]
+    reasons = [d.get("reason") for d in vision.meld_diagnostics]
+    assert "accepted_meld_realign" in reasons
+
+
+@pytest.mark.parametrize("frame", PENG_BAI_CASE2_AFTER)
+def test_peng_bai_case2_after_frames_publish_two_groups(frame):
+    """例 2（玉姐第 12 局）复核帧：跨账号同签名，同样必须读出。"""
+    need(frame)
+    vision, groups = _vision_meld_label_groups(frame)
+    assert groups == [["t5", "t6", "t7"], ["bai", "bai", "bai"]]
+    reasons = [d.get("reason") for d in vision.meld_diagnostics]
+    assert "accepted_meld_realign" in reasons
+
+
+@pytest.mark.parametrize("before_frame,after_frames", [
+    (PENG_BAI_CASE1_BEFORE, PENG_BAI_CASE1_AFTER),
+    (PENG_BAI_CASE2_BEFORE, PENG_BAI_CASE2_AFTER),
+])
+def test_peng_bai_claim_verify_passes_end_to_end(before_frame, after_frames,
+                                                 tmp_path):
+    """生产读路端到端：碰白板复核必须通过（暗手 -2、副露 +1 组、圆盘消失）。"""
+    from action_policy import verify_after_click
+
+    need(before_frame)
+    before = _board_from_frame(before_frame, tmp_path)
+    assert before.concealed_count == 13 and before.meld_group_count == 1
+    for frame in after_frames:
+        need(frame)
+        after = _board_from_frame(frame, tmp_path)
+        assert after.concealed_count == 11 and after.meld_group_count == 2
+        ok, why = verify_after_click(before, after, "peng")
+        assert ok, why
+
+
+# ---------------------------------------------------------------------------
+# 重对齐单元测试（假 classify_crop）：锁死「只换裁框、不降阈值」
+# ---------------------------------------------------------------------------
+
+def _fake_classify_by_fill(vision, monkeypatch):
+    """裁框与亮牌面（x 108..188, w=80）的重合度决定分数：对准才过线。"""
+
+    def fake_classify(crop, caishen_label=None):
+        fill = float(crop.mean()) / 200.0 if crop.size else 0.0
+        accepted = fill >= 0.95
+        return {"accepted": accepted, "tile_id": 67 if accepted else None,
+                "label": "bai", "score": round(fill, 3),
+                "margin": 0.6 if accepted else 0.05,
+                "reason": "accepted" if accepted else "low_score"}
+
+    monkeypatch.setattr(vision, "classify_crop", fake_classify)
+
+
+def _shifted_blank_image():
+    img = np.zeros((200, 400, 3), np.uint8)
+    img[50:164, 108:188] = 200          # 真牌面：x 108..188（宽 80）
+    return img
+
+
+def test_meld_realign_recovers_shifted_blank_face(monkeypatch):
+    """原框 (92..154, 62 宽) 只覆盖牌面 74% -> 原判低分；重对齐后过原阈值。"""
+    vision = make_vision()
+    _fake_classify_by_fill(vision, monkeypatch)
+    found = vision._realign_meld_box(
+        _shifted_blank_image(), (92, 50, 154, 164), None,
+        typical_width=89, next_left=300)
+    assert found is not None
+    result, used = found
+    assert result["accepted"] is True
+    assert result["reason"] == "accepted_meld_realign"
+    assert result["original_box"] == [92, 50, 154, 164]
+    # 采用的裁框必须真正对准亮牌面（x 108..188）：与之重叠至少 55px，
+    # 且中心仍留在原框中心的护栏内（宽的 1/4）。
+    overlap = min(used[2], 188) - max(used[0], 108)
+    assert overlap >= 55, used
+    assert abs((used[0] + used[2]) / 2 - 123) <= (used[2] - used[0]) / 4
+
+
+def test_meld_realign_never_accepts_below_threshold(monkeypatch):
+    """任何候选裁框都过不了原阈值时，必须保持原判弃权（安全语义不变）。"""
+    vision = make_vision()
+    monkeypatch.setattr(
+        vision, "classify_crop",
+        lambda crop, caishen_label=None: {
+            "accepted": False, "tile_id": None, "label": "bai",
+            "score": 0.5, "margin": 0.3, "reason": "low_score"})
+    found = vision._realign_meld_box(
+        _shifted_blank_image(), (92, 50, 154, 164), None,
+        typical_width=89, next_left=300)
+    assert found is None
+
+
+def test_base_classifier_has_no_realign(monkeypatch):
+    """基础分类路径（暗手/副露首轮）本身不带重对齐：同一坏框保持原判。
+
+    重对齐只存在于 recognize_hand 的兜底阶段（相关性恢复之后），
+    _classify_detected_box 的行为与修复前一字不变。
+    """
+    vision = make_vision()
+    _fake_classify_by_fill(vision, monkeypatch)
+    result, used = vision._classify_detected_box(
+        _shifted_blank_image(), (92, 50, 154, 164), None,
+        typical_width=89, next_left=300)
+    assert result["accepted"] is False
+    assert used == (92, 50, 154, 164)
+
+
+def test_realign_stage_gates(monkeypatch):
+    """调度层三道门：只有 low_score 且分数低于阈值的框才被重对齐。
+
+    idx0（low_score 0.5）被救回；idx1（low_score 但分数 0.94，模拟人工
+    降分/高分被拒）与 idx2（reason=ambiguous）必须原样保留——前者正是
+    test_two_weak_tiles_are_not_recovered_by_mere_triplet 与单张弱牌兜底
+    契约依赖的边界：高分被拒的牌只能走相关性兜底，不许被重试绕过。
+    """
+    vision = make_vision()
+    _fake_classify_by_fill(vision, monkeypatch)
+    box = (92, 50, 154, 164)
+    vision.last_meld_boxes = [list(box), list(box), list(box)]
+    vision.detection_diagnostics = {"meld_groups": [3]}
+    vision.meld_diagnostics = [
+        {"accepted": False, "reason": "low_score", "score": 0.5,
+         "label": "bai", "tile_id": None, "box": list(box),
+         "region": "exposed"},
+        {"accepted": False, "reason": "low_score", "score": 0.94,
+         "label": "bai", "tile_id": None, "box": list(box),
+         "region": "exposed"},
+        {"accepted": False, "reason": "ambiguous", "score": 0.5,
+         "label": "bai", "tile_id": None, "box": list(box),
+         "region": "exposed"},
+    ]
+    vision._realign_failed_meld_boxes(
+        _shifted_blank_image(), None, typical_width=89,
+        next_left={box: 300})
+    saved, high, amb = vision.meld_diagnostics
+    assert saved["accepted"] is True
+    assert saved["reason"] == "accepted_meld_realign"
+    assert saved["original_score"] == 0.5
+    assert high["accepted"] is False and high["score"] == 0.94
+    assert high["reason"] == "low_score"
+    assert amb["accepted"] is False and amb["reason"] == "ambiguous"
+
+
+def test_meld_realign_cannot_read_the_neighbour(monkeypatch):
+    """只有把裁框整体挪到邻牌脸上才能「读出」时，必须拒绝（中心护栏）。
+
+    假分类器只接受中心偏离原框中心 >=40px 的裁框（模拟邻牌脸的位置）；
+    原框自身的任何微调裁框都不接受。重对齐若无护栏会把邻牌读成自己，
+    造出一张不存在的牌——护栏在位时结果必须保持原判弃权。
+    """
+    vision = make_vision()
+    box = (92, 50, 154, 164)
+    center_x = (box[0] + box[2]) / 2.0
+
+    def fake_classify(crop, caishen_label=None):
+        # classify_crop 只拿到裁图：用裁图宽度+图内标记列反推裁框位置。
+        # 这里改用闭包记录不可行，改为按裁图内容判定：图在 x>=191 处
+        # 全亮，其余全黑；裁框右界越过 191 越多，均值越高。
+        fill = float(crop.mean()) / 200.0 if crop.size else 0.0
+        accepted = fill >= 0.95
+        return {"accepted": accepted, "tile_id": 67 if accepted else None,
+                "label": "bai", "score": round(fill, 3),
+                "margin": 0.6 if accepted else 0.05,
+                "reason": "accepted" if accepted else "low_score"}
+
+    monkeypatch.setattr(vision, "classify_crop", fake_classify)
+    img = np.zeros((200, 400, 3), np.uint8)
+    img[50:164, 191:271] = 200          # 只有邻牌脸是亮的（x 191..271）
+    found = vision._realign_meld_box(
+        img, box, None, typical_width=89, next_left=300)
+    assert found is None

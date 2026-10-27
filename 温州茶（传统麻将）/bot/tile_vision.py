@@ -557,6 +557,109 @@ class TileVision:
         retry['original_score'] = result.get('score')
         return retry, (x0, y0, expanded_right, y1)
 
+    def _realign_failed_meld_boxes(self, img, caishen_label, *,
+                                   typical_width, next_left):
+        """副露框重对齐的调度层：只救相关性兜底也救不回的低分框。
+
+        顺序是刻意的：单张弱牌先由 recover_triplet 按既有契约恢复（诊断
+        保留弱分与兜底 reason）；走到这里的只剩整组同灭的框——正是框切
+        分带偏的签名。另外两道门：原读必须是 low_score 且分数低于阈值
+        （原框已读到高分却被拒的，如人工降分/margin 不足，照旧弃权）；
+        框必须属于几何组大小 3/4 的副露组。重对齐本身见 _realign_meld_box。
+        """
+        group_sizes = []
+        for size in (self.detection_diagnostics or {}).get(
+                'meld_groups') or []:
+            group_sizes.extend([int(size)] * int(size))
+        if len(group_sizes) != len(self.meld_diagnostics):
+            return
+        for index, d in enumerate(self.meld_diagnostics):
+            if group_sizes[index] not in (3, 4) or d.get('accepted'):
+                continue
+            if d.get('reason') != 'low_score':
+                continue
+            if float(d.get('score') or 0.0) >= self.min_score:
+                continue
+            box = self.last_meld_boxes[index]
+            realigned = self._realign_meld_box(
+                img, box, caishen_label, typical_width=typical_width,
+                next_left=next_left.get(tuple(box)))
+            if realigned is None:
+                continue
+            result, used_box = realigned
+            result['original_label'] = d.get('label')
+            result['original_score'] = d.get('score')
+            result['box'] = list(used_box)
+            result['region'] = 'exposed'
+            self.meld_diagnostics[index] = result
+            self.last_meld_boxes[index] = list(used_box)
+
+    def _realign_meld_box(self, img, box, caishen_label, *,
+                          typical_width, next_left=None):
+        """副露框有界重对齐：原框没对准牌面时，按原阈值换裁框重拍。
+
+        2026-10-27 实机两例（5556 第 7 局 / 5554 第 12 局，同签名跨账号）：
+        碰白板成第二副露组后，新组三框被列游程切分整体带偏——首框只剩
+        62px、后两框相对牌面左移 13-18px。牌面本身明亮完整（白板 0.93+
+        在同帧暗手里正常读出），坏的是裁框：白板全高边框字形的竖线被
+        ``visible_border`` 误判，游程边界落在牌面内部。复核连拍两帧同读
+        （落定签名一致）、事后 100 秒帧同读，是确定性坏读，不是动画帧。
+
+        搜索范围严格有界：横移 -8..+30（按 1600 基准缩放）、宽度只取
+        {原宽, 本帧典型宽 x0.9, 本帧典型宽}、右界不超过下一框左界 +30，
+        且候选框中心与原框中心偏差不超过候选宽的 1/4（防读邻牌）。
+        每个候选仍走 ``classify_crop`` 的原始 min_score/min_margin，
+        只有被原标准接受的候选才采用（取分数最高者）；全找不到返回
+        None，调用方保持原低分结论——弃权语义不变，阈值一字未动。
+        """
+        x0, y0, x1, y1 = (int(v) for v in box)
+        scale = max(img.shape[1] / 1600.0, 0.5)
+        widths = []
+        for cand_w in (x1 - x0, round(typical_width * .9),
+                       round(typical_width)):
+            if cand_w and cand_w >= round(40 * scale) \
+                    and int(cand_w) not in widths:
+                widths.append(int(cand_w))
+        if not widths:
+            return None
+        right_limit = img.shape[1]
+        if next_left is not None:
+            right_limit = min(right_limit,
+                              int(next_left) + round(30 * scale))
+        step = max(1, round(2 * scale))
+        shifts = [0]
+        for mag in range(step, round(30 * scale) + 1, step):
+            shifts.append(mag)
+            if mag <= round(8 * scale):
+                shifts.append(-mag)
+        center_x = (x0 + x1) / 2.0
+        best = None
+        for width in widths:
+            for dx in shifts:
+                nx0 = x0 + dx
+                nx1 = nx0 + width
+                if nx0 < 0 or nx1 > right_limit:
+                    continue
+                # 候选框中心必须留在原框中心 ±1/4 宽内：裁框只能微调
+                # 对准本张牌，绝不允许整体挪到邻牌脸上去读邻牌的面。
+                if abs((nx0 + nx1) / 2.0 - center_x) > width / 4.0:
+                    continue
+                if (nx0, nx1) == (x0, x1):
+                    continue
+                cand = self.classify_crop(img[y0:y1, nx0:nx1],
+                                          caishen_label=caishen_label)
+                if not cand.get('accepted'):
+                    continue
+                if best is None or float(cand.get('score') or 0) > float(
+                        best[0].get('score') or 0):
+                    best = (dict(cand), (nx0, y0, nx1, y1))
+        if best is None:
+            return None
+        result, used_box = best
+        result['reason'] = 'accepted_meld_realign'
+        result['original_box'] = [x0, y0, x1, y1]
+        return result, used_box
+
     def _return_invalid_trailing_platform_groups(self, concealed_boxes):
         """Move a confidently illegal trailing platform group back to the hand.
 
@@ -873,6 +976,10 @@ class TileVision:
 
         recover_triplet(self.diagnostics, boxes, 'concealed')
         recover_triplet(self.meld_diagnostics, self.last_meld_boxes, 'exposed')
+        # 相关性兜底之后仍整组读不出的副露框，最后才做有界重对齐
+        # （2026-10-27 碰白板第二组框带偏事故，见 _realign_failed_meld_boxes）。
+        self._realign_failed_meld_boxes(
+            img, label, typical_width=typical_width, next_left=next_left)
         boxes = self._return_invalid_trailing_platform_groups(boxes)
         # 财神未知时金色牌不参与计数：把弃权原因提到 detection_diagnostics，
         # 让台账写"gold_tile_caishen_unknown"而不是含糊的 "识牌不完整"。
