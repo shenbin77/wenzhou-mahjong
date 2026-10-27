@@ -406,12 +406,15 @@ def _load_template_bank(template_dir):
 
 class TileVision:
     def __init__(self, template_dir=None, min_score=.82, min_margin=.055,
-                 caishen_label=None):
+                 caishen_label=None, *, allow_claim_marker=True):
         self.template_dir = Path(template_dir or BASE_DIR/'templates_hongzhong_v2')
         self.min_score = min_score
         self.min_margin = min_margin
         # 本局财神 label（vision 词汇，如 's4'）。None=未知，此时角标不填牌。
         self.caishen_label = caishen_label
+        # Meld source arrows may require de-occlusion; river discard pointers
+        # are a different overlay and must keep their original glyph pixels.
+        self.allow_claim_marker = bool(allow_claim_marker)
         self.diagnostics = []
         self.detection_diagnostics = {}
         self.last_meld_boxes = []
@@ -935,7 +938,8 @@ class TileVision:
         self.load_templates()
         marked = caishen_badge(crop)
         # 副露"来源箭头"遮挡牌面上沿：先去遮挡再算签名（无箭头时 crop 原样）。
-        crop, claim_marker = strip_claim_marker(crop)
+        crop, claim_marker = (strip_claim_marker(crop)
+                              if self.allow_claim_marker else (crop, False))
         known = caishen_label in TILE_IDS
         # 只有"角标命中 + 本局财神已知"才做亮度补偿并计入：整手压暗是游戏
         # "请出牌"的瞬时状态，财神未知时角标牌也必须按未识别处理，两者都保持

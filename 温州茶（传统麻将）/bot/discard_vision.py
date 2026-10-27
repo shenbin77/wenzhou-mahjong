@@ -387,9 +387,13 @@ def load_vision(template_dir: str | Path | None = None):
     key = str(directory)
     cached = _VISION_CACHE.get(key)
     if cached is None:
+        # A discard pointer is not a meld source arrow.  The latter's
+        # preprocessing can erase real numeral strokes (native w9 -> weak w8).
+        # Keep the shared glyph templates and every score/margin gate unchanged.
         cached = TileVision(template_dir=directory,
                             min_score=RIVER_MIN_SCORE,
-                            min_margin=RIVER_MIN_MARGIN)
+                            min_margin=RIVER_MIN_MARGIN,
+                            allow_claim_marker=False)
         cached.load_templates()
         _VISION_CACHE[key] = cached
     return cached

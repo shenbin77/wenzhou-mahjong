@@ -124,17 +124,10 @@ def test_single_frame_reads_river_but_withholds_incoming() -> None:
         # 对手第一张弃牌：牌河从 0 张变 1 张，落在最右一格。
         ("20261023_205407_139587_491a9f.png",
          "20261023_205409_557426_31fea1.png", "xi", 63),
-        # 对手第 4 张弃牌，落在第 3 格。
-        # 2026-10-27 定性（Hana 人工核帧）：真值确为 w9，但该格被 sparkle
-        # 火焰标记遮挡顶部，分类 w8 0.8122/margin 0.02 被安全门拒绝，
-        # incoming=None。已知识别缺口，strict xfail 哨兵：sparkle 来牌
-        # 恢复落地后此用例应转绿，届时必须移除标记（strict 会报红提醒）。
-        pytest.param(
-            "20261023_205431_651989_577fbe.png",
-            "20261023_205433_718038_eae185.png", "w9", 9,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="sparkle 遮挡新弃牌读不出（真值 w9），修复项=sparkle 来牌恢复")),
+        # 对手第 4 张弃牌：河牌金色指示不应触发副露来源箭头去遮挡。
+        # 原始九万像素通过原阈值；副露专用预处理曾误改该字形。
+        ("20261023_205431_651989_577fbe.png",
+         "20261023_205433_718038_eae185.png", "w9", 9),
         # 中间隔着好几格的弃牌，证明不是"位置碰巧"。
         ("20261023_205600_608275_b1ebee.png",
          "20261023_205602_653365_521506.png", "nan", 62),
@@ -195,9 +188,6 @@ def test_evidence_is_jsonable() -> None:
     json.dumps(state.table.as_dict(), ensure_ascii=False)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="同一 w9 sparkle 帧：incoming 被安全门拒绝为 None，修复项=sparkle 来牌恢复")
 def test_previous_state_can_be_reused_as_baseline() -> None:
     """活循环里每帧只解一次像素：上一帧的 DiscardState 直接当基线。"""
     before = load_frame("20261023_205431_651989_577fbe.png")
@@ -520,9 +510,6 @@ def test_forget_discards_clears_the_registry(registry_key: str) -> None:
     assert "前后两帧" in state.reason
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="同一 w9 sparkle 帧：incoming 被安全门拒绝为 None，修复项=sparkle 来牌恢复")
 def test_explicit_previous_is_used_instead_of_the_registry(registry_key: str) -> None:
     """调用方自己管基线时，传进来的那个说话。"""
     baseline = snapshot_table(load_frame("20261023_205431_651989_577fbe.png"))

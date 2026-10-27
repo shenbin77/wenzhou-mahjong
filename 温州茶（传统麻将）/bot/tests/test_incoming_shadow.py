@@ -41,18 +41,25 @@ def test_default_off_does_not_read_or_evaluate(monkeypatch):
     assert action_policy.ActionPolicyConfig().incoming_shadow_enabled is False
 
 
-def test_real_margin_case_keeps_all_candidates_and_runtime_unchanged():
+def test_real_low_confidence_case_keeps_all_candidates_and_runtime_unchanged():
     frame = image(POSITIVE)
     hand_before = copy.deepcopy(HAND)
     resolved_off, evidence_off = action_policy.resolve_incoming(frame, HAND)
     raw = reading()
     assert raw["accepted"] is False
-    assert raw["label"] == "w3"
-    assert raw["reason"] == "tile_classifier_rejected:ambiguous"
+    # This native crop no longer undergoes meld-arrow cleanup.  Its raw
+    # top1 is a diagnostic only: both strict incoming thresholds still fail.
+    assert raw["label"] == "w2"
+    assert raw["score"] == pytest.approx(0.820012, abs=2e-6)
+    assert raw["margin"] == pytest.approx(0.069256, abs=2e-6)
+    assert raw["score"] < discard_vision.INCOMING_MIN_SCORE
+    assert raw["margin"] < discard_vision.INCOMING_MIN_MARGIN
+    assert raw["reason"] == "tile_confidence_low:0.820/0.069"
     assert len(raw["candidates"]) == len(raw["candidate_labels"]) >= 32
     assert len(raw["frame_sha256"]) == len(raw["crop_sha256"]) == 64
     report = evaluate_shadow(HAND, raw, config=ON, actual_runtime_decision="pass")
-    assert report["a3_eligible"] is True
+    assert report["a3_eligible"] is False
+    assert report["proposal_would_pass"] is False
     assert len(report["plausible_candidates"]) > 1
     assert report["identity_ambiguous"] is True
     assert report["identity_confirmed"] is False
@@ -64,6 +71,7 @@ def test_real_margin_case_keeps_all_candidates_and_runtime_unchanged():
     assert observed["actual_runtime_decision"] == "pass"
     resolved_on, evidence_on = action_policy.resolve_incoming(frame, HAND)
     assert (resolved_on, evidence_on) == (resolved_off, evidence_off)
+    assert resolved_off.incoming_tile is None
     assert HAND == hand_before
     assert HAND.incoming_tile is None
 
@@ -98,11 +106,15 @@ def test_full_set_catches_a_third_winning_candidate(monkeypatch):
     raw["candidates"] = sorted(
         [dict(c, score=scores.get(c["label"], 0.10)) for c in raw["candidates"]],
         key=lambda c: -c["score"])
-    raw.update(score=0.87, margin=0.04)
+    # Explicit synthetic ambiguous diagnostics exercise A3 independently of
+    # the current native frame's low-score rejection reason.
+    raw.update(score=0.87, margin=0.04, accepted=False, tile_id=None,
+               reason="tile_classifier_rejected:ambiguous")
     win_ids = {raw["candidates"][0]["tile_id"], raw["candidates"][2]["tile_id"]}
     monkeypatch.setattr(action_policy, "_engine", lambda: {
         "is_win": lambda tiles, **kwargs: tiles[-1] in win_ids})
     report = evaluate_shadow(HAND, raw, config=ON)
+    assert report["a3_eligible"] is True
     assert report["hu_result_per_candidate"][top3[0]] is True
     assert report["hu_result_per_candidate"][top3[1]] is False
     assert report["hu_result_per_candidate"][top3[2]] is True
