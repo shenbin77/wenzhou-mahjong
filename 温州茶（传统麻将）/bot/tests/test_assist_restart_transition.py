@@ -196,7 +196,7 @@ def test_startup_partial_promo_never_constructs_tap_executor(monkeypatch, tmp_pa
                                        report_dir=tmp_path)
     executor._serial = "emulator-5556"
     result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
-    assert result.status == "startup_blocked"
+    assert result.status == "startup_observe"
     assert "证据不完整" in result.reason
 
 
@@ -285,7 +285,7 @@ def test_real_match_end_refuses_return_share_and_continue_buttons():
     result = TeaAssistWindow._recover_startup_round_transition(executor)
 
     assert result.status == "startup_blocked"
-    assert "返回大厅、分享战绩和末局续局" in result.reason
+    assert "未授权整场落账和返回大厅" in result.reason
     assert taps == []
 
 
@@ -300,7 +300,7 @@ def test_real_table_without_visible_two_player_text_does_not_midhand_reattach():
 
     result = TeaAssistWindow._recover_startup_round_transition(executor)
 
-    assert result.status == "startup_not_settlement"
+    assert result.status == "startup_observe"
     assert result.evidence["active_table"]["mode"] is None
     assert taps == []
 

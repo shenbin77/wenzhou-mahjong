@@ -337,17 +337,22 @@ def test_loop_panel_flash_two_ticks_never_acts(tmp_path):
     assert loop.stopped is False
 
 
-def test_loop_settlement_frame_stops_and_never_falls_back(tmp_path):
+def test_loop_unknown_settlement_mask_observes_and_never_falls_back(tmp_path):
     loop, tap = make_loop(
         tmp_path, enabled=True,
         analyses=[good_advise(), panel_abstain()],
         frames=[NORMAL_PNG, SETTLED_PNG])
     loop.tick()
     event = loop.tick()
-    assert loop.stopped is True
-    assert event["turn_gate"]["code"] == "gate_settled"
+    from match_end import precise_settlement_evidence
+    image = cv2.imdecode(np.frombuffer(SETTLED_PNG, np.uint8), cv2.IMREAD_COLOR)
+    assert precise_settlement_evidence(image)[0] is False
+    assert loop.stopped is False
+    assert event["event"] == "idle" and event["scene"]["kind"] == "observe"
+    assert "turn_gate" not in event and "hint_panel" not in event
     assert tap.execute_calls == []
     assert tap.plan_calls == []
+    assert loop.actions_done == 0
 
 
 def test_loop_no_fallback_without_prior_advise(tmp_path):

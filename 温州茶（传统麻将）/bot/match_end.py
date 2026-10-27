@@ -6,7 +6,7 @@
 **返回大厅 / 分享战绩 / 继续游戏**。旧行为是 ``turn_gate`` 判 blocked →
 直接停机，整场代打就此结束，必须人工点返回大厅才能再来一局。
 
-## 本模块只做判定，不做点击
+## 判定与整场事务编排；实际点击仍归专用执行器
 
 判定用三组互相独立的证据，**任何一组不成立就 ``present=False``**，调用方
 保持原有停机语义（fail-closed）：
@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -188,3 +189,113 @@ def read_match_end(image: np.ndarray | None) -> MatchEndState:
                 f"返回大厅中心 {center(leave)}"),
         evidence=evidence,
     )
+
+
+def precise_settlement_evidence(image, *, round_probe=None,
+                                check_match: bool = True) -> tuple[bool, dict]:
+    """Positive settlement proof, excluding generic modal/dim overlays.
+
+    A full match requires the exact same-frame 16/16 HUD plus the three-button
+    layout. Between rounds requires the complete button/template/scene probe;
+    round_end_scene().ok alone is deliberately insufficient.
+    """
+    if check_match:
+        state = read_match_end(image)
+        if state.present:
+            from match_score import read_full_match_round
+            final_round = read_full_match_round(image)
+            if final_round.ok:
+                return True, {"settlement_kind": "match_end",
+                              "match_end": state.ledger(),
+                              "full_match_round": final_round.ledger()}
+    if round_probe is None:
+        from round_transition import find_next_round_button, round_end_scene
+        button = find_next_round_button(image, _next_round_template())
+        scene = round_end_scene(image)
+        matched = bool(button.get("ok") and scene.get("ok"))
+        evidence = {"button": button, "scene": scene}
+    else:
+        matched, evidence = round_probe(image)
+    return bool(matched), {"settlement_kind": "next_round" if matched else None,
+                           "round_transition_probe": evidence}
+
+
+@lru_cache(maxsize=1)
+def _next_round_template():
+    from round_transition import load_template
+    return load_template()
+
+
+def finish_match_summary(image, *, player_name: str, serial: str,
+                         frame_path, score_reader, persist_result, execute_leave,
+                         authorized, dry_run: bool = False,
+                         already_recorded: bool = False) -> dict:
+    """Shared 16/16 transaction: verified score -> durable row -> guarded exit.
+
+    Unknown pre-click score evidence is observation, not a replayable action.
+    All executor failures stay terminal: this function never retries a click.
+    """
+    from datetime import datetime
+    from tap_executor import TapAborted, TapUnverified
+
+    result = {"recorded": already_recorded}
+    def outcome(status, gate, reason, **extra):
+        return {**result, "status": status, "gate": gate,
+                "reason": reason, **extra}
+
+    if not authorized():
+        return outcome("blocked", "match_complete", "返回大厅未获当前授权；零点击")
+    try:
+        score_state = score_reader(image)
+    except Exception as exc:
+        return outcome("blocked", "match_score_failed",
+                       f"16/16 整场积分识别异常，未返回大厅：{exc}")
+    result["match_result"] = score_state.ledger()
+    if not score_state.ok:
+        return outcome("observe", "match_score_unverified",
+                       f"16/16 整场积分证据暂不完整，未点击并继续观察：{score_state.reason}")
+    player_score = score_state.score_for(player_name)
+    result.update(player_name=player_name or None, player_score=player_score)
+    if not player_name or player_score is None:
+        return outcome("blocked", "match_score_player_unverified",
+                       f"当前昵称 {player_name!r} 无法与总结栏唯一对应；未落账、未返回大厅")
+    row = {
+        "ts": datetime.now().astimezone().isoformat(), "event": "match_result",
+        "mode": "tea_2p", "serial": serial, "round_no": 16, "round_total": 16,
+        "player_name": player_name, "player_score": int(player_score),
+        "left_player": score_state.left_player, "left_score": score_state.left_score,
+        "right_player": score_state.right_player, "right_score": score_state.right_score,
+        "confidence": score_state.confidence, "frame": str(frame_path),
+        "source": "verified_16_of_16_summary",
+    }
+    result["match_result_record"] = row
+    if not authorized():
+        return outcome("blocked", "user_stop", "结算授权已撤销；未返回大厅")
+    if not dry_run and not already_recorded:
+        try:
+            persist_result(row)
+        except Exception as exc:
+            return outcome("blocked", "match_score_persist_failed",
+                           f"16/16 积分持久化失败，未返回大厅：{exc}")
+        result["recorded"] = True
+    if not authorized():
+        return outcome("blocked", "user_stop", "积分已保存但授权已撤销；未返回大厅")
+    try:
+        tap = execute_leave(image)
+        if not dry_run and (not tap.get("executed") or not tap.get("verified")):
+            return outcome("blocked", "leave_table_unverified",
+                           "返回大厅执行结果未验证；停手不补点", leave_table=tap)
+    except TapUnverified as exc:
+        return outcome("blocked", "leave_table_unverified",
+                       f"点返回大厅后无法证明版式消失，停手不补点：{exc}")
+    except TapAborted as exc:
+        return outcome("blocked", "leave_table_aborted", f"返回大厅被拒绝：{exc}")
+    except Exception as exc:
+        return outcome("blocked", "leave_table_failed", f"返回大厅结果未知：{exc}")
+    if dry_run:
+        return outcome("dry_run_plan", "", "dry_run 只记录16/16积分与返回计划，不写正式积分、不点击",
+                       leave_table=tap)
+    return outcome("left_table", "",
+                   f"16/16 整场积分已按昵称落账：{player_name} {player_score:+d}；"
+                   "已返回大厅并验证，本场状态作废",
+                   leave_table=tap)

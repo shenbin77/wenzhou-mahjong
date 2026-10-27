@@ -86,3 +86,74 @@ def assess_single_session(serial: str, assessment: LobbyAssessment) -> dict:
         "requires_table_proof": True,
         "execute": False,
     }
+
+
+@dataclass(frozen=True)
+class SessionScene:
+    """A read-only routing fact. It never grants permission to click."""
+    kind: str
+    reason: str
+    evidence: dict
+    state: Any = None
+
+    def ledger(self) -> dict:
+        return {"kind": self.kind, "reason": self.reason, **self.evidence}
+
+
+def classify_session_scene(image, *, round_probe=None) -> SessionScene:
+    """One priority order for explicit restart and the running play loop.
+
+    Exact overlays win over their obscured background. A missing gameplay
+    fact is not evidence of a lobby. Unknown scenes remain observation-only.
+    Each executor still owns its independent fresh-frame and authority gates.
+    """
+    import numpy as np
+    from invite_dialog import read_invitation
+    from promo_popup import read_promo_popup
+    from timeout_dissolve import read_timeout_dissolve
+    from match_end import read_match_end, precise_settlement_evidence
+    from lobby_autostart import read_lobby_room
+    from lobby_start import waiting_room_visual_evidence
+
+    if (not isinstance(image, np.ndarray) or image.ndim != 3
+            or image.shape[:2] != (900, 1600) or image.dtype != np.uint8):
+        return SessionScene("observe", "等待可核验的1600×900原生帧", {})
+    try:
+        for kind, reader in (("timeout_dissolve", read_timeout_dissolve),
+                             ("invitation", read_invitation),
+                             ("promo", read_promo_popup)):
+            state = reader(image)
+            if state.present:
+                return SessionScene(kind, state.reason, {kind: state.ledger()}, state)
+            if kind == "promo" and state.reason == "关闭按钮模板缺失":
+                return SessionScene("blocked", "促销遮罩无法核验：关闭按钮模板缺失",
+                                    {kind: state.ledger()})
+        match = read_match_end(image)
+        if match.present:
+            return SessionScene("match_end", match.reason,
+                                {"match_end": match.ledger()})
+        settled, evidence = precise_settlement_evidence(
+            image, round_probe=round_probe, check_match=False)
+        if settled:
+            return SessionScene("next_round", "已确认局间下一局三重门", evidence)
+        waiting = waiting_room_visual_evidence(image)
+        if waiting.get("matched"):
+            return SessionScene("waiting_room", "已确认等候室开始按钮",
+                                {"waiting_room": waiting})
+        room = read_lobby_room(image)
+        if room.present:
+            return SessionScene("lobby", room.reason, {"lobby_room": room.ledger()})
+        observed = classify_watch(image)
+        if observed.state == WatchState.LOGIN_SCREEN:
+            return SessionScene("blocked", "登录页不能沿用当前玩家授权",
+                                {"watch": observed.to_dict()})
+        if observed.state == WatchState.IN_GAME:
+            # This only routes to the existing identity/mode/hand gates.
+            return SessionScene("in_game", "牌桌候选，仍须通过当前局内门禁",
+                                {"watch": observed.to_dict()})
+        return SessionScene("observe", "场景暂不可确认；零点击继续观察",
+                            {"watch": observed.to_dict()})
+    except Exception as exc:
+        return SessionScene("observe",
+                            f"场景证据读取失败，零点击观察：{type(exc).__name__}: {exc}",
+                            {})

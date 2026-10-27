@@ -3,6 +3,10 @@
 
 ## 这份测试在防什么
 
+旧入口的离线白名单测试仍保留；当前生产主线不再调用 `_lobby_open_event`。
+主循环确认大厅后释放 worker，交回 UI 已有的 lobby_follow，末尾接线测试
+以真实大厅帧验证这一点，不再给大厅注入不存在的手牌或 HUD。
+
 ``lobby_autostart`` 只回答「房间画面上该点哪个空座」，**不点击**。点击是由
 ``auto_play_loop._lobby_open_event`` 经 ``TapExecutor.execute_open_table``
 这条**独立通道**完成的。接错一步的代价是：在别人正在打的真局里建桌、扣
@@ -632,30 +636,21 @@ def test_dry_run_without_image_is_refused(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 7. 主循环真的调用了它（接线本身，不只是方法存在）
+# 7. 主循环只向现有 UI 大厅流程交接，不启用旧独立入口
 # ---------------------------------------------------------------------------
-def test_tick_calls_the_lobby_channel_after_match_end(tmp_path):
-    """``tick()`` 里 ``_lobby_open_event`` 必须在 blocked 判断之前被调用。
+def test_tick_hands_lobby_back_without_using_legacy_open_channel(tmp_path):
+    """Real lobby pixels must route before gameplay; no invented HUD/hand."""
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("lobby reached gameplay facts or legacy open channel")
 
-    这是「断链有没有真的接上」的唯一一条测试：只测方法存在是不够的，
-    必须证明主循环真的会走到它。这里用真帧（房间画面）+ 真实门禁，
-    只把开新场方法换成探针。
-    """
-    import auto_play_loop as A
-
-    calls: list[str] = []
-    real = A.AutoPlayLoop._lobby_open_event
-
-    def spy(self, image, frame_path, base, started):
-        calls.append("lobby")
-        return None
-
-    A.AutoPlayLoop._lobby_open_event = spy
-    try:
-        loop = _left(_make_loop(tmp_path, enabled=True, tap=FakeTap(),
-                                lobby_open_enabled=True,
-                                frame=_read(ROOM_HOST)))
-        loop.tick()
-    finally:
-        A.AutoPlayLoop._lobby_open_event = real
-    assert calls == ["lobby"], "主循环没有调用开新场通道"
+    tap = FakeTap()
+    loop = _left(_make_loop(tmp_path, enabled=True, tap=tap,
+                            lobby_open_enabled=True, frame=_read(ROOM_HOST)))
+    loop._lobby_open_event = forbidden
+    loop._analyze = forbidden
+    loop._round_key = forbidden
+    event = loop.tick()
+    assert event["event"] == "stop"
+    assert event["gate"] == "scene_handoff"
+    assert event["scene"]["kind"] == "lobby"
+    assert tap.open_calls == []

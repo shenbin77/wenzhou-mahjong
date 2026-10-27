@@ -1,0 +1,46 @@
+{
+  "source_root": "original project capture archive",
+  "copied_without_transformation": true,
+  "frames": [
+    {
+      "file": "final_summary_16_of_16.png",
+      "source_relative": "温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_211056_emulator5556_烘熊瞎\\frames\\20261027_214600_741583_before_d65082.png",
+      "sha256": "d35556371911385af599fcdb7cc6680679cb2dfc0f1f00661db66543934fc8d6",
+      "size_bytes": 919290,
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "file": "competition_lobby.png",
+      "source_relative": "温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_211056_emulator5556_烘熊瞎\\frames\\20261027_221646_812670_before_956ebe.png",
+      "sha256": "2a533c6387c3780b5f1f83fdcf1ff58d137cf7123a4528985fa6d6edbb34ea5b",
+      "size_bytes": 762184,
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "file": "active_midhand_meld.png",
+      "source_relative": "温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_101013_emulator5554_玉姐\\frames\\20261027_103931_593362_after_claim_b6d2f2.png",
+      "sha256": "5ae639b1b25ef2c192d5d51a187f88bd9aabafdc97d9b902ab5b4d2660970df6",
+      "size_bytes": 877334,
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "file": "invitation_over_table.png",
+      "source_relative": "温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_210205_emulator5554_玉姐\\frames\\20261027_215334_380954_before_bbc99b.png",
+      "sha256": "39e1ebaf3648c7374d1d775db61a30e074ac852e4a9b50817384a7d648bd5bb4",
+      "size_bytes": 664224,
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "file": "renew_table_modal.png",
+      "source_relative": "温州茶（传统麻将）\\采集\\assist_sessions\\20261024_002903\\live\\tea_2p\\20261024_003931_190898_b4112e.png",
+      "sha256": "6c478f6c4a08abfdb0bdc4384c4631f08456cf6d677cdf625f740a937dcd0462",
+      "size_bytes": 618758,
+      "width": 1600,
+      "height": 900
+    }
+  ]
+}

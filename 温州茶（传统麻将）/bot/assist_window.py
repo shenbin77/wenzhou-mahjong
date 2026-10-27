@@ -22,7 +22,7 @@ import time
 import tkinter as tk
 from ctypes import wintypes
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -192,6 +192,16 @@ def stacked_kong_summary(result: dict) -> str:
             continue
         names.append(f"{tile_name(vision_to_engine(tile_id))}杠（4张）")
     return "、".join(names)
+@dataclass(frozen=True)
+class _TransitionSubmission:
+    """Authority and click-window identity captured when one worker is queued."""
+    generation: int
+    mode: str
+    round_no: int | None
+    cancel_event: Event
+    executor: object
+
+
 MODES = {"温州茶 · 2人": "tea_2p", "温州茶 · 4人": "tea_4p", "温州熟 · 4人": "shu_4p"}
 PROJECT_ROOT = TEA_ROOT.parent
 PREFLIGHT_FRAMES = {
@@ -629,6 +639,9 @@ class TeaAssistWindow:
         self._round_transition_future: Future | None = None
         self._round_transition_future_mode: str | None = None
         self._round_transition_cancel_event: Event | None = None
+        self._round_transition_generation = 0
+        self._round_transition_submission: _TransitionSubmission | None = None
+        self._round_transition_restart_mode: str | None = None
         # ``start()`` may recover a process restart from a verified between-
         # round summary.  Keep its authority separate from full auto: a
         # follow-only click may continue observing, but must never acquire
@@ -3120,6 +3133,9 @@ class TeaAssistWindow:
         # transition is in flight.
         self._auto_resume_pending = True
         self.full_auto_status.set("本局结束：正在核验局间页「下一局」按钮（单次点击）。")
+        self._round_transition_submission = _TransitionSubmission(
+            int(getattr(self, "_round_transition_generation", 0)),
+            "full_auto", round_no, cancel_event, executor)
         self._round_transition_future = self.auto_executor.submit(
             executor.attempt, round_no=round_no, cancel_event=cancel_event)
         self._round_transition_future_mode = "full_auto"
@@ -3144,190 +3160,245 @@ class TeaAssistWindow:
         return executor
 
     @staticmethod
-    def _recover_startup_round_transition(executor, cancel_event=None):
-        """Read once, then either use the existing guarded executor or abstain.
+    def _recover_startup_round_transition(
+            executor, cancel_event=None, *, player_name: str = "",
+            allow_return_lobby: bool = False):
+        """Route one fresh scene through existing guarded action channels.
 
-        This runs only after an explicit follow/full-auto/resume request.  The
-        preflight prevents a restart on a terminal result, dissolved-match
-        modal, or other settlement overlay from falling through to the lobby
-        click channel.  A positive candidate still goes through ``attempt``'s
-        own fresh-frame recheck before its single click.
+        Unknown pre-click pixels remain read-only observation. An executor
+        exception is terminal even when it might have failed before its tap:
+        callers cannot prove that no click was sent, so they never replay it.
         """
-        from match_end import read_match_end
+        from lobby_preflight import classify_session_scene
         from round_transition import TransitionResult
 
-        if cancel_event is not None and cancel_event.is_set():
-            return TransitionResult(
-                "cancelled", "重启续局授权已撤销；预检前零点击")
+        def cancelled():
+            return cancel_event is not None and cancel_event.is_set()
 
+        if cancelled():
+            return TransitionResult("cancelled", "接入授权已撤销；预检前零点击")
         try:
             frame = executor._capture()
-        except Exception as exc:  # noqa: BLE001 - fail closed before any tap
+        except Exception as exc:  # no executor has received a click request
             return TransitionResult(
-                "startup_blocked",
-                f"重启续局预检失败，已停手且未点击：{type(exc).__name__}: {exc}")
-        if cancel_event is not None and cancel_event.is_set():
-            return TransitionResult(
-                "cancelled", "重启续局授权已撤销；首帧后零点击")
+                "startup_observe", f"当前帧读取失败，零点击继续观察：{type(exc).__name__}: {exc}")
+        if cancelled():
+            return TransitionResult("cancelled", "接入授权已撤销；首帧后零点击")
+        scene = classify_session_scene(frame, round_probe=executor.probe)
+        evidence = {"session_scene": scene.ledger()}
+        serial = getattr(executor, "_serial", None)
+        session_dir = getattr(executor, "_report_dir", None)
 
-        # A known promotion can obscure the settlement page. Reuse its
-        # dedicated executor before interpreting any pixels underneath it;
-        # unknown overlays must still take the existing fail-closed path.
-        try:
-            from promo_popup import read_promo_popup
-            promo = read_promo_popup(frame)
-        except Exception as exc:  # noqa: BLE001 - no action on unknown state
-            return TransitionResult(
-                "startup_blocked", f"促销遮罩预检失败：{type(exc).__name__}: {exc}")
-        invalid_promo_reasons = {
-            "帧像素类型未验证", "不是已验证的 1600×900 原生帧", "关闭按钮模板缺失"}
-        if not promo.present and promo.reason in invalid_promo_reasons:
-            return TransitionResult("startup_blocked", f"促销遮罩无法核验：{promo.reason}")
-        if promo.present:
-            if promo.close_center is None:
+        # One exact overlay channel, followed by a new scene reading. Never
+        # infer gameplay state from the pixels obscured by that overlay.
+        if scene.kind in {"promo", "invitation", "timeout_dissolve"}:
+            data = scene.evidence[scene.kind]
+            point_key, method = {
+                "promo": ("close_center", "execute_close_popup"),
+                "invitation": ("cancel_center", "execute_invitation_cancel"),
+                "timeout_dissolve": ("confirm_center", "execute_timeout_dissolve_confirm"),
+            }[scene.kind]
+            point = data.get(point_key)
+            if (point is None or (scene.kind != "promo" and not data.get("complete"))):
                 return TransitionResult(
-                    "startup_blocked", "促销遮罩关闭按钮证据不完整，未点击",
-                    evidence={"promo_popup": promo.ledger()})
-            serial = getattr(executor, "_serial", None)
-            session_dir = getattr(executor, "_report_dir", None)
+                    "startup_observe", "遮罩专用按钮证据不完整；零点击继续观察",
+                    evidence=evidence)
             if cancel_event is None or not serial or session_dir is None:
                 return TransitionResult(
-                    "startup_blocked", "促销关闭缺少接入授权或会话证据目录，未点击",
-                    evidence={"promo_popup": promo.ledger()})
-            if cancel_event.is_set():
-                return TransitionResult("cancelled", "接入授权已撤销，未关闭促销遮罩")
+                    "startup_blocked", "结算/模态处理缺少接入授权或会话证据目录，未点击",
+                    evidence=evidence)
+            if cancelled():
+                return TransitionResult("cancelled", "接入授权已撤销，未处理遮罩")
             try:
                 from tap_executor import TapExecutor
-                popup_executor = TapExecutor(
-                    enabled=True, adb_path=get_adb_path(), serial=serial,
-                    session_dir=session_dir)
-                popup_executor.authorization_check = lambda: not cancel_event.is_set()
-                outcome = popup_executor.execute_close_popup(
-                    promo.close_center, image=frame, session_dir=session_dir)
+                tap = TapExecutor(enabled=True, adb_path=get_adb_path(),
+                                  serial=serial, session_dir=session_dir)
+                tap.authorization_check = lambda: not cancelled()
+                outcome = getattr(tap, method)(
+                    tuple(point), image=frame, session_dir=session_dir)
                 if not outcome.get("executed") or not outcome.get("verified"):
-                    raise RuntimeError("促销关闭结果未验证")
-            except Exception as exc:  # noqa: BLE001 - never repeat uncertain taps
+                    raise RuntimeError("遮罩处理结果未验证")
+            except Exception as exc:  # never repeat an uncertain tap
                 return TransitionResult(
-                    "startup_blocked", f"促销关闭未确认，已停止：{type(exc).__name__}: {exc}",
-                    evidence={"promo_popup": promo.ledger()})
-            if cancel_event.is_set():
-                return TransitionResult("cancelled", "接入授权已撤销，关闭后不再续局")
+                    "startup_blocked", f"遮罩处理未确认，已停止：{type(exc).__name__}: {exc}",
+                    evidence=evidence)
+            evidence["overlay_completed"] = {"kind": scene.kind, "outcome": outcome}
+            if cancelled():
+                return TransitionResult("cancelled", "接入授权已撤销，遮罩处理后不再行动",
+                                        clicked=True, evidence=evidence)
+            if scene.kind == "timeout_dissolve":
+                return TransitionResult(
+                    "startup_recheck", "精确超时解散已确认；本场作废，重读场景接管新场",
+                    clicked=True, evidence=evidence)
             try:
                 frame = executor._capture()
-                after_promo = read_promo_popup(frame)
-            except Exception as exc:  # noqa: BLE001 - post-click uncertainty
+            except Exception as exc:
                 return TransitionResult(
-                    "startup_blocked", f"促销关闭后画面读取失败：{type(exc).__name__}: {exc}")
-            if (not after_promo.present
-                    and after_promo.reason in invalid_promo_reasons):
+                    "startup_recheck", f"遮罩关闭已验证，等待下一张场景帧：{exc}",
+                    clicked=True, evidence=evidence)
+            next_scene = classify_session_scene(frame, round_probe=executor.probe)
+            if next_scene.kind == scene.kind:
                 return TransitionResult(
-                    "startup_blocked", f"促销关闭后画面无法核验：{after_promo.reason}")
-            if after_promo.present:
-                return TransitionResult(
-                    "startup_blocked", "促销关闭后仍有遮罩，不重复点击",
-                    evidence={"promo_popup": after_promo.ledger()})
-            if cancel_event.is_set():
-                return TransitionResult("cancelled", "接入授权已撤销，关闭后不再续局")
-        try:
-            match_end = read_match_end(frame)
-        except Exception as exc:  # noqa: BLE001 - fail closed before transition
-            return TransitionResult(
-                "startup_blocked", f"整场结束页读取失败：{type(exc).__name__}: {exc}")
-        if match_end.present:
-            return TransitionResult(
-                "startup_blocked",
-                "已识别本场结束页；返回大厅、分享战绩和末局续局均永久拒绝",
-                evidence={"match_end": match_end.ledger()})
+                    "startup_blocked", "专用遮罩处理后仍有同类遮罩，停手且不重复点击",
+                    clicked=True, evidence={**evidence, "after_scene": next_scene.ledger()})
+            scene = next_scene
+            evidence["session_scene"] = scene.ledger()
+            if cancelled():
+                return TransitionResult("cancelled", "接入授权已撤销，关闭后不再续局",
+                                        clicked=True, evidence=evidence)
 
-        try:
-            candidate, evidence = executor.probe(frame)
-        except Exception as exc:  # noqa: BLE001 - fail closed before any tap
+        if scene.kind == "blocked":
+            return TransitionResult("startup_blocked", scene.reason, evidence=evidence)
+        if scene.kind == "match_end":
+            if not allow_return_lobby:
+                return TransitionResult(
+                    "startup_blocked", "已识别本场结束页；当前请求未授权整场落账和返回大厅",
+                    evidence=evidence)
+            if cancel_event is None or not player_name or not serial or session_dir is None:
+                return TransitionResult(
+                    "startup_blocked", "整场返回缺少本人、设备或当前授权，未点击", evidence=evidence)
+            from player_identity import detect_player_identity
+            identity = detect_player_identity(frame, player_name)
+            evidence["player_identity"] = vars(identity)
+            if not identity.matched:
+                return TransitionResult(
+                    "startup_blocked" if identity.status == "mismatch" else "startup_observe",
+                    "总结页尚未证明当前本人身份；未落账、未返回大厅：" + identity.detail,
+                    evidence=evidence)
+            from auto_play_loop import AutoPlayLoop
+            from match_end import finish_match_summary
+            from match_score import read_match_score
+            from tap_executor import TapExecutor
+            report_dir = Path(session_dir)
+            frame_path = report_dir / "frames" / f"startup_summary_{time.time_ns()}.png"
+            try:
+                frame_path.parent.mkdir(parents=True, exist_ok=True)
+                encoded, buffer = cv2.imencode(".png", frame)
+                if not encoded:
+                    raise RuntimeError("总结帧编码失败")
+                frame_path.write_bytes(buffer.tobytes())
+            except Exception as exc:
+                return TransitionResult("startup_blocked", f"总结证据保存失败，未点击：{exc}",
+                                        evidence=evidence)
+            tap = TapExecutor(enabled=True, adb_path=get_adb_path(),
+                              serial=serial, session_dir=session_dir)
+            tap.authorization_check = lambda: not cancelled()
+            result = finish_match_summary(
+                frame, player_name=player_name, serial=serial, frame_path=frame_path,
+                score_reader=read_match_score,
+                persist_result=lambda row: AutoPlayLoop._append_line(
+                    report_dir / "match_results.jsonl", json.dumps(row, ensure_ascii=False)),
+                execute_leave=lambda current: tap.execute_leave_table(
+                    image=current, session_dir=session_dir),
+                authorized=lambda: not cancelled())
+            status = {"left_table": "startup_recheck", "observe": "startup_observe"}.get(
+                result["status"], "startup_blocked")
+            return TransitionResult(status, result["reason"],
+                                    clicked=result["status"] == "left_table",
+                                    evidence={**evidence, "match_transaction": result})
+        if scene.kind == "next_round":
+            # A restarted local round counter is not authority. The same
+            # template/geometry/scene and fresh-frame executor own the tap.
+            return executor.attempt(round_no=None, round_total=0, cancel_event=cancel_event)
+        if scene.kind in {"lobby", "waiting_room"}:
             return TransitionResult(
-                "startup_blocked",
-                f"局间页门禁读取失败，已停手且未点击：{type(exc).__name__}: {exc}")
-        if candidate:
-            # A restarted process cannot trust its local round counter.  The
-            # existing visual gates/fresh recheck decide; the enclosing future
-            # guarantees this attempt is submitted only once.
-            return executor.attempt(
-                round_no=None, round_total=0, cancel_event=cancel_event)
-
-        scene = (evidence or {}).get("scene") or {}
-        if scene.get("ok"):
-            return TransitionResult(
-                "startup_blocked",
-                "当前是结算/模态画面，但没有合法「下一局」三重门；"
-                "可能为等待超时解散、末局或被遮挡页面，拒绝所有点击",
+                "startup_not_settlement", "已确认大厅/等候室，交给同一既有入座开局门禁",
                 evidence=evidence)
-
-        # 显式重按“开始跟随/开启全自动”时，牌局可能仍在本把中。旧逻辑把
-        # 所有非结算帧都送去大厅找位，导致正在打牌的桌面被当成等候室并卡在
-        # start_button_geometry_rejected。这里只做零点击的正证据分流；真正接管
-        # 仍须重新通过 start() 里的本人身份、玩法和自动点击门禁。
-        try:
-            from lobby_start import waiting_room_visual_evidence
-            from mode_vision import visible_caishen_label
-            from session_watch import WatchState, classify_watch
-            from tile_vision import TileVision
-
-            watch = classify_watch(frame)
-            waiting = waiting_room_visual_evidence(frame)
-            mode_key, mode_detail = detect_table_mode(frame)
-            vision = TileVision()
-            concealed_count, physical_boxes = vision.count_tiles(frame)
-            exposed_count = len(vision.last_meld_boxes or ())
-            physical_total = int(concealed_count) + exposed_count
-            caishen = visible_caishen_label(frame)
-            in_game_evidence = {
-                "watch": watch.state.value,
-                "start_button": bool(waiting.get("matched")),
-                "mode": mode_key,
-                "mode_detail": mode_detail,
-                "caishen": caishen,
-                "concealed_count": int(concealed_count),
-                "exposed_box_count": exposed_count,
-                "physical_hand_count": physical_total,
-                "physical_hand_boxes": [list(map(int, box[:4]))
-                                        for box in (physical_boxes or ())],
-            }
-            if (watch.state == WatchState.IN_GAME
-                    and not waiting.get("matched")
-                    and mode_key == "tea_2p"
-                    and caishen is not None
-                    and physical_total in (16, 17)
-                    and exposed_count % 3 == 0):
-                return TransitionResult(
-                    "startup_in_game",
-                    "已确认当前仍在温州茶2人牌桌；零大厅点击，重读当下状态后接管",
-                    evidence={**(evidence or {}),
-                              "active_table": in_game_evidence})
-            evidence = {**(evidence or {}), "active_table": in_game_evidence}
-        except Exception as exc:  # noqa: BLE001 - 读不全就不走局中快捷分流
-            evidence = {**(evidence or {}), "active_table": {
-                "reason": f"active_table_probe_failed:{type(exc).__name__}:{exc}"}}
+        if scene.kind == "in_game":
+            try:
+                from mode_vision import visible_caishen_label
+                from tile_vision import TileVision
+                mode_key, mode_detail = detect_table_mode(frame)
+                vision = TileVision()
+                concealed_count, physical_boxes = vision.count_tiles(frame)
+                exposed_count = len(vision.last_meld_boxes or ())
+                physical_total = int(concealed_count) + exposed_count
+                caishen = visible_caishen_label(frame)
+                active = {
+                    "mode": mode_key, "mode_detail": mode_detail, "caishen": caishen,
+                    "concealed_count": int(concealed_count), "exposed_box_count": exposed_count,
+                    "physical_hand_count": physical_total,
+                    "physical_hand_boxes": [list(map(int, box[:4]))
+                                            for box in (physical_boxes or ())],
+                }
+                evidence["active_table"] = active
+                if mode_key is not None and mode_key != "tea_2p":
+                    return TransitionResult("startup_blocked", "当前玩法不是已授权温州茶2人",
+                                            evidence=evidence)
+                if (mode_key == "tea_2p" and caishen is not None
+                        and physical_total in (16, 17) and exposed_count % 3 == 0):
+                    return TransitionResult(
+                        "startup_in_game", "已确认当前温州茶2人牌桌；重读本人和本局状态后接管",
+                        evidence=evidence)
+            except Exception as exc:
+                evidence["active_table_error"] = f"{type(exc).__name__}: {exc}"
         return TransitionResult(
-            "startup_not_settlement",
-            "当前画面不是可续接的局间结算页，转入既有大厅/等候室门禁",
-            evidence=evidence)
+            "startup_observe", "场景或局内证据暂不完整；零新点击继续观察", evidence=evidence)
 
     def _begin_startup_round_transition(self, mode: str) -> None:
         """One-shot restart recovery, entered only by an explicit request."""
-        if getattr(self, "_round_transition_future", None) is not None:
-            self.full_auto_status.set(
-                "重启续局核验已在进行；重复请求不会再次提交或点击。")
-            return
-        executor = self._ensure_round_transition_executor()
         mode = "full_auto" if mode == "full_auto" else "follow"
+        if getattr(self, "_round_transition_future", None) is not None:
+            submission = getattr(self, "_round_transition_submission", None)
+            token = (submission.cancel_event if submission is not None else
+                     getattr(self, "_round_transition_cancel_event", None))
+            revoked = ((token is not None and token.is_set())
+                       or (submission is not None and submission.generation !=
+                           getattr(self, "_round_transition_generation", 0)))
+            if revoked:
+                self._round_transition_restart_mode = mode
+                self._round_transition_resume_mode = mode
+                self._transition_follow_pending = mode == "follow"
+                self.full_auto_status.set(
+                    "旧任务授权已撤销；待其退出后只提交一次全新场景核验。")
+            else:
+                self.full_auto_status.set(
+                    "重启续局核验已在进行；重复请求不会再次提交或点击。")
+            return
+        self._round_transition_restart_mode = None
+        timer = getattr(self, "_startup_observe_timer", None)
+        self._startup_observe_timer = None
+        if timer is not None:
+            try:
+                self.root.after_cancel(timer)
+            except (AttributeError, tk.TclError):
+                pass
+        executor = self._ensure_round_transition_executor()
         cancel_event = Event()
         self._round_transition_resume_mode = mode
         self._transition_follow_pending = mode == "follow"
         self.full_auto_status.set(
-            "正在核验当前画面是否为可安全续接的局间页；只允许一次「下一局」。")
+            "正在核验当前场景；只将已确认场景交给相应专用门禁。")
+        account = getattr(self, "account", None)
+        player_name = account.get().strip() if account is not None else ""
+        self._round_transition_submission = _TransitionSubmission(
+            int(getattr(self, "_round_transition_generation", 0)),
+            mode, None, cancel_event, executor)
         self._round_transition_future = self.auto_executor.submit(
-            self._recover_startup_round_transition, executor, cancel_event)
+            self._recover_startup_round_transition, executor, cancel_event,
+            player_name=player_name, allow_return_lobby=mode == "full_auto")
         self._round_transition_future_mode = mode
         self._round_transition_cancel_event = cancel_event
         self.root.after(200, self._poll_round_transition)
+
+    def _schedule_startup_observation(self, mode: str, delay_ms: int = 1000) -> None:
+        """One cancellable read-only retry before any uncertain click."""
+        if (getattr(self, "_quitting", False) or not self._round_transition_authorized()
+                or getattr(self, "_round_transition_future", None) is not None
+                or getattr(self, "_startup_observe_timer", None) is not None):
+            return
+        generation = int(getattr(self, "_startup_observe_generation", 0))
+
+        def observe():
+            self._startup_observe_timer = None
+            if (generation != getattr(self, "_startup_observe_generation", 0)
+                    or getattr(self, "_quitting", False)
+                    or not self._round_transition_authorized()
+                    or mode != self._active_round_transition_mode()):
+                return
+            self._begin_startup_round_transition(mode)
+
+        self._startup_observe_timer = self.root.after(max(200, int(delay_ms)), observe)
 
     def _active_round_transition_mode(self) -> str | None:
         mode = getattr(self, "_round_transition_resume_mode", None)
@@ -3358,20 +3429,42 @@ class TeaAssistWindow:
             return
         was_accepted_observer = bool(getattr(
             self, "_accepted_round_observing", False))
-        submitted_mode = (getattr(self, "_round_transition_future_mode", None)
+        submission = getattr(self, "_round_transition_submission", None)
+        submitted_mode = (submission.mode if submission is not None else
+                          getattr(self, "_round_transition_future_mode", None)
                           or self._active_round_transition_mode())
+        submitted_token = (submission.cancel_event if submission is not None else
+                           getattr(self, "_round_transition_cancel_event", None))
         observer_generation = getattr(
             self, "_accepted_round_future_generation", None)
         self._round_transition_future = None
         self._round_transition_future_mode = None
         self._round_transition_cancel_event = None
+        self._round_transition_submission = None
         if was_accepted_observer:
             self._accepted_round_observing = False
             self._accepted_round_future_generation = None
             self._accepted_round_cancel_event = None
+        result, error = None, None
         try:
             result = future.result()
         except Exception as exc:  # noqa: BLE001
+            error = exc
+        revoked = ((submitted_token is not None and submitted_token.is_set())
+                   or (submission is not None and submission.generation !=
+                       getattr(self, "_round_transition_generation", 0)))
+        if revoked:
+            # A newer request cannot adopt an old result, including an error.
+            # It may only start fresh after this old worker has been collected.
+            restart_mode = getattr(self, "_round_transition_restart_mode", None)
+            self._round_transition_restart_mode = None
+            if (restart_mode in ("follow", "full_auto")
+                    and restart_mode == self._active_round_transition_mode()
+                    and self._round_transition_authorized()
+                    and not getattr(self, "_quitting", False)):
+                self._begin_startup_round_transition(restart_mode)
+            return
+        if error is not None:
             if (submitted_mode in ("follow", "full_auto")
                     and (submitted_mode != self._active_round_transition_mode()
                          or not self._round_transition_authorized())):
@@ -3382,7 +3475,7 @@ class TeaAssistWindow:
                 self._auto_resume_pending = False
             self._transition_follow_pending = False
             self._round_transition_resume_mode = None
-            self.full_auto_status.set(f"下一局执行异常，已停手：{exc}")
+            self.full_auto_status.set(f"下一局执行异常，已停手：{error}")
             return
         if (was_accepted_observer
                 and (observer_generation != getattr(
@@ -3393,7 +3486,7 @@ class TeaAssistWindow:
                 and (submitted_mode != self._active_round_transition_mode()
                      or not self._round_transition_authorized())):
             return
-        self._on_round_transition_result(result)
+        self._on_round_transition_result(result, submission=submission)
 
     def _revoke_round_transition_authority(self) -> None:
         """Revoke one in-flight UI transition without losing its lifecycle.
@@ -3403,6 +3496,18 @@ class TeaAssistWindow:
         Event is checked at every pre-click boundary and, after a committed tap,
         limits the worker to read-only verification.
         """
+        self._round_transition_generation = int(getattr(
+            self, "_round_transition_generation", 0)) + 1
+        self._round_transition_restart_mode = None
+        self._startup_observe_generation = int(getattr(
+            self, "_startup_observe_generation", 0)) + 1
+        timer = getattr(self, "_startup_observe_timer", None)
+        self._startup_observe_timer = None
+        if timer is not None:
+            try:
+                self.root.after_cancel(timer)
+            except (AttributeError, tk.TclError):
+                pass
         cancel_event = getattr(self, "_round_transition_cancel_event", None)
         if cancel_event is not None:
             cancel_event.set()
@@ -3477,13 +3582,17 @@ class TeaAssistWindow:
             clicked=False,
             evidence={"accepted_waiting_observe": observations})
 
-    def _begin_accepted_round_observation(self) -> None:
+    def _begin_accepted_round_observation(self, *, submission=None) -> None:
         """Continue an accepted transition without re-entering click logic."""
         if (not self._round_transition_authorized()
                 or getattr(self, "_accepted_round_observing", False)
                 or getattr(self, "_round_transition_future", None) is not None):
             return
-        executor = getattr(self, "_round_transition", None)
+        if (submission is not None and submission.generation !=
+                getattr(self, "_round_transition_generation", 0)):
+            return
+        executor = (submission.executor if submission is not None else
+                    getattr(self, "_round_transition", None))
         if executor is None:
             self.full_auto_status.set(
                 "下一局点击已接受；等待新局正证据（不会重复点击）。")
@@ -3491,7 +3600,8 @@ class TeaAssistWindow:
         capture = getattr(executor, "_capture")
         probe = getattr(executor, "_probe")
         sleep = getattr(executor, "_sleep", time.sleep)
-        round_no = int(getattr(self, "round_no", 0) or 0) or None
+        round_no = (submission.round_no if submission is not None else
+                    int(getattr(self, "round_no", 0) or 0) or None)
         generation = int(getattr(
             self, "_accepted_round_observe_generation", 0)) + 1
         cancel_event = Event()
@@ -3509,12 +3619,15 @@ class TeaAssistWindow:
         self._accepted_round_cancel_event = cancel_event
         self._round_transition_cancel_event = cancel_event
         self._accepted_round_observing = True
+        self._round_transition_submission = _TransitionSubmission(
+            int(getattr(self, "_round_transition_generation", 0)),
+            self._active_round_transition_mode(), round_no, cancel_event, executor)
         self._round_transition_future = self.auto_executor.submit(observe)
         self._round_transition_future_mode = self._active_round_transition_mode()
         self.root.after(200, self._poll_round_transition)
 
     def _schedule_accepted_round_observation(
-            self, delay_ms: int = 1000) -> None:
+            self, delay_ms: int = 1000, *, submission=None) -> None:
         """Queue one later observation segment; never stack timers/workers."""
         if (getattr(self, "_quitting", False)
                 or not self._round_transition_authorized()
@@ -3528,7 +3641,7 @@ class TeaAssistWindow:
             if (getattr(self, "_quitting", False)
                     or not self._round_transition_authorized()):
                 return
-            self._begin_accepted_round_observation()
+            self._begin_accepted_round_observation(submission=submission)
 
         self._accepted_round_observe_timer = self.root.after(
             max(200, int(delay_ms)), resume_observation)
@@ -3558,7 +3671,7 @@ class TeaAssistWindow:
         # operation in one place avoids racing/double-cancelling the same
         # Future while this method only invalidates observer generations.
 
-    def _on_round_transition_result(self, result) -> None:
+    def _on_round_transition_result(self, result, *, submission=None) -> None:
         status = getattr(result, "status", "")
         reason = getattr(result, "reason", "")
         mode = TeaAssistWindow._active_round_transition_mode(self)
@@ -3567,6 +3680,26 @@ class TeaAssistWindow:
         # the old in-process contract for injected callers and older tests.
         if mode is None and not status.startswith("startup_"):
             mode = "full_auto"
+        if status == "no_click" and getattr(result, "clicked", None) is False:
+            # All no_click returns in RoundTransitionExecutor precede _tap.
+            # A prior registered click is different from a fresh miss: retain
+            # its lock and use the existing observer, never restart with None.
+            # Without a submission context the old click window is unknown:
+            # observation is safe, starting a new click attempt is not.
+            locked = submission is None or (
+                submission.round_no is not None and submission.round_no in getattr(
+                    submission.executor, "_clicked_rounds", set()))
+            status = "accepted_waiting" if locked else "startup_observe"
+        if status in {"startup_observe", "startup_recheck"}:
+            if mode == "full_auto":
+                self._auto_resume_pending = True
+            else:
+                self._transition_follow_pending = True
+            self._round_transition_resume_mode = mode
+            self.full_auto_status.set(reason)
+            self._set_operational_status("场景观察", reason, level="wait")
+            self._schedule_startup_observation(mode)
+            return
         if status == "startup_in_game":
             self._transition_follow_pending = False
             self._lobby_in_game_verified = True
@@ -3626,7 +3759,7 @@ class TeaAssistWindow:
                 f"{reason}；保持当前授权，只读等待新局正证据，不重复点击。")
             self._set_operational_status(
                 "局间等待", "下一局点击已接受；等待对手/发牌", level="wait")
-            self._begin_accepted_round_observation()
+            self._begin_accepted_round_observation(submission=submission)
             return
         if status == "accepted_waiting_timeout":
             if mode == "full_auto":
@@ -3639,7 +3772,7 @@ class TeaAssistWindow:
                 f"{reason}；未记新局、未重复点击，稍后继续只读观察。")
             self._set_operational_status(
                 "局间等待", "本段观察结束；稍后自动继续读取", level="wait")
-            self._schedule_accepted_round_observation()
+            self._schedule_accepted_round_observation(submission=submission)
             return
         cancel_observation = getattr(
             self, "_cancel_accepted_round_observation", None)
@@ -5276,8 +5409,17 @@ class TeaAssistWindow:
             reason = summary.get("stop_reason") or "运行已结束"
             user_stop = "用户" in reason
             if (not user_stop and getattr(self, "_full_auto_wanted", False)
+                    and summary.get("stop_gate") in {"scene_handoff", "match_dissolved"}):
+                # The old worker is already collected above. Re-enter the one
+                # existing startup/lobby path with new facts and the same intent.
+                self._lobby_in_game_verified = False
+                self._auto_resume_pending = True
+                self._begin_startup_round_transition("full_auto")
+                return
+            if (not user_stop and getattr(self, "_full_auto_wanted", False)
                     and self._is_round_end_stop(summary)):
                 self._begin_round_transition(summary)
+                return
             self.full_auto_status.set(
                 f"全自动已停止；已验证动作 {summary.get('actions', 0)} 次。{reason}")
             self._set_operational_status(

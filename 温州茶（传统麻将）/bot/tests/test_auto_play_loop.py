@@ -418,7 +418,7 @@ def test_invitation_is_declined_before_any_game_analysis(monkeypatch, tmp_path):
         cancel_box=(508, 540, 753, 640), cancel_center=(630, 590),
         reason="邀请证据完整",
     )
-    monkeypatch.setattr(auto_play_loop, "read_invitation", lambda _image: state)
+    monkeypatch.setattr("invite_dialog.read_invitation", lambda _image: state)
     loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
     event = loop.tick()
@@ -432,20 +432,21 @@ def test_invitation_is_declined_before_any_game_analysis(monkeypatch, tmp_path):
     assert loop.actions_done == 0 and loop.stopped is False
 
 
-def test_incomplete_invitation_stops_without_clicking_anywhere(monkeypatch,
+def test_incomplete_invitation_observes_without_clicking_anywhere(monkeypatch,
                                                                 tmp_path):
     state = InvitationState(
         present=True, complete=False, phrase_score=.99, cancel_score=.4,
         phrase_box=(765, 360, 935, 399),
         reason="命中邀请文案，但矩形取消按钮证据不足",
     )
-    monkeypatch.setattr(auto_play_loop, "read_invitation", lambda _image: state)
+    monkeypatch.setattr("invite_dialog.read_invitation", lambda _image: state)
     loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
     event = loop.tick()
 
-    assert event["event"] == "stop"
-    assert event["gate"] == "gate_invitation_unresolved"
+    assert event["event"] == "idle"
+    assert "零点击继续观察" in event["reason"]
+    assert loop.stopped is False
     assert analyzer.calls == 0
     assert tap.execute_invitation_calls == []
     assert tap.execute_calls == [] and tap.execute_claim_calls == []
@@ -467,7 +468,7 @@ def _timeout_dissolve_state(*, complete: bool) -> TimeoutDissolveState:
 def test_timeout_dissolve_confirms_before_analysis_then_stops_match(
         monkeypatch, tmp_path):
     monkeypatch.setattr(
-        auto_play_loop, "read_timeout_dissolve",
+        "timeout_dissolve.read_timeout_dissolve",
         lambda _image: _timeout_dissolve_state(complete=True))
     loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
@@ -483,17 +484,18 @@ def test_timeout_dissolve_confirms_before_analysis_then_stops_match(
     assert loop.stopped is True
 
 
-def test_timeout_dissolve_incomplete_evidence_stops_without_click(
+def test_timeout_dissolve_incomplete_evidence_observes_without_click(
         monkeypatch, tmp_path):
     monkeypatch.setattr(
-        auto_play_loop, "read_timeout_dissolve",
+        "timeout_dissolve.read_timeout_dissolve",
         lambda _image: _timeout_dissolve_state(complete=False))
     loop, _shot, analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
     event = loop.tick()
 
-    assert event["event"] == "stop"
-    assert event["gate"] == "gate_timeout_dissolve_unresolved"
+    assert event["event"] == "idle"
+    assert "零点击继续观察" in event["reason"]
+    assert loop.stopped is False
     assert analyzer.calls == 0
     assert tap.execute_timeout_dissolve_calls == []
     assert tap.execute_calls == [] and tap.execute_claim_calls == []
@@ -1249,13 +1251,13 @@ def test_turn_gate_evidence_is_written_to_every_ledger_event(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# 10. 结算 / 牌局结束 / 模态弹窗：必须停机且零点击
+# 10. 泛化模态不是结算正证据：观察且所有动作通道零点击
 # ----------------------------------------------------------------------
 SETTLED_FRAME = (BOT_DIR.parent / "采集" / "dev_auto_play" / "takeover_live" /
                  "wb_probe_043707.png")
 
 
-def test_settled_frame_stops_with_gate_turn_and_zero_taps(tmp_path):
+def test_settled_modal_observes_with_all_action_channels_untouched(tmp_path):
     """实机帧「牌局结束 + 多数玩家同意解散比赛！」：绝不点「确定」。"""
     if not SETTLED_FRAME.is_file():
         pytest.skip("结算证据帧缺失")
@@ -1264,18 +1266,19 @@ def test_settled_frame_stops_with_gate_turn_and_zero_taps(tmp_path):
 
     event = loop.tick()
 
-    assert event["event"] == "stop"
-    assert event["gate"] == "gate_turn"
-    assert "牌局已结束" in event["reason"]
-    assert event["turn_gate"]["state"] == "blocked"
-    assert event["turn_gate"]["code"] == "gate_settled"   # 具体归类在同一行
-    assert set(event["turn_gate"]["evidence"]["settled_signals"]) == {
-        "central_panel", "bottom_blackout"}
-    assert tap.execute_calls == [] and tap.plan_calls == []   # 零点击
-    assert analyzer.calls == 1                               # 只分析一次
-    assert loop.stopped is True
-    assert loop.tick()["event"] == "skip"
-    assert tap.execute_calls == []
+    from match_end import precise_settlement_evidence
+    from turn_gate import detect_settled_screen
+    image = cv2.imdecode(np.frombuffer(SETTLED_FRAME.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+    assert detect_settled_screen(image)[0] is True
+    assert precise_settlement_evidence(image)[0] is False
+    assert event["event"] == "idle"
+    assert event["scene"]["kind"] == "observe"
+    assert "turn_gate" not in event
+    assert analyzer.calls == 0  # Unknown overlay never supplies gameplay facts.
+    assert loop.stopped is False
+    assert loop.tick()["event"] == "idle"
+    assert loop.actions_done == 0
+    assert all(value == [] for name, value in vars(tap).items() if name.endswith("_calls"))
 
 
 def test_settled_frame_never_even_plans_in_dry_run(tmp_path):
@@ -1287,11 +1290,11 @@ def test_settled_frame_never_even_plans_in_dry_run(tmp_path):
 
     event = loop.tick()
 
-    assert event["event"] == "stop"
-    assert event["gate"] == "gate_turn"
-    assert event["turn_gate"]["code"] == "gate_settled"
-    assert tap.plan_calls == [] and tap.execute_calls == []
-    assert loop.actions_done == 0
+    assert event["event"] == "idle"
+    assert event["scene"]["kind"] == "observe"
+    assert _analyzer.calls == 0
+    assert all(value == [] for name, value in vars(tap).items() if name.endswith("_calls"))
+    assert loop.actions_done == 0 and loop.stopped is False
 
 
 # ----------------------------------------------------------------------
@@ -2906,8 +2909,9 @@ def test_match_end_requires_verified_score_before_persist_or_leave(tmp_path):
     event = loop._match_end_event(
         match_end_frame(), Path(tmp_path) / "f.png", {}, 0.0)
 
-    assert event["event"] == "stop"
+    assert event["event"] == "idle"
     assert event["gate"] == "match_score_unverified"
+    assert loop.stopped is False
     assert tap.execute_leave_calls == []
     assert not loop.match_result_path.exists()
 
@@ -2926,7 +2930,7 @@ def test_match_end_without_authorization_never_clicks_return_lobby(tmp_path):
     assert event is not None
     assert event["event"] == "stop"
     assert event["gate"] == "match_complete"
-    assert "返回大厅需要显式授权（allow_return_lobby=False）" in event["reason"]
+    assert "返回大厅未获当前授权" in event["reason"]
     # 按钮证据必须留下来（人工据此决定要不要回大厅）
     assert event["match_end"]["present"] is True
     assert event["allow_return_lobby"] is False
@@ -3053,7 +3057,7 @@ def promo_unresolved() -> PromoPopupState:
 
 def test_promo_popup_is_closed_once_and_logged(tmp_path, monkeypatch):
     """弹窗帧 → 触发一次 execute_close_popup，台账记 popup_dismiss。"""
-    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+    monkeypatch.setattr("promo_popup.read_promo_popup",
                         lambda _image: promo_present())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
@@ -3073,7 +3077,7 @@ def test_promo_popup_is_closed_once_and_logged(tmp_path, monkeypatch):
 def test_promo_popup_close_consumes_the_frame_without_discarding(
         tmp_path, monkeypatch):
     """关闭成功后本帧直接 return：绝不在弹窗还盖着的时候出牌。"""
-    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+    monkeypatch.setattr("promo_popup.read_promo_popup",
                         lambda _image: promo_present())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
@@ -3089,7 +3093,7 @@ def test_promo_popup_close_consumes_the_frame_without_discarding(
 
 def test_promo_popup_stuck_after_budget_stops_the_loop(tmp_path, monkeypatch):
     """连续关闭 PROMO_CLOSE_BUDGET 次弹窗仍在 → 停手留证，不无限重试。"""
-    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+    monkeypatch.setattr("promo_popup.read_promo_popup",
                         lambda _image: promo_present())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
@@ -3116,7 +3120,7 @@ def test_promo_popup_unresolved_abstains_without_clicking(
     直接 ``_stop("gate_turn")`` 把整场打停——所以弹窗在屏的帧必须被拦在
     门禁之前，宁可空转等弹窗变可读，也不能用弹窗像素去做停机判定。
     """
-    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+    monkeypatch.setattr("promo_popup.read_promo_popup",
                         lambda _image: promo_unresolved())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
@@ -3137,7 +3141,7 @@ def test_promo_popup_unresolved_abstains_without_clicking(
 def test_pending_post_claim_watchdog_precedes_unresolved_promo(
         tmp_path, monkeypatch):
     """不可读促销遮罩不得靠早退让鸣牌后的必出牌事务无限挂起。"""
-    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+    monkeypatch.setattr("promo_popup.read_promo_popup",
                         lambda _image: promo_unresolved())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
     loop._verified_claim_action_event(
@@ -3158,7 +3162,7 @@ def test_promo_popup_frame_never_reaches_the_turn_gate(tmp_path, monkeypatch):
     """弹窗帧不进回合门禁求值：turn_history 不被清，也不会被 blocked 打停。"""
     popup_on = {"on": False}
     monkeypatch.setattr(
-        auto_play_loop, "read_promo_popup",
+        "promo_popup.read_promo_popup",
         lambda _image: promo_present() if popup_on["on"] else promo_absent())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
     settle(loop)                                  # 无弹窗：先攒出连续帧历史
@@ -3179,7 +3183,7 @@ def test_promo_popup_frame_never_reaches_the_turn_gate(tmp_path, monkeypatch):
 def test_no_promo_popup_leaves_the_original_path_untouched(tmp_path,
                                                             monkeypatch):
     """无弹窗 → 完全走原链路；弹窗通道零调用，计数保持清零。"""
-    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+    monkeypatch.setattr("promo_popup.read_promo_popup",
                         lambda _image: promo_absent())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
     settle(loop)
@@ -3202,7 +3206,7 @@ def test_promo_popup_preempts_round_probe_and_suspect_early_return(
     promo 识别器能以 0.9646 命中关闭 X，旧顺序却永远到不了 promo 通道。
     本测试把换局探针设为“调用即失败”，钉住覆盖层的结构优先级。
     """
-    monkeypatch.setattr(auto_play_loop, "read_promo_popup",
+    monkeypatch.setattr("promo_popup.read_promo_popup",
                         lambda _image: promo_present())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
     monkeypatch.setattr(
@@ -3225,7 +3229,7 @@ def test_promo_close_budget_resets_after_a_clear_frame(tmp_path, monkeypatch):
     """同一弹窗有界重试；弹窗确实消失后下一次重新起算。"""
     popup_on = {"value": True}
     monkeypatch.setattr(
-        auto_play_loop, "read_promo_popup",
+        "promo_popup.read_promo_popup",
         lambda _image: promo_present() if popup_on["value"] else promo_absent())
     loop, _shot, _analyzer, tap, _ = make_loop(tmp_path, enabled=True)
 
@@ -4263,23 +4267,21 @@ def test_pass_dimmed_geometry_repair_requires_discs_gone(tmp_path):
     assert "圆盘未被实测为 0" in why
 
 
-def test_pass_settle_settlement_screen_takes_priority(tmp_path):
-    """过后进入结算画面 = 终局迁移：不再用盘面读数否决「过」。
-
-    GPT 交叉复核裁决：强结算证据优先于普通 pass 点后验证。
-    """
+def test_pass_settle_generic_settled_flag_is_not_positive_proof(tmp_path):
+    """A generic settled flag cannot overrule pixels without exact settlement."""
     frame = PASS_DIM_ROOT / "20261027_210047_756147_before_2d55f6.png"
     _read_native_frame_or_skip(frame, "结算优先测试帧")
     raw = frame.read_bytes()
     settled_board = BoardState(
         concealed_count=2, melds=PASS_DIM_MELDS, claim_buttons=0,
         settled=True, selection_panel=False)
-    loop = _pass_settle_loop(tmp_path, raw, [settled_board])
+    loop = _pass_settle_loop(
+        tmp_path, raw, [settled_board] * auto_play_loop.CLAIM_SETTLE_ATTEMPTS)
     verified, reason, _board, samples = loop._verify_claim_settled(
         PASS_DIM_BEFORE, ACTION_PASS, tag="after_claim", note="结算优先")
-    assert verified, reason
-    assert "结算优先" in reason
-    assert samples[0]["verified"] is True
+    assert not verified, reason
+    assert "未证明明确结算" in reason
+    assert samples and all(row["verified"] is False for row in samples)
 
 
 # ---------------------------------------------------------------------------
@@ -4297,10 +4299,9 @@ NO_HAND_ANALYSIS = {"caishen": None, "hand_ids": [], "mode": "tea_2p"}
 
 
 def _final_frame_bytes() -> bytes:
-    hits = sorted(FINAL_FRAMES_5556.glob("20261027_214600*.png"))
-    if not hits:
-        pytest.skip("实机终局帧不在本机（采集目录未入 Git）")
-    return hits[0].read_bytes()
+    frame = BOT_DIR / "tests" / "fixtures" / "session_scenes" / "final_summary_16_of_16.png"
+    assert frame.is_file(), f"required native summary fixture missing: {frame}"
+    return frame.read_bytes()
 
 
 def test_tick_routes_final_summary_to_return_lobby(tmp_path):
@@ -4330,5 +4331,6 @@ def test_tick_plain_frame_still_idles_without_leave(tmp_path):
         hud=[(None, None)], player_name="烘熊瞎")
     event = loop.tick()
     assert event["event"] == "idle"
-    assert "不在牌桌" in event["reason"]
+    assert event["scene"]["kind"] == "observe"
+    assert _analyzer.calls == 0
     assert tap.execute_leave_calls == []

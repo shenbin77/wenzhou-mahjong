@@ -1254,17 +1254,24 @@ class AutoPlayLoop:
         except Exception as exc:  # noqa: BLE001 - 截图失败计入异常预算
             return self._anomaly("capture_failed", f"{exc}", started)
         image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        from lobby_preflight import classify_session_scene
+        scene = classify_session_scene(
+            image, round_probe=self._round_transition.probe)
+        scene_base = {
+            "ts": datetime.now().astimezone().isoformat(),
+            "round_seq": self.round.seq, "frame": str(frame_path),
+            "scene": scene.ledger(),
+        }
         # “等待时间过长解散比赛！”是独立终态，必须在邀请、换局、牌河和
         # 识牌之前处理。弹窗覆盖牌桌时继续走下层像素会污染所有状态。
-        timeout_event = self._timeout_dissolve_event(
-            image, frame_path, started)
-        if timeout_event is not None:
-            return timeout_event
+        if scene.kind == "timeout_dissolve":
+            return self._timeout_dissolve_event(
+                image, frame_path, started, state=scene.state)
         # 入桌邀请优先级高于行动行、换局和识牌：弹窗盖住牌桌时继续分析会把
         # 弹窗元素误读成游戏状态。只允许“邀请您进入”文案 + 矩形“取消”按钮
         # 同帧完整命中后拒绝；这条通道绝不复用吃牌面板的蓝色圆形取消。
-        invitation = read_invitation(image)
-        if invitation.present:
+        invitation = scene.state if scene.kind == "invitation" else None
+        if invitation is not None:
             invitation_event = {
                 "ts": datetime.now().astimezone().isoformat(),
                 "event": "idle", "round_seq": self.round.seq,
@@ -1273,11 +1280,10 @@ class AutoPlayLoop:
                 "reason": invitation.reason,
             }
             if not invitation.complete or invitation.cancel_center is None:
-                return self._stop(
-                    "gate_invitation_unresolved",
-                    "发现入桌邀请，但矩形取消按钮证据不完整；停手且不点其它位置",
-                    invitation_event,
-                )
+                return self._event({
+                    **invitation_event, "event": "idle", "status": "abstain",
+                    "reason": "发现入桌邀请，矩形取消按钮证据暂不完整；零点击继续观察",
+                })
             try:
                 outcome = self._tap.execute_invitation_cancel(
                     invitation.cancel_center, image=image,
@@ -1313,13 +1319,48 @@ class AutoPlayLoop:
         post_claim_timeout = self._post_claim_watchdog(frame_path, started)
         if post_claim_timeout is not None:
             return post_claim_timeout
-        promo_event = self._promo_dismiss_event(
-            image, frame_path, promo_base, started)
-        if promo_event is not None:
-            return promo_event
-        transition_event = self._round_transition_event(image, frame_path)
-        if transition_event is not None:
-            return transition_event
+        if scene.kind == "promo":
+            return self._promo_dismiss_event(
+                image, frame_path, promo_base, started, state=scene.state)
+        self._promo_close_count = 0
+        # Route the scene before updating any gameplay/HUD/river facts.
+        # A lobby has no hand by design; it must never be swallowed by the
+        # identity_unknown early return or the legacy lobby-open channel.
+        if scene.kind == "match_end":
+            if self._post_claim_pending is not None:
+                return self._stop(
+                    "post_claim_match_end",
+                    "鸣牌后续出牌事务未完成就进入整场总结，禁止越过未决动作",
+                    scene_base)
+            outcome = self._match_end_event(
+                image, frame_path, scene_base, started)
+            return outcome or self._event({
+                **scene_base, "event": "idle",
+                "reason": "已处理本场总结，等待新场景；不重复点击"})
+        if scene.kind == "next_round":
+            transition_event = self._round_transition_event(image, frame_path)
+            if transition_event is not None:
+                return transition_event
+            return self._event({**scene_base, "event": "idle",
+                                "reason": "局间候选已变化，零点击重读场景"})
+        if scene.kind in {"lobby", "waiting_room"}:
+            if self._post_claim_pending is not None:
+                return self._stop(
+                    "post_claim_scene_changed",
+                    "鸣牌后续事务未完成就离开牌桌，拒绝自动重接",
+                    scene_base)
+            if self.enabled:
+                return self._stop(
+                    "scene_handoff",
+                    f"已确认{scene.kind}；局内worker退出后交还同一大厅流程",
+                    scene_base)
+            return self._event({**scene_base, "event": "idle",
+                                "reason": "dry_run 已确认场次入口；只观察不点击"})
+        if scene.kind == "blocked":
+            return self._stop("gate_scene", scene.reason, scene_base)
+        if scene.kind == "observe":
+            return self._event({**scene_base, "event": "idle",
+                                "status": "abstain", "reason": scene.reason})
         # 换局判定必须在读牌河**之前**：牌河基线一旦跨局，差分出来的"来牌"
         # 会是上一局的牌。guard 早退分支（行动行可见）在正式的换局判定之前
         # 就会用到 _discard_state，所以这里先判一次。本帧结果存下来复用，
@@ -1410,16 +1451,6 @@ class AutoPlayLoop:
                     "frame": str(frame_path), "round_signal": round_signal,
                 }
                 base["hand_ledger"] = self._hand_ledger.ledger()
-                # 牌局结束总结屏同样无房号/无财神/无手牌，会先落进这条
-                # 「不在牌桌」分支——返回大厅通道若只挂在回合门禁之前
-                # 就永远走不到（2026-10-27 21:46 实机：两端 16/16 打完
-                # 只记 idle，整场卡在总结屏等倒计时自行消散）。先给它
-                # 一次判定机会：不是总结屏时它原样返回 None，本分支
-                # 行为逐字不变。
-                match_end_event = self._match_end_event(
-                    image, frame_path, base, started)
-                if match_end_event is not None:
-                    return match_end_event
                 return self._event({
                     **base,
                     "reason": ("不在牌桌（无房号/无财神/无手牌）：不做任何决策，"
@@ -1608,17 +1639,6 @@ class AutoPlayLoop:
         verdict = self._evaluate_turn_gate(
             result, image, record=not changed_round)
         base["turn_gate"] = verdict.ledger()
-        # 牌局结束（局数打满 16/16）：先尝试「返回大厅」，而不是直接停机等人工。
-        # 必须放在 gate_turn 之前，否则永远走不到这条通道。
-        match_end_event = self._match_end_event(
-            image, frame_path, base, started)
-        if match_end_event is not None:
-            return match_end_event
-        # 开新场（比赛场房间 → 点空座入座）：只在已离桌之后才可能触发，
-        # 挂在 blocked 判断之前是为了不依赖 gate_turn 对「房间画面」的归类。
-        lobby_event = self._lobby_open_event(image, frame_path, base, started)
-        if lobby_event is not None:
-            return lobby_event
         if verdict.state == "blocked":
             if self._left_table:
                 return self._event({
@@ -1880,7 +1900,7 @@ class AutoPlayLoop:
         return self._event(event_data)
 
     def _timeout_dissolve_event(self, image: np.ndarray, frame_path: Path,
-                                started: float) -> dict | None:
+                                started: float, *, state=None) -> dict | None:
         """精确超时解散弹窗 → 单击唯一“确定”，随后终止本场。
 
         这不是通用“确定”通道。只有 :mod:`timeout_dissolve` 的文案指纹、
@@ -1888,7 +1908,8 @@ class AutoPlayLoop:
         已解散，N1/N2/N3 必须从新场重算，因此成功后也立即停掉本次循环。
         """
         try:
-            state = read_timeout_dissolve(image)
+            if state is None:
+                state = read_timeout_dissolve(image)
         except Exception as exc:  # noqa: BLE001 - 无法排除遮挡时必须停手
             return self._stop(
                 "timeout_dissolve_detect_failed",
@@ -1904,11 +1925,10 @@ class AutoPlayLoop:
             "timeout_dissolve": state.ledger(),
         }
         if not state.complete or state.confirm_center is None:
-            return self._stop(
-                "gate_timeout_dissolve_unresolved",
-                "命中超时解散文案，但专用确定按钮证据不完整；本帧零点击",
-                base,
-            )
+            return self._event({
+                **base, "event": "idle", "status": "abstain",
+                "reason": "命中超时解散文案，专用确定按钮证据暂不完整；零点击继续观察",
+            })
         try:
             outcome = self._tap.execute_timeout_dissolve_confirm(
                 state.confirm_center,
@@ -1948,7 +1968,7 @@ class AutoPlayLoop:
         )
 
     def _promo_dismiss_event(self, image: np.ndarray, frame_path: Path,
-                             base: dict, started: float) -> dict | None:
+                             base: dict, started: float, *, state=None) -> dict | None:
         """促销弹窗（「限时优惠」）→ 关掉右上角菱形 ❌。
 
         调用点刻意放在换局、牌河、行动行、识牌和**回合门禁求值之前**：
@@ -1967,7 +1987,8 @@ class AutoPlayLoop:
           判定）；关了 :data:`PROMO_CLOSE_BUDGET` 次弹窗仍在则停手留证。
         """
         try:
-            state = read_promo_popup(image)
+            if state is None:
+                state = read_promo_popup(image)
         except Exception as exc:  # noqa: BLE001 - 识别异常计入异常预算
             return self._anomaly("promo_popup_detect_failed", str(exc),
                                  started, base)
@@ -2053,100 +2074,37 @@ class AutoPlayLoop:
         if not state.present:
             return None
         base["match_end"] = state.ledger()
-        # ---- 授权门：返回大厅必须显式授权（默认关） ----------------------
-        # 牌局结束时自动点「返回大厅」会把用户带离牌桌，且离桌后所有跨帧
-        # 状态（牌河/账本/白名单连击）一次性作废，无法回滚。未授权时本帧
-        # 零点击：把按钮证据原样留进台账，停手等人工决定。
+        from match_end import finish_match_summary
+
+        def persist_result(row):
+            self._ensure_dirs()
+            self._append_line(self.match_result_path,
+                              json.dumps(row, ensure_ascii=False))
+
+        result = finish_match_summary(
+            image, player_name=self.player_name, serial=self.serial,
+            frame_path=frame_path, score_reader=self._match_score,
+            persist_result=persist_result,
+            execute_leave=lambda current: self._tap.execute_leave_table(
+                image=current, session_dir=self.session_dir),
+            authorized=lambda: (self.allow_return_lobby
+                                and not self.stopped
+                                and self._stop_requested_reason is None),
+            dry_run=self.dry_run,
+            already_recorded=self._match_result_recorded)
+        self._match_result_recorded = bool(result["recorded"])
+        base.update(result)
         base["allow_return_lobby"] = self.allow_return_lobby
-        if not self.allow_return_lobby:
-            return self._stop(
-                "match_complete",
-                "牌局结束，返回大厅需要显式授权（allow_return_lobby=False）："
-                "本帧零点击，停在牌桌留证等人工处理",
-                base,
-            )
-        # ---- 16/16 整场积分门：先按昵称落账，后返回大厅 -----------------
-        # read_match_score 会再次复核三按钮版式、两侧正负颜色、数字模板、
-        # 零和守恒与双方昵称。任何一步不确定都留在总结页，绝不先离桌再补账。
-        try:
-            # 积分识别器必须在同一原生帧自行确认顶部 16/16 与三按钮总结
-            # 版式；调用方不再传可绕过局数证据的布尔值。
-            score_state = self._match_score(image)
-        except Exception as exc:  # noqa: BLE001 - 未落账绝不离桌
-            return self._stop(
-                "match_score_failed",
-                f"16/16 整场积分识别异常，未返回大厅：{exc}", base)
-        base["match_result"] = score_state.ledger()
-        if not score_state.ok:
-            return self._stop(
-                "match_score_unverified",
-                f"16/16 整场积分未通过门禁，未返回大厅：{score_state.reason}",
-                base,
-            )
-        player_score = score_state.score_for(self.player_name)
-        base["player_name"] = self.player_name or None
-        base["player_score"] = player_score
-        if not self.player_name or player_score is None:
-            return self._stop(
-                "match_score_player_unverified",
-                (f"16/16 积分已读出，但当前昵称 {self.player_name!r} 无法与"
-                 "左右总结栏唯一对应；未落账、未返回大厅"),
-                base,
-            )
-        if self.dry_run:
-            try:
-                plan = self._tap.execute_leave_table(image=image)
-            except TapAborted as exc:
-                return self._stop("leave_table_aborted", str(exc), base)
-            return self._event({
-                **base, "event": "dry_run_plan", "tap": plan.get("tap"),
-                "box": plan.get("box"), "verified": None,
-                "reason": ("dry_run 已识别 16/16 整场积分与返回大厅；"
-                           "只记录计划，不写正式积分、不点击"),
-                "elapsed_ms": round((self._clock() - started) * 1000, 1),
-            })
-        result_row = {
-            "ts": datetime.now().astimezone().isoformat(),
-            "event": "match_result",
-            "mode": self.mode,
-            "serial": self.serial,
-            "round_no": 16,
-            "round_total": 16,
-            "player_name": self.player_name,
-            "player_score": int(player_score),
-            "left_player": score_state.left_player,
-            "left_score": score_state.left_score,
-            "right_player": score_state.right_player,
-            "right_score": score_state.right_score,
-            "confidence": score_state.confidence,
-            "frame": str(frame_path),
-            "source": "verified_16_of_16_summary",
-        }
-        if not self._match_result_recorded:
-            try:
-                self._ensure_dirs()
-                self._append_line(
-                    self.match_result_path,
-                    json.dumps(result_row, ensure_ascii=False),
-                )
-            except Exception as exc:  # noqa: BLE001 - 未持久化绝不离桌
-                return self._stop(
-                    "match_score_persist_failed",
-                    f"16/16 积分持久化失败，未返回大厅：{exc}", base)
-            self._match_result_recorded = True
-        base["match_result_record"] = result_row
         base["match_result_path"] = str(self.match_result_path)
-        try:
-            outcome = self._tap.execute_leave_table(
-                image=image, session_dir=self.session_dir)
-        except TapUnverified as exc:
-            return self._stop(
-                "leave_table_unverified",
-                f"点返回大厅后无法证明版式消失，停手不补点：{exc}", base)
-        except TapAborted as exc:
-            return self._stop("leave_table_aborted", f"返回大厅被拒绝：{exc}", base)
-        except Exception as exc:  # noqa: BLE001 - 结果未知一律停手
-            return self._stop("leave_table_failed", f"返回大厅结果未知：{exc}", base)
+        if result["status"] == "blocked":
+            return self._stop(result["gate"], result["reason"], base)
+        if result["status"] in {"observe", "dry_run_plan"}:
+            return self._event({
+                **base,
+                "event": "idle" if result["status"] == "observe" else "dry_run_plan",
+                "reason": result["reason"]})
+        outcome = result["leave_table"]
+        player_score = result["player_score"]
         self._left_table = True
         # 已离桌：本局所有跨帧状态全部作废，绝不允许带进下一场。
         self._promo_close_count = 0
@@ -3619,13 +3577,19 @@ class AutoPlayLoop:
                 image = cv2.imdecode(
                     np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
                 board = self._board_from_frame(raw, path, image, note=note)
-                if action == ACTION_PASS and board.settled is True:
-                    # 结算优先（GPT 交叉复核裁决）：「过」后已进入终局
-                    # 迁移，过必然已生效；不许再拿结算帧的盘面读数
-                    # （手牌区已被结算画面替换）否决它。
+                from match_end import precise_settlement_evidence
+                settlement_proven, settlement_proof = (False, {})
+                if action == ACTION_PASS:
+                    settlement_proven, settlement_proof = precise_settlement_evidence(
+                        image, round_probe=self._round_transition.probe)
+                if action == ACTION_PASS and settlement_proven:
                     verified, reason = True, (
-                        "过后进入结算画面（终局迁移），过已生效，"
-                        "按结算优先验证通过")
+                        "过后已通过明确结算正证据（下一局三重门或同帧16/16），"
+                        "按已验证终局迁移完成")
+                elif action == ACTION_PASS and board.settled is True:
+                    # Generic settled includes renew/invite/dissolve modals.
+                    # Those masks cannot prove that the requested pass happened.
+                    verified, reason = False, "点后仅见模态/压暗，未证明明确结算"
                 else:
                     verified, reason = verify_after_click(
                         before, board, action,
@@ -3681,6 +3645,7 @@ class AutoPlayLoop:
                 "total": board.total,
                 "claim_buttons": board.claim_buttons,
                 "settled": board.settled,
+                "settlement_proof": settlement_proof,
                 "selection_panel": board.selection_panel,
                 "verified": verified,
                 "reason": reason,
@@ -4004,10 +3969,17 @@ class AutoPlayLoop:
             decision = decide_action(
                 claim_state, resolved_hand,
                 replace(self._claim_policy, chi_enabled=False), image=image)
+        if self._claim_policy.incoming_shadow_enabled:
+            from incoming_shadow import ShadowConfig, observe_incoming_shadow
+            incoming_resolution["shadow"] = observe_incoming_shadow(
+                image, hand, incoming_resolution, config=ShadowConfig(enabled=True),
+                context=None,
+                actual_runtime_decision=decision.action if decision is not None else None)
         if decision is None:
             return {"claim": {
                 "status": "abstain",
                 "frame": str(frame_path),
+                "incoming_resolution": incoming_resolution,
                 "known": bool(claim_state.known),
                 "buttons": [button.kind for button in claim_state.buttons],
                 "hand_recovery": hand_recovery,
