@@ -3162,7 +3162,6 @@ class TeaAssistWindow:
 
         try:
             frame = executor._capture()
-            match_end = read_match_end(frame)
         except Exception as exc:  # noqa: BLE001 - fail closed before any tap
             return TransitionResult(
                 "startup_blocked",
@@ -3170,6 +3169,70 @@ class TeaAssistWindow:
         if cancel_event is not None and cancel_event.is_set():
             return TransitionResult(
                 "cancelled", "重启续局授权已撤销；首帧后零点击")
+
+        # A known promotion can obscure the settlement page. Reuse its
+        # dedicated executor before interpreting any pixels underneath it;
+        # unknown overlays must still take the existing fail-closed path.
+        try:
+            from promo_popup import read_promo_popup
+            promo = read_promo_popup(frame)
+        except Exception as exc:  # noqa: BLE001 - no action on unknown state
+            return TransitionResult(
+                "startup_blocked", f"促销遮罩预检失败：{type(exc).__name__}: {exc}")
+        invalid_promo_reasons = {
+            "帧像素类型未验证", "不是已验证的 1600×900 原生帧", "关闭按钮模板缺失"}
+        if not promo.present and promo.reason in invalid_promo_reasons:
+            return TransitionResult("startup_blocked", f"促销遮罩无法核验：{promo.reason}")
+        if promo.present:
+            if promo.close_center is None:
+                return TransitionResult(
+                    "startup_blocked", "促销遮罩关闭按钮证据不完整，未点击",
+                    evidence={"promo_popup": promo.ledger()})
+            serial = getattr(executor, "_serial", None)
+            session_dir = getattr(executor, "_report_dir", None)
+            if cancel_event is None or not serial or session_dir is None:
+                return TransitionResult(
+                    "startup_blocked", "促销关闭缺少接入授权或会话证据目录，未点击",
+                    evidence={"promo_popup": promo.ledger()})
+            if cancel_event.is_set():
+                return TransitionResult("cancelled", "接入授权已撤销，未关闭促销遮罩")
+            try:
+                from tap_executor import TapExecutor
+                popup_executor = TapExecutor(
+                    enabled=True, adb_path=get_adb_path(), serial=serial,
+                    session_dir=session_dir)
+                popup_executor.authorization_check = lambda: not cancel_event.is_set()
+                outcome = popup_executor.execute_close_popup(
+                    promo.close_center, image=frame, session_dir=session_dir)
+                if not outcome.get("executed") or not outcome.get("verified"):
+                    raise RuntimeError("促销关闭结果未验证")
+            except Exception as exc:  # noqa: BLE001 - never repeat uncertain taps
+                return TransitionResult(
+                    "startup_blocked", f"促销关闭未确认，已停止：{type(exc).__name__}: {exc}",
+                    evidence={"promo_popup": promo.ledger()})
+            if cancel_event.is_set():
+                return TransitionResult("cancelled", "接入授权已撤销，关闭后不再续局")
+            try:
+                frame = executor._capture()
+                after_promo = read_promo_popup(frame)
+            except Exception as exc:  # noqa: BLE001 - post-click uncertainty
+                return TransitionResult(
+                    "startup_blocked", f"促销关闭后画面读取失败：{type(exc).__name__}: {exc}")
+            if (not after_promo.present
+                    and after_promo.reason in invalid_promo_reasons):
+                return TransitionResult(
+                    "startup_blocked", f"促销关闭后画面无法核验：{after_promo.reason}")
+            if after_promo.present:
+                return TransitionResult(
+                    "startup_blocked", "促销关闭后仍有遮罩，不重复点击",
+                    evidence={"promo_popup": after_promo.ledger()})
+            if cancel_event.is_set():
+                return TransitionResult("cancelled", "接入授权已撤销，关闭后不再续局")
+        try:
+            match_end = read_match_end(frame)
+        except Exception as exc:  # noqa: BLE001 - fail closed before transition
+            return TransitionResult(
+                "startup_blocked", f"整场结束页读取失败：{type(exc).__name__}: {exc}")
         if match_end.present:
             return TransitionResult(
                 "startup_blocked",

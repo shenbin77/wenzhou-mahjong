@@ -41,6 +41,11 @@ REAL_DISSOLVED = (
     "20261026_181402_326482_before_e49f08.png"
 )
 REAL_MATCH_END = REPO_ROOT / "_takeover" / "match_end_probe.png"
+REAL_STARTUP_PROMO = (
+    TEA_ROOT / "采集" / "dev_auto_play" /
+    "ui_20261027_204836_emulator5556_烘熊瞎" / "frames" /
+    "20261027_204933_930116_before_22792b.png"
+)
 
 
 def _read(path: Path) -> np.ndarray:
@@ -57,6 +62,175 @@ class Sequence:
     def __call__(self):
         assert self.frames, "unexpected extra capture"
         return self.frames.pop(0).copy()
+
+
+def test_real_promo_at_restart_closes_then_rechecks_summary(monkeypatch, tmp_path):
+    import tap_executor
+    promo, summary, table = map(_read, (REAL_STARTUP_PROMO, REAL_SUMMARY, REAL_TABLE))
+    taps, closes = [], []
+    class FakeTapExecutor:
+        def __init__(self, **kwargs):
+            assert kwargs["serial"] == "emulator-5556"
+        def execute_close_popup(self, point, **kwargs):
+            assert self.authorization_check()
+            closes.append(point)
+            return {"executed": True, "verified": True}
+    monkeypatch.setattr(tap_executor, "TapExecutor", FakeTapExecutor)
+    executor = RoundTransitionExecutor(
+        capture=Sequence([promo, summary, summary, summary, table]),
+        tap=lambda x, y: taps.append((x, y)), sleep=lambda _s: None,
+        report_dir=tmp_path, post_polls=1, post_interval_s=.01)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
+    assert result.status == "advanced"
+    assert closes == [(1466, 190)]
+    assert len(taps) == 1
+
+
+def test_startup_promo_cannot_tap_without_authority_or_cancelled(monkeypatch, tmp_path):
+    import tap_executor
+    promo = _read(REAL_STARTUP_PROMO)
+    monkeypatch.setattr(tap_executor, "TapExecutor", lambda **kwargs:
+        (_ for _ in ()).throw(AssertionError("no authority means no executor")))
+    for token in (None, Event()):
+        if token is not None:
+            token.set()
+        executor = RoundTransitionExecutor(capture=Sequence([promo]),
+                                           tap=lambda *args: None,
+                                           report_dir=tmp_path)
+        executor._serial = "emulator-5556"
+        result = TeaAssistWindow._recover_startup_round_transition(executor, token)
+        assert result.status in ("startup_blocked", "cancelled")
+        assert not result.clicked
+
+
+def test_startup_promo_unverified_never_attempts_next_round(monkeypatch, tmp_path):
+    import tap_executor
+    promo = _read(REAL_STARTUP_PROMO)
+    class FakeTapExecutor:
+        def __init__(self, **kwargs): pass
+        def execute_close_popup(self, *args, **kwargs):
+            raise tap_executor.TapUnverified("尚未证明消失")
+    monkeypatch.setattr(tap_executor, "TapExecutor", FakeTapExecutor)
+    taps = []
+    executor = RoundTransitionExecutor(capture=Sequence([promo]),
+                                       tap=lambda *args: taps.append(args),
+                                       report_dir=tmp_path)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
+    assert result.status == "startup_blocked"
+    assert "尚未证明消失" in result.reason
+    assert taps == []
+
+
+def test_startup_promo_uses_real_executor_with_fresh_frames(monkeypatch, tmp_path):
+    import tap_executor
+    promo, summary, table = map(_read, (REAL_STARTUP_PROMO, REAL_SUMMARY, REAL_TABLE))
+    frames = Sequence([promo, summary, summary])
+    commands = []
+    monkeypatch.setattr(tap_executor.TapExecutor, "_require_game_foreground", lambda self: None)
+    monkeypatch.setattr(tap_executor.TapExecutor, "_screenshot", lambda self: frames())
+    monkeypatch.setattr(tap_executor.TapExecutor, "_adb",
+                        lambda self, *args, **kwargs: commands.append(args))
+    monkeypatch.setattr(tap_executor.time, "sleep", lambda _s: None)
+    executor = RoundTransitionExecutor(
+        capture=Sequence([promo, summary, summary, summary, table]),
+        tap=lambda *args: None, sleep=lambda _s: None,
+        report_dir=tmp_path, post_polls=1, post_interval_s=.01)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
+    assert result.status == "advanced"
+    assert commands == [("shell", "input", "tap", "1466", "190")]
+    evidence = list((tmp_path / "tap_probe").glob("*/evidence.json"))
+    assert len(evidence) == 1
+
+
+def test_stop_during_promo_fresh_check_never_taps(monkeypatch, tmp_path):
+    import tap_executor
+    promo = _read(REAL_STARTUP_PROMO)
+    token, foreground_calls, commands = Event(), [], []
+    def foreground(_self):
+        foreground_calls.append(True)
+        if len(foreground_calls) == 2:
+            token.set()
+    monkeypatch.setattr(tap_executor.TapExecutor, "_require_game_foreground", foreground)
+    monkeypatch.setattr(tap_executor.TapExecutor, "_screenshot", lambda self: promo)
+    monkeypatch.setattr(tap_executor.TapExecutor, "_adb",
+                        lambda self, *args, **kwargs: commands.append(args))
+    executor = RoundTransitionExecutor(capture=Sequence([promo]),
+                                       tap=lambda *args: commands.append(args),
+                                       report_dir=tmp_path)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, token)
+    assert result.status == "startup_blocked"
+    assert "权限已撤销" in result.reason
+    assert commands == []
+
+
+def test_promo_disappearing_before_fresh_recheck_does_not_tap(monkeypatch, tmp_path):
+    import tap_executor
+    promo, summary = map(_read, (REAL_STARTUP_PROMO, REAL_SUMMARY))
+    commands = []
+    monkeypatch.setattr(tap_executor.TapExecutor, "_require_game_foreground", lambda self: None)
+    monkeypatch.setattr(tap_executor.TapExecutor, "_screenshot", lambda self: summary)
+    monkeypatch.setattr(tap_executor.TapExecutor, "_adb",
+                        lambda self, *args, **kwargs: commands.append(args))
+    executor = RoundTransitionExecutor(capture=Sequence([promo]),
+                                       tap=lambda *args: commands.append(args),
+                                       report_dir=tmp_path)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
+    assert result.status == "startup_blocked"
+    assert commands == []
+
+
+def test_startup_partial_promo_never_constructs_tap_executor(monkeypatch, tmp_path):
+    import promo_popup
+    import tap_executor
+    monkeypatch.setattr(promo_popup, "read_promo_popup", lambda _frame:
+                        promo_popup.PromoPopupState(present=True, close_center=None))
+    monkeypatch.setattr(tap_executor, "TapExecutor", lambda **kwargs:
+        (_ for _ in ()).throw(AssertionError("incomplete popup must not tap")))
+    executor = RoundTransitionExecutor(capture=Sequence([_read(REAL_STARTUP_PROMO)]),
+                                       tap=lambda *args: None,
+                                       report_dir=tmp_path)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
+    assert result.status == "startup_blocked"
+    assert "证据不完整" in result.reason
+
+
+def test_missing_promo_template_never_falls_through_to_other_actions(monkeypatch, tmp_path):
+    import promo_popup
+    monkeypatch.setattr(promo_popup, "read_promo_popup", lambda _frame:
+                        promo_popup.PromoPopupState(False, reason="关闭按钮模板缺失"))
+    executor = RoundTransitionExecutor(
+        capture=Sequence([_read(REAL_SUMMARY)]),
+        tap=lambda *args: (_ for _ in ()).throw(AssertionError("must not tap")),
+        report_dir=tmp_path)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
+    assert result.status == "startup_blocked"
+    assert "模板缺失" in result.reason
+
+
+def test_startup_promo_dismissal_does_not_bypass_match_end(monkeypatch, tmp_path):
+    import tap_executor
+    promo, match_end = map(_read, (REAL_STARTUP_PROMO, REAL_MATCH_END))
+    class FakeTapExecutor:
+        def __init__(self, **kwargs): pass
+        def execute_close_popup(self, *args, **kwargs):
+            return {"executed": True, "verified": True}
+    monkeypatch.setattr(tap_executor, "TapExecutor", FakeTapExecutor)
+    taps = []
+    executor = RoundTransitionExecutor(capture=Sequence([promo, match_end]),
+                                       tap=lambda *args: taps.append(args),
+                                       report_dir=tmp_path)
+    executor._serial = "emulator-5556"
+    result = TeaAssistWindow._recover_startup_round_transition(executor, Event())
+    assert result.status == "startup_blocked"
+    assert "本场结束页" in result.reason
+    assert taps == []
 
 
 def test_real_old_summary_restarts_through_existing_fresh_gates_once(tmp_path):
