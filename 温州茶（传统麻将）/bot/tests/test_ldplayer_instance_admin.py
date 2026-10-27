@@ -40,6 +40,14 @@ def _clock(values):
     return lambda: next(iterator)
 
 
+def _safe_state(online=(), assistants=(), reserved=()):
+    return {
+        "online_serials": lambda: online,
+        "assistant_serials": lambda: assistants,
+        "reserved_serials": lambda: reserved,
+    }
+
+
 def test_describe_rejects_tcp_and_never_calls_console():
     runner = SequenceRunner([])
 
@@ -82,6 +90,7 @@ def test_copy_uses_official_exact_index_and_returns_new_serial():
     after = before + _row(2, "wzmj-copy-0")
     runner = SequenceRunner([
         _done(before),  # resolve source and reject duplicate destination name
+        _done(before),  # fresh re-check after the live-state safety gates
         _done(),        # official copy command
         _done(after),   # wait for unique new list2 row
     ])
@@ -89,14 +98,14 @@ def test_copy_uses_official_exact_index_and_returns_new_serial():
     result = admin.copy_ldplayer_instance(
         "emulator-5554", "wzmj-copy-0", ldconsole="ldconsole",
         runner=runner, sleep=lambda _delay: None,
-        monotonic=lambda: 0.0,
+        monotonic=lambda: 0.0, **_safe_state(),
     )
 
     assert result.source.index == 0
     assert result.created == admin.LdPlayerInstance(
         index=2, title="wzmj-copy-0", serial="emulator-5558",
         running=False)
-    assert runner.calls[1][0] == [
+    assert runner.calls[2][0] == [
         "ldconsole", "copy", "--name", "wzmj-copy-0", "--from", "0"]
     for _argv, kwargs in runner.calls:
         assert kwargs["shell"] is False
@@ -111,7 +120,8 @@ def test_copy_rejects_unsafe_name_before_list2(name):
 
     with pytest.raises(ValueError, match="复制名称"):
         admin.copy_ldplayer_instance(
-            "emulator-5554", name, ldconsole="ldconsole", runner=runner)
+            "emulator-5554", name, ldconsole="ldconsole", runner=runner,
+            **_safe_state())
 
     assert runner.calls == []
 
@@ -123,7 +133,7 @@ def test_copy_rejects_existing_title_without_copy_command():
     with pytest.raises(RuntimeError, match="已存在"):
         admin.copy_ldplayer_instance(
             "emulator-5554", "already", ldconsole="ldconsole",
-            runner=runner)
+            runner=runner, **_safe_state())
 
     assert all(call[0][1] == "list2" for call in runner.calls)
 
@@ -131,41 +141,45 @@ def test_copy_rejects_existing_title_without_copy_command():
 def test_copy_failure_or_timeout_never_repeats_mutation():
     rows = _row(0, "base")
     command_failure = SequenceRunner([
-        _done(rows), _done(returncode=3),
+        _done(rows), _done(rows), _done(returncode=3),
     ])
     with pytest.raises(RuntimeError, match="copy 失败"):
         admin.copy_ldplayer_instance(
             "emulator-5554", "copy-1", ldconsole="ldconsole",
-            runner=command_failure)
+            runner=command_failure, **_safe_state())
     assert sum(call[0][1] == "copy" for call in command_failure.calls) == 1
 
     timeout = SequenceRunner([
-        _done(rows), _done(), _done(rows), _done(rows),
+        _done(rows), _done(rows), _done(), _done(rows), _done(rows),
     ])
-    with pytest.raises(RuntimeError, match="勿重复复制"):
+    with pytest.raises(RuntimeError, match="勿重复操作"):
         admin.copy_ldplayer_instance(
             "emulator-5554", "copy-2", ldconsole="ldconsole",
             timeout_s=1.0, poll_interval_s=0.1, runner=timeout,
             sleep=lambda _delay: None, monotonic=_clock([0.0, 0.5, 1.0]),
+            **_safe_state(),
         )
     assert sum(call[0][1] == "copy" for call in timeout.calls) == 1
 
 
 @pytest.mark.parametrize(
-    ("rows", "online", "assistants", "message"),
+    ("rows", "online", "assistants", "message", "running"),
     [
-        (_row(1, "victim", running=True), (), (), "仍在运行"),
-        (_row(1, "victim"), ("emulator-5556",), (), "ADB 在线"),
-        (_row(1, "victim"), (), ("emulator-5556",), "辅助器窗口"),
+        (_row(1, "victim", running=True), (), (), "仍在运行", True),
+        (_row(1, "victim"), ("emulator-5556",), (), "ADB 在线", False),
+        (_row(1, "victim"), (), ("emulator-5556",), "辅助器窗口", False),
     ],
 )
 def test_remove_requires_stopped_offline_instance_without_assistant(
-        rows, online, assistants, message):
-    runner = SequenceRunner([_done(rows)])
+        rows, online, assistants, message, running):
+    runner = SequenceRunner([_done(rows), _done(rows)])
 
     with pytest.raises(RuntimeError, match=message):
         admin.remove_ldplayer_instance(
-            "emulator-5556", ldconsole="ldconsole",
+            admin.LdPlayerInstance(
+                index=1, title="victim", serial="emulator-5556",
+                running=running),
+            ldconsole="ldconsole",
             online_serials=lambda: online,
             assistant_serials=lambda: assistants,
             runner=runner,
@@ -177,36 +191,46 @@ def test_remove_requires_stopped_offline_instance_without_assistant(
 def test_remove_uses_exact_index_then_waits_until_absent():
     rows = _row(0, "base") + _row(2, "victim")
     remaining = _row(0, "base")
-    runner = SequenceRunner([_done(rows), _done(), _done(remaining)])
+    runner = SequenceRunner([_done(rows), _done(rows), _done(),
+                             _done(remaining)])
 
     result = admin.remove_ldplayer_instance(
-        "emulator-5558", ldconsole="ldconsole",
+        admin.LdPlayerInstance(
+            index=2, title="victim", serial="emulator-5558", running=False),
+        ldconsole="ldconsole",
         online_serials=lambda: (), assistant_serials=lambda: (),
         runner=runner, sleep=lambda _delay: None, monotonic=lambda: 0.0,
     )
 
     assert result.removed.title == "victim"
-    assert runner.calls[1][0] == [
+    assert runner.calls[2][0] == [
         "ldconsole", "remove", "--index", "2"]
     assert sum(call[0][1] == "remove" for call in runner.calls) == 1
 
 
 def test_remove_failure_or_timeout_never_repeats_mutation():
     rows = _row(2, "victim")
-    command_failure = SequenceRunner([_done(rows), _done(returncode=2)])
+    command_failure = SequenceRunner([
+        _done(rows), _done(rows), _done(returncode=2)])
     with pytest.raises(RuntimeError, match="remove 失败"):
         admin.remove_ldplayer_instance(
-            "emulator-5558", ldconsole="ldconsole",
+            admin.LdPlayerInstance(
+                index=2, title="victim", serial="emulator-5558",
+                running=False),
+            ldconsole="ldconsole",
             online_serials=lambda: (), assistant_serials=lambda: (),
             runner=command_failure)
     assert sum(call[0][1] == "remove" for call in command_failure.calls) == 1
 
     timeout = SequenceRunner([
-        _done(rows), _done(), _done(rows), _done(rows),
+        _done(rows), _done(rows), _done(), _done(rows), _done(rows),
     ])
-    with pytest.raises(RuntimeError, match="勿重复删除"):
+    with pytest.raises(RuntimeError, match="勿重复操作"):
         admin.remove_ldplayer_instance(
-            "emulator-5558", ldconsole="ldconsole",
+            admin.LdPlayerInstance(
+                index=2, title="victim", serial="emulator-5558",
+                running=False),
+            ldconsole="ldconsole",
             online_serials=lambda: (), assistant_serials=lambda: (),
             timeout_s=1.0, poll_interval_s=0.1, runner=timeout,
             sleep=lambda _delay: None, monotonic=_clock([0.0, 0.5, 1.0]),

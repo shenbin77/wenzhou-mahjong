@@ -956,7 +956,7 @@ def test_remove_first_inspects_then_confirms_exact_identity(monkeypatch):
     assert "昵称和设置会保留" in prompts[0][1]
     assert submitted[-1] == (
         "remove-instance:emulator-5556", manager.remove_instance_for_admin,
-        "emulator-5556")
+        exact)
 
 
 @pytest.mark.parametrize(("online", "pid", "running"), [
