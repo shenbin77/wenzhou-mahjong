@@ -54,7 +54,8 @@ def probe(serial: str, adb_path: str, session_dir: Path) -> LobbyAssessment:
     return assess_frame(_capture_image(serial, adb_path, session_dir))
 
 
-def _tap_lobby(serial: str, adb_path: str, x: int, y: int, *, runner=None) -> None:
+def _tap_lobby(serial: str, adb_path: str, x: int, y: int, *, runner=None,
+               authorization_check=None) -> None:
     """One whitelisted session-entry tap after a dedicated fresh-frame proof."""
     if not (0 <= int(x) < 1600 and 0 <= int(y) < 900):
         raise ValueError("大厅点击坐标超出1600×900原生画面")
@@ -63,6 +64,8 @@ def _tap_lobby(serial: str, adb_path: str, x: int, y: int, *, runner=None) -> No
     runner = runner or subprocess.run
     # Re-check foreground immediately before every seat/modal-close click.
     read_foreground(adb_path, serial, runner=runner)
+    if authorization_check is not None and not authorization_check():
+        raise RuntimeError("找位授权已撤销，拒绝大厅点击")
     runner(
         [str(adb_path), "-s", serial, "shell", "input", "tap",
          str(int(x)), str(int(y))],
@@ -175,7 +178,10 @@ def advance(
             return _capture_image(serial, adb_path, session_dir)
 
         def tap_point(x: int, y: int) -> None:
-            _tap_lobby(serial, adb_path, x, y, runner=runner)
+            if not callable(invitation_authorized):
+                raise RuntimeError("缺少找位授权，拒绝大厅点击")
+            _tap_lobby(serial, adb_path, x, y, runner=runner,
+                       authorization_check=invitation_authorized)
 
         started: StartExecution = execute_auto_start(
             image,
@@ -210,7 +216,10 @@ def advance(
         return _capture_image(serial, adb_path, session_dir)
 
     def tap_point(x: int, y: int) -> None:
-        _tap_lobby(serial, adb_path, x, y, runner=runner)
+        if not callable(invitation_authorized):
+            raise RuntimeError("缺少找位授权，拒绝大厅点击")
+        _tap_lobby(serial, adb_path, x, y, runner=runner,
+                   authorization_check=invitation_authorized)
 
     execution: SeatExecution = execute_auto_seat(
         image,

@@ -387,3 +387,16 @@ def test_tap_lobby_rechecks_foreground_before_input(monkeypatch):
     lobby_follow._tap_lobby("emulator-5556","adb.exe",115,267,runner=runner)
     assert calls[0]==["foreground","emulator-5556"]
     assert calls[1][-5:]==["shell","input","tap","115","267"]
+
+
+def test_lobby_tap_stop_during_foreground_check_sends_no_input(monkeypatch):
+    authority = Event()
+    authority.set()
+    commands = []
+    monkeypatch.setattr(lobby_follow, "read_foreground",
+                        lambda *a, **k: authority.clear())
+    with pytest.raises(RuntimeError, match="授权已撤销"):
+        lobby_follow._tap_lobby("emulator-5556", "adb.exe", 115, 267,
+                                runner=lambda *a, **k: commands.append(a),
+                                authorization_check=authority.is_set)
+    assert not commands
