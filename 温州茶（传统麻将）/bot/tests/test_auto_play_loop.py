@@ -4010,3 +4010,94 @@ def test_claim_payload_recovery_rejects_true_meld_mismatch(tmp_path):
     assert evidence["current_melds"] == [[3, 4, 5]]
     assert evidence["memory_melds"] == []
     assert payload["hand_ids"] == list(current11)
+
+
+# ----------------------------------------------------------------------
+# 2026-10-27 17:45 真帧：明杠北后中段局部压暗，杠复核被拒框修复
+# ----------------------------------------------------------------------
+KONG_DIMMED_ROOT = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261027_174407_emulator5554_玉姐" / "frames"
+)
+KONG_DIMMED_BEFORE = BoardState(
+    concealed_count=13, melds=((41, 42, 43),), claim_buttons=2,
+    settled=False,
+    concealed=(2, 3, 5, 6, 7, 43, 47, 49, 29, 29, 64, 64, 64))
+
+
+def _kong_dimmed_frame(tmp_path):
+    from live_capture import analyze_bytes
+
+    frame = KONG_DIMMED_ROOT / "20261027_174501_892238_after_claim_8d0c30.png"
+    image = _read_native_frame_or_skip(frame, "杠后压暗复核帧")
+    result = analyze_bytes(
+        frame.read_bytes(), mode="tea_2p", image_path=frame,
+        log_dir=Path(tmp_path) / "logs")
+    board = BoardState.from_hand_state(
+        HandState.from_analysis(result), claim_buttons=0, settled=False,
+        note="杠后压暗测试")
+    return frame, image, result, board
+
+
+def test_kong_dimmed_standard_verify_fails_and_box_repair_recovers(tmp_path):
+    """标准杠验证因中段压暗少读失败；只修被拒框后完整验证通过。"""
+    frame, image, result, board = _kong_dimmed_frame(tmp_path)
+    ok, why = auto_play_loop.verify_after_click(
+        KONG_DIMMED_BEFORE, board, ACTION_KONG,
+        target_tile=64, kong_kind="ming")
+    assert not ok
+    assert "29: 2" in why and "43: 1" in why
+
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[result])
+    ok2, why2 = loop._verify_kong_dimmed_box_repair(
+        KONG_DIMMED_BEFORE, board, frame.read_bytes(), frame, image,
+        target_tile=64, kong_kind="ming")
+    assert ok2, why2
+    assert "kong_dim_box_repair" in why2
+
+
+def test_kong_dimmed_box_repair_still_rejects_wrong_before(tmp_path):
+    """补全的牌没错也不许过：杠前盘面不对，完整验证照样否决。"""
+    frame, image, result, board = _kong_dimmed_frame(tmp_path)
+    wrong_before = BoardState(
+        concealed_count=13, melds=((41, 42, 43),), claim_buttons=2,
+        settled=False,
+        concealed=(22, 3, 5, 6, 7, 43, 47, 49, 29, 29, 64, 64, 64))
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[result])
+    ok, why = loop._verify_kong_dimmed_box_repair(
+        wrong_before, board, frame.read_bytes(), frame, image,
+        target_tile=64, kong_kind="ming")
+    assert not ok
+    assert "仍不通过" in why
+
+
+def test_kong_dimmed_box_repair_not_engaged_without_rejected_boxes(tmp_path):
+    """诊断里没有被拒暗手框时不启用修复（不凭空补牌）。"""
+    frame, image, result, board = _kong_dimmed_frame(tmp_path)
+    clean = dict(result)
+    clean["vision_diagnostics"] = [
+        d for d in result["vision_diagnostics"] if d.get("accepted")]
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[clean])
+    ok, why = loop._verify_kong_dimmed_box_repair(
+        KONG_DIMMED_BEFORE, board, frame.read_bytes(), frame, image,
+        target_tile=64, kong_kind="ming")
+    assert not ok
+    assert "无被拒暗手框" in why
+
+
+def test_kong_dimmed_box_repair_requires_dim_direction(tmp_path):
+    """激活门：把诊断的接受/被拒整体对调后，被拒框并不更暗 → 不启用。"""
+    frame, image, result, board = _kong_dimmed_frame(tmp_path)
+    tampered = dict(result)
+    diags = []
+    for d in result["vision_diagnostics"]:
+        flipped = dict(d)
+        flipped["accepted"] = not d.get("accepted")
+        diags.append(flipped)
+    tampered["vision_diagnostics"] = diags
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[tampered])
+    ok, why = loop._verify_kong_dimmed_box_repair(
+        KONG_DIMMED_BEFORE, board, frame.read_bytes(), frame, image,
+        target_tile=64, kong_kind="ming")
+    assert not ok
+    assert "压暗方向证据不成立" in why

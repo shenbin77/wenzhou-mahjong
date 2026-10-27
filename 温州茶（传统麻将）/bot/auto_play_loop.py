@@ -3326,6 +3326,125 @@ class AutoPlayLoop:
             f"{before.concealed_count}→{after.concealed_count}（0/+1 内），"
             "下一步交给新窗口自己的决策")
 
+    def _verify_kong_dimmed_box_repair(
+        self,
+        before: BoardState,
+        after: BoardState,
+        raw: bytes,
+        path: Path,
+        image: np.ndarray,
+        *,
+        target_tile: int | None,
+        kong_kind: str | None,
+    ) -> tuple[bool, str]:
+        """只救回「杠后复核帧中段局部压暗」造成的暗手少读。
+
+        实机 2026-10-27 17:45（房间 405891 第 1 局，明杠北）：杠后帧
+        副露 [[41,42,43],[64,64,64,64]] 读对，暗手中段 5 框
+        （x 1021–1480）几何对齐正常、被局部压暗打坏字形分数
+        （0.366–0.690），精确多重集缺 {29:2, 43:1, 47:1, 49:1}
+        停手。这与「过」后整手压暗（16→6）不同：本帧其余暗手明亮
+        可读，既有整手压暗豁免的 ROI 尺（bright_ratio）量不出中段
+        局部压暗，因此单独一条。
+
+        只接受一组封闭正证据，任一不成立都维持未证实：
+        * 标准读的副露/暗手可测，且画面不在结算/候选面板态；
+        * 压暗方向独立成立（激活门，不看牌面内容）：本帧诊断里
+          被拒暗手框的亮度（V 中位数）比同帧已接受暗手框低至少
+          2.0——实机帧实测被拒框 87.6–91.8、已接受框 92.9–94.0；
+        * 只对被拒框，用同一 classify_crop 在亮度归一化
+          （dim_gain_all 的逐框口径）下重读——每框仍须独立过原
+          min_score/min_margin，已被接受的牌一律不重读；候选
+          选择只看本框像素，绝不参考验证所缺的多重集（恢复与
+          验证单向：先固定恢复结果，再跑状态迁移验证）；
+        * 每个被拒框都必须恢复（不接受部分修复）；
+        * 补全后的暗手重跑完整杠验证（精确多重集、副露迁移、
+          张数差）通过。杠验证本身已区分补摸前/后两种合法相位
+          （extras 0/1），本路径不放宽任何一条。全局识牌阈值
+          一个字节不改。
+        """
+        if after.concealed is None or after.melds is None:
+            return False, "杠后压暗框修复：标准读副露/暗手不可测，不启用"
+        if after.settled is True or after.selection_panel is True:
+            return False, "杠后压暗框修复：画面处于结算/候选面板态，不启用"
+        result = self._analyze(raw, path)
+        if not isinstance(result, dict):
+            return False, "杠后压暗框修复：复核帧分析无结构化结果，不启用"
+        diags = result.get("vision_diagnostics") or []
+        failed = [
+            d for d in diags
+            if d.get("region") == "concealed"
+            and not d.get("accepted") and d.get("box")
+        ]
+        if not failed:
+            return False, "杠后压暗框修复：本帧无被拒暗手框，不启用"
+        accepted = [
+            d for d in diags
+            if d.get("region") == "concealed"
+            and d.get("accepted") and d.get("box")
+        ]
+        if not accepted:
+            return False, "杠后压暗框修复：本帧无已接受暗手框作亮度参照，不启用"
+
+        def _median_v(diag_list: list) -> float:
+            values = []
+            for diag in diag_list:
+                x0, y0, x1, y1 = (int(v) for v in diag["box"])
+                crop = image[y0:y1, x0:x1]
+                if crop.size:
+                    values.append(float(
+                        cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)[:, :, 2].mean()))
+            return float(np.median(values)) if values else float("nan")
+
+        med_failed = _median_v(failed)
+        med_accepted = _median_v(accepted)
+        if not (med_failed + 2.0 <= med_accepted):
+            return False, (
+                f"杠后压暗框修复：压暗方向证据不成立（被拒框 V 中位数 "
+                f"{med_failed:.1f}，已接受框 {med_accepted:.1f}），不启用")
+        from tea_bot import _TEMPLATE_DIR
+        from tile_vision import TileVision
+
+        vision = TileVision(template_dir=_TEMPLATE_DIR)
+        vision.dim_gain_all = True
+        caishen_label = result.get("caishen") or None
+        recovered: list[int] = []
+        recovered_scores: list[float] = []
+        for diag in failed:
+            x0, y0, x1, y1 = (int(v) for v in diag["box"])
+            retry = vision.classify_crop(
+                image[y0:y1, x0:x1], caishen_label=caishen_label)
+            if not retry.get("accepted") or retry.get("tile_id") is None:
+                return False, (
+                    f"杠后压暗框修复：框 {diag['box']} 亮度补偿重读仍未过"
+                    f"原门槛（{retry.get('label')}/"
+                    f"{float(retry.get('score') or 0.0):.3f}），维持未证实")
+            recovered.append(int(retry["tile_id"]))
+            recovered_scores.append(float(retry.get("score") or 0.0))
+        completed = tuple(sorted(
+            [int(t) for t in after.concealed] + recovered))
+        repaired = BoardState(
+            concealed_count=len(completed),
+            melds=after.melds,
+            claim_buttons=after.claim_buttons,
+            settled=after.settled,
+            turn_owner=after.turn_owner,
+            selection_panel=after.selection_panel,
+            note="杠后压暗框修复重读",
+            concealed=completed,
+        )
+        ok, why = verify_after_click(
+            before, repaired, ACTION_KONG,
+            target_tile=target_tile, kong_kind=kong_kind)
+        if not ok:
+            return False, f"杠后压暗框修复后精确验证仍不通过：{why}"
+        return True, (
+            f"杠状态已验证（path=kong_dim_box_repair，激活：被拒框 "
+            f"{len(failed)} 个、V 中位数 {med_failed:.1f} < 已接受 "
+            f"{med_accepted:.1f}；仅对被拒框做亮度补偿重读、全部过原"
+            f"门槛恢复 {sorted(recovered)}（最低分 "
+            f"{min(recovered_scores):.3f}），补全后精确多重集验证通过）")
+
     def _verify_claim_settled(
         self,
         before: BoardState,
@@ -3392,6 +3511,13 @@ class AutoPlayLoop:
                         # 新窗口的圆盘本来就在同一槽位，不能再要求圆盘消失。
                         recovered, recovery_reason = (
                             self._verify_pass_new_window(before, board))
+                    if recovered:
+                        verified, reason = True, recovery_reason
+                if action == ACTION_KONG and not verified:
+                    recovered, recovery_reason = (
+                        self._verify_kong_dimmed_box_repair(
+                            before, board, raw, path, image,
+                            target_tile=target_tile, kong_kind=kong_kind))
                     if recovered:
                         verified, reason = True, recovery_reason
                 if extra_check is not None:
