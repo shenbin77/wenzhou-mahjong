@@ -735,6 +735,60 @@ def test_identity_retry_timeout_fails_closed():
     assert len(calls) == 1
 
 
+def test_identity_pending_read_times_out_and_late_match_cannot_start():
+    """异步读取没返回时也须到期停手；旧读取后来成功仍不得启动。"""
+    starts = []
+    window, _calls = _identity_sequence_window([_MATCH], starts)
+    window._begin_identity_check(pending="full_auto")
+    late_result = window._identity_events.get_nowait()
+    old_generation = window._identity_generation
+    window._identity_retry_deadline = _time.perf_counter() - 1
+
+    window._poll_identity_check()
+
+    assert window._identity_state == "unknown"
+    assert window._identity_pending is None
+    assert window._full_auto_wanted is False
+    assert window._identity_generation > old_generation
+    assert "核验超时" in window.status.get()
+    window._identity_events.put(late_result)
+    window._poll_identity_check()
+    assert starts == []
+    assert not window._identity_gate_ok()
+
+
+def test_identity_queued_match_after_deadline_is_not_accepted():
+    """结果已排队但轮询时超过预算，也不能以过期画面接管。"""
+    starts = []
+    window, _calls = _identity_sequence_window([_MATCH], starts)
+    window._begin_identity_check(pending="full_auto")
+    window._identity_retry_deadline = _time.perf_counter() - 1
+
+    window._poll_identity_check()
+
+    assert starts == []
+    assert window._identity_state == "unknown"
+    assert not window._identity_gate_ok()
+    assert window._full_auto_wanted is False
+    assert "核验超时" in window.status.get()
+
+
+def test_identity_rebegin_does_not_extend_expired_inflight_check():
+    """正在等待中的核验到期后，重复请求不能偷偷续期。"""
+    starts = []
+    window, _calls = _identity_sequence_window([_UNKNOWN], starts)
+    window._begin_identity_check(pending="full_auto")
+    expired = _time.perf_counter() - 1
+    window._identity_retry_deadline = expired
+
+    window._begin_identity_check(pending="full_auto")
+
+    assert window._identity_retry_deadline == expired
+    window._poll_identity_check()
+    assert window._identity_state == "unknown"
+    assert starts == []
+
+
 def test_identity_retry_budget_not_refreshed_by_rebegin():
     """重复 begin（控制轮询重入）不许刷新预算，防无限重试。"""
     starts = []

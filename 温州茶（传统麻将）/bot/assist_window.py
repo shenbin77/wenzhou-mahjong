@@ -2071,7 +2071,9 @@ class TeaAssistWindow:
             # 只在无预算/预算过期时新建，重复 begin 不许刷新（防无限重试）。
             now = time.perf_counter()
             deadline = getattr(self, "_identity_retry_deadline", None)
-            if deadline is None or now > deadline:
+            checking = (getattr(self, "_identity_state", "unchecked") == "checking"
+                        and getattr(self, "_identity_key", None) == context)
+            if deadline is None or (not checking and now > deadline):
                 self._identity_retry_deadline = (
                     now + IDENTITY_RETRY_BUDGET_SECONDS)
                 self._identity_retry_attempts = 0
@@ -2137,6 +2139,22 @@ class TeaAssistWindow:
         else:
             executor.submit(work)
 
+    def _expire_identity_check(self) -> None:
+        """Revoke an expired attempt, including any still-running reader."""
+        self._identity_generation = getattr(self, "_identity_generation", 0) + 1
+        self._identity_state = "unknown"
+        self._identity_pending = None
+        self._identity_retry_deadline = None
+        self._identity_verified_at = None
+        self._full_auto_wanted = False
+        self._auto_resume_pending = False
+        self.status.set(
+            "玩家身份核验超时：未能及时核验本人昵称；"
+            "请关闭遮挡本人昵称的面板后重新开启全自动。")
+        self._set_operational_status(
+            "身份待核验", "核验超时", level="wait")
+        self._refresh_binding_views()
+
     def _retry_identity_check(self) -> None:
         """核验回合内的续读：三件防呆（仍在核验中/上下文未变/预算未过）。"""
         self._identity_retry_timer = None
@@ -2146,21 +2164,7 @@ class TeaAssistWindow:
         if deadline is None:
             return
         if time.perf_counter() > deadline:
-            # 预算耗尽：与 poll 终局同语义 fail-closed 收尾。
-            pending = getattr(self, "_identity_pending", None)
-            self._identity_state = "unknown"
-            self._identity_pending = None
-            self._identity_retry_deadline = None
-            if pending == "full_auto" \
-                    or getattr(self, "_auto_resume_pending", False):
-                self._full_auto_wanted = False
-                self._auto_resume_pending = False
-            self.status.set(
-                "玩家身份核验超时：多次自动重试仍未读到本人昵称；"
-                "请关闭遮挡本人昵称的面板后重新开启全自动，或再发一次 resume。")
-            self._set_operational_status(
-                "身份待核验", "核验超时", level="wait")
-            self._refresh_binding_views()
+            self._expire_identity_check()
             return
         if not self._is_bound() \
                 or getattr(self, "_identity_key", None) \
@@ -2176,6 +2180,15 @@ class TeaAssistWindow:
 
     def _poll_identity_check(self) -> None:
         self._identity_poll_timer = None
+        # Check the deadline even while a worker has not returned.  Invalidate
+        # its generation before inspecting any queued result so a late match
+        # cannot silently re-arm autoplay after the user-visible timeout.
+        deadline = getattr(self, "_identity_retry_deadline", None)
+        if (getattr(self, "_identity_state", None) == "checking"
+                and getattr(self, "_identity_pending", None) == "full_auto"
+                and deadline is not None and time.perf_counter() > deadline):
+            self._expire_identity_check()
+            return
         events = getattr(self, "_identity_events", None)
         if events is None:
             return
