@@ -16,6 +16,8 @@ import numpy as np
 
 from lobby_preflight import LobbyAssessment, assess_frame
 from lobby_seat import SeatExecution, execute_auto_seat
+from invite_dialog import read_invitation
+from tap_executor import TapExecutor
 from lobby_start import (
     StartExecution,
     execute_auto_start,
@@ -94,6 +96,7 @@ def advance(
     room_cards_snapshot: int | None = None,
     runner=None,
     sleep_fn=time.sleep,
+    invitation_authorized=None,
 ) -> LobbyProgress:
     """Observe one scene and, only in a proven lobby, make one guarded seat attempt.
 
@@ -104,6 +107,30 @@ def advance(
     authorised normal game-start consumption by pressing Start Follow.
     """
     image = _capture_image(serial, adb_path, session_dir)
+    # Consume an invitation before scene classification or seating. The user
+    # has authorised only the rectangular cancel on this exact dialog.
+    invitation = read_invitation(image)
+    if invitation.present:
+        if not invitation.complete or invitation.cancel_center is None:
+            return LobbyProgress("lobby", "邀请弹窗识别不完整，已停止点击。",
+                                 room_cards_snapshot, "unknown", terminal=True)
+        if not callable(invitation_authorized) or not invitation_authorized():
+            return LobbyProgress("lobby", "找位已停止，未取消邀请。",
+                                 room_cards_snapshot, "unknown", terminal=True)
+        executor = TapExecutor(enabled=True, adb_path=adb_path, serial=serial,
+                               session_dir=session_dir)
+        executor.authorization_check = invitation_authorized
+        try:
+            outcome = executor.execute_invitation_cancel(
+                invitation.cancel_center, image=image, session_dir=session_dir)
+        except Exception as exc:
+            return LobbyProgress("lobby", f"邀请取消未确认：{exc}；已停止点击。",
+                                 room_cards_snapshot, "unknown", terminal=True)
+        if not outcome.get("executed") or not outcome.get("verified"):
+            return LobbyProgress("lobby", "邀请取消结果未验证，已停止点击。",
+                                 room_cards_snapshot, "unknown", terminal=True)
+        return LobbyProgress("lobby", "已取消入桌邀请并确认弹窗消失。",
+                             room_cards_snapshot, "unknown", clicked=True)
     assessment = assess_frame(image)
     waiting_visual = waiting_room_visual_evidence(image)
     # The game may auto-open Member List after seating.  It obscures the rule
@@ -217,7 +244,8 @@ def advance(
                 allow_seat=False, allow_start=True,
                 expected_account=expected_account,
                 room_cards_snapshot=known_cards,
-                runner=runner, sleep_fn=sleep_fn)
+                runner=runner, sleep_fn=sleep_fn,
+                invitation_authorized=invitation_authorized)
         return LobbyProgress(
             ("waiting_room" if execution.final_state == "in_game"
              else execution.final_state),

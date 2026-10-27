@@ -6,12 +6,15 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 import lobby_follow
 from lobby_preflight import LobbyAssessment
 from lobby_follow import LobbyProgress
 from assist_window import TeaAssistWindow
+from invite_dialog import InvitationState
+from threading import Event
 
 
 class Variable:
@@ -31,6 +34,93 @@ class Root:
         self.scheduled.append((ms,fn))
         return "timer"
     def after_cancel(self,token): self.scheduled.append(("cancel",token))
+
+
+def test_lobby_invitation_cancels_before_seating_and_resumes(monkeypatch, tmp_path):
+    image = np.zeros((900, 1600, 3), np.uint8)
+    monkeypatch.setattr(lobby_follow, "_capture_image", lambda *a, **k: image)
+    monkeypatch.setattr(lobby_follow, "read_invitation", lambda _image:
+        InvitationState(True, True, cancel_box=(500, 540, 750, 640),
+                        cancel_center=(625, 590)))
+    monkeypatch.setattr(lobby_follow, "assess_frame", lambda _image:
+        (_ for _ in ()).throw(AssertionError("must consume invitation first")))
+    calls = []
+    class Executor:
+        def __init__(self, **kwargs): calls.append(kwargs)
+        def execute_invitation_cancel(self, point, **kwargs):
+            assert self.authorization_check()
+            calls.append((point, kwargs))
+            return {"executed": True, "verified": True}
+    monkeypatch.setattr(lobby_follow, "TapExecutor", Executor)
+    out = lobby_follow.advance("emulator-5556", "adb.exe", tmp_path,
+                               invitation_authorized=lambda: True)
+    assert out.state == "lobby" and out.clicked and not out.terminal
+    assert calls[0]["serial"] == "emulator-5556"
+    assert calls[1][0] == (625, 590)
+
+
+def test_lobby_invitation_incomplete_or_stopped_never_clicks(monkeypatch, tmp_path):
+    monkeypatch.setattr(lobby_follow, "_capture_image", lambda *a, **k:
+                        np.zeros((900, 1600, 3), np.uint8))
+    monkeypatch.setattr(lobby_follow, "TapExecutor", lambda **kwargs:
+        (_ for _ in ()).throw(AssertionError("must not click")))
+    for state, authorized in [(InvitationState(True, False), lambda: True),
+                              (InvitationState(True, True, cancel_center=(625, 590)),
+                               lambda: False),
+                              (InvitationState(True, True, cancel_center=(625, 590)), None)]:
+        monkeypatch.setattr(lobby_follow, "read_invitation", lambda _img: state)
+        out = lobby_follow.advance("emulator-5556", "adb.exe", tmp_path,
+                                   invitation_authorized=authorized)
+        assert out.terminal and not out.clicked
+
+
+def test_lobby_invitation_unverified_stops_without_seating(monkeypatch, tmp_path):
+    monkeypatch.setattr(lobby_follow, "_capture_image", lambda *a, **k:
+                        np.zeros((900, 1600, 3), np.uint8))
+    monkeypatch.setattr(lobby_follow, "read_invitation", lambda _image:
+                        InvitationState(True, True, cancel_center=(625, 590)))
+    class Executor:
+        def __init__(self, **kwargs): pass
+        def execute_invitation_cancel(self, *args, **kwargs):
+            raise RuntimeError("post-click unknown")
+    monkeypatch.setattr(lobby_follow, "TapExecutor", Executor)
+    out = lobby_follow.advance("emulator-5556", "adb.exe", tmp_path,
+                               invitation_authorized=lambda: True)
+    assert out.terminal and "post-click unknown" in out.message
+
+
+def test_stop_lobby_revokes_invitation_authority():
+    window = TeaAssistWindow.__new__(TeaAssistWindow)
+    window._lobby_invitation_authority = Event()
+    window._lobby_invitation_authority.set()
+    window._lobby_timer = None
+    window._stop_lobby_follow()
+    assert not window._lobby_invitation_authority.is_set()
+
+
+def test_invitation_revoked_after_fresh_frame_sends_no_tap(monkeypatch, tmp_path):
+    import tap_executor as executor_module
+    state = InvitationState(True, True, cancel_box=(500, 540, 750, 640),
+                            cancel_center=(625, 590))
+    monkeypatch.setattr(executor_module, "read_invitation", lambda _image: state)
+    authority = Event()
+    authority.set()
+    executor = executor_module.TapExecutor(enabled=True, serial="emulator-5556",
+                                           session_dir=tmp_path)
+    executor.authorization_check = authority.is_set
+    monkeypatch.setattr(executor, "_screenshot", lambda:
+                        np.zeros((900, 1600, 3), np.uint8))
+    foreground_calls = []
+    def foreground():
+        foreground_calls.append(True)
+        if len(foreground_calls) == 2:
+            authority.clear()
+    monkeypatch.setattr(executor, "_require_game_foreground", foreground)
+    sent = []
+    monkeypatch.setattr(executor, "_adb", lambda *a, **k: sent.append(a))
+    with pytest.raises(executor_module.TapAborted, match="权限已撤销"):
+        executor.execute_invitation_cancel((625, 590))
+    assert len(foreground_calls) == 2 and not sent
 
 
 def test_lobby_probe_uses_read_only_capture(monkeypatch,tmp_path):
