@@ -27,6 +27,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+from frame_input import DecodedFrame
+
 _TEA_ROOT = Path(__file__).resolve().parent.parent
 _ENGINE_ROOT = _TEA_ROOT / "代打BOT" / "majiang-bot"
 _TEMPLATE_DIR = _TEA_ROOT / "采集" / "templates" / "tea_tiles"
@@ -242,18 +244,20 @@ class TeaBot:
 
     def _default_vision(self, png: bytes) -> list[int]:
         """对采集截图做保守识别；任何漏牌、明牌组或未知牌均停止。"""
-        import cv2
-        import numpy as np
+        return self._default_vision_image(DecodedFrame.from_png(png).image)
 
+    # Keep the original function identity: a later vision_fn assignment or a
+    # subclass/monkeypatch of _default_vision must still receive raw PNG bytes.
+    _native_bytes_vision = _default_vision
+
+    def _default_vision_image(self, image) -> list[int]:
+        """Recognize the pixels of one already decoded observation."""
         bot_dir = str(Path(__file__).resolve().parent)
         if bot_dir not in sys.path:
             sys.path.insert(0, bot_dir)
         from tile_vision import TileVision
         from mode_vision import detect_tea_no_zhong_fa, detect_tea_player_count
 
-        image = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError("截图不是有效 PNG 图像")
         # 玩法门禁（人数 + 牌集无中发）：走 mode_vision 的粘滞结论。粘滞/逐帧
         # 两种口径都读不出来的帧，行为跟修改前一样是弃权，绝不放宽门槛。
         # action_ui 是本帧按钮区 + 两道门禁的分值/是否走了粘滞，给看门狗逐帧留证。
@@ -425,7 +429,19 @@ class TeaBot:
         screenshot为None时实时截图；传入字节则用传入的（离线测试用）。
         """
         png = screenshot if screenshot is not None else self._shot()
-        vision_ids = self.vision_fn(png)
+        return self._validate_seen_hand(self.vision_fn(png))
+
+    def see_frame(self, frame: DecodedFrame) -> list[int]:
+        """Use a single observation without bypassing an injected vision_fn."""
+        if not isinstance(frame, DecodedFrame):
+            raise TypeError("frame must be a DecodedFrame")
+        vision_fn = self.vision_fn
+        if (getattr(vision_fn, "__self__", None) is self
+                and getattr(vision_fn, "__func__", None) is TeaBot._native_bytes_vision):
+            return self._validate_seen_hand(self._default_vision_image(frame.image))
+        return self.see(frame.raw)
+
+    def _validate_seen_hand(self, vision_ids: Sequence[int]) -> list[int]:
         engine_ids = vision_hand_to_engine(vision_ids)
         engine_melds = [vision_hand_to_engine(group) for group in self.meld_groups]
         # 张数守恒按逻辑位：每组副露（含杠）只占一个面子=3 逻辑位。

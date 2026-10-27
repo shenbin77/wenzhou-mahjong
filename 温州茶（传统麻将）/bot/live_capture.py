@@ -25,6 +25,7 @@ import numpy as np
 
 from assist_shu import analyze_shu_snapshot
 from assist_tea import analyze_snapshot
+from frame_input import DecodedFrame
 from harvest_tea import DEFAULT_ADB, DEFAULT_SERIAL, EXPECTED_PACKAGE
 from live_state import FrameTiming
 from recorder import normalize_candidates
@@ -163,7 +164,7 @@ def display_candidates(result: dict, mode: str) -> list[dict]:
 def analyze_bytes(
     raw: bytes, *, mode: str, image_path: Path, log_dir: Path,
     clock: SegmentClock | None = None, caishen_label: str = "",
-    manual_caishen: bool = False,
+    manual_caishen: bool = False, frame: DecodedFrame | None = None,
 ) -> dict:
     """Recognition + advice for one PNG frame (no sidecar, no annotation).
 
@@ -171,11 +172,21 @@ def analyze_bytes(
     window can report the two segments separately.  ``caishen_label`` is the
     user's manual pick; it only reaches the tea engine when ``manual_caishen``
     is set AND the frame itself did not reveal a caishen (see below).
+    An optional decoded frame must belong to these exact raw bytes.  It is
+    local to this observation; new captures/verification never reuse old pixels.
     """
-    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
     base = {"mode": mode, "image": str(image_path), "annotation": None}
-    if image is None:
-        return {**base, "status": "abstain", "reason": "截图不是有效 PNG"}
+    if frame is not None:
+        if not isinstance(frame, DecodedFrame):
+            raise TypeError("frame must be a DecodedFrame")
+        if frame.raw != raw:
+            raise ValueError("decoded frame does not match raw PNG bytes")
+    else:
+        try:
+            frame = DecodedFrame.from_png(raw)
+        except ValueError:
+            return {**base, "status": "abstain", "reason": "截图不是有效 PNG"}
+    image = frame.image
     two, four = player_prefix(mode)
     mode = mode if mode in {"tea_2p", "tea_4p", "shu_4p"} else "tea_2p"
     manual = bool(manual_caishen and caishen_label and mode.startswith("tea_"))
@@ -185,7 +196,7 @@ def analyze_bytes(
         result = analyze_snapshot(
             image_path, caishen_label=caishen_label if manual else "",
             confirmed_two_player=two, confirmed_four_player=four,
-            log_dir=log_dir, output_path=None,
+            log_dir=log_dir, output_path=None, frame=frame,
             on_recognized=(lambda: recognized("recognize")) if recognized else None,
         )
     else:

@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from tea_bot import TeaBot, engine_to_vision, tile_name, vision_to_engine
+from frame_input import DecodedFrame
 from tile_vision import TARGET_IDS, TILE_IDS
 from caishen_vision import CaishenRead, detect_caishen
 from discard_vision import DiscardState, read_discards_sequential
@@ -193,8 +194,7 @@ def _caishen_fields(caishen_label: str, observed: CaishenRead) -> dict:
 
 
 def _abstain_with_vision_evidence(
-    data: bytes,
-    image: np.ndarray,
+    frame: DecodedFrame,
     source: Path,
     output: Path | None,
     *,
@@ -210,12 +210,13 @@ def _abstain_with_vision_evidence(
     只读展示手牌识别框，便于操作者判断识牌链路本身是否在工作；
     不调用 think()，因此不会产生无财神前提下的建议。
     """
+    image = frame.image
     bot = TeaBot(dry_run=True, caishen_id=None, log_dir=str(logs),
                  player_count=player_count)
     try:
         try:
             try:
-                bot.see(data)
+                bot.see_frame(frame)
             finally:
                 if on_recognized is not None:
                     on_recognized()
@@ -300,6 +301,7 @@ def analyze_snapshot(
     log_dir: str | Path | None = None,
     on_recognized=None,
     previous_discards=None,
+    frame: DecodedFrame | None = None,
 ) -> dict:
     """Advise on one confirmed tea frame. Unsupported or uncertain states abstain.
 
@@ -320,6 +322,8 @@ def analyze_snapshot(
         previous_discards: 可选的上一帧弃牌读数（:class:`DiscardState` 或
             :class:`TableSnapshot`）。不传则用登记处里上一帧的读数 —— 首帧
             因此只有牌河、没有来牌。
+        frame: 同一次采集的已解码帧；传入时不重读 image_path，路径仅作证据标签。
+            新采集及点后验证必须另建帧，禁止跨采集复用。
     """
     player_count = _confirmed_tea_player_count(confirmed_two_player, confirmed_four_player)
     mode = f"tea_{player_count}p"
@@ -328,7 +332,14 @@ def analyze_snapshot(
     if output is not None and output.resolve() == source.resolve():
         raise ValueError("标注图不能覆盖原始截图")
     logs = Path(log_dir) if log_dir is not None else Path(tempfile.gettempdir()) / "tea_assist_logs"
-    data, image = _load_image(source)
+    if frame is None:
+        try:
+            frame = DecodedFrame.from_png(source.read_bytes())
+        except ValueError as exc:
+            raise ValueError(f"无法读取图像: {source}") from exc
+    elif not isinstance(frame, DecodedFrame):
+        raise TypeError("frame must be a DecodedFrame")
+    image = frame.image
     # 来牌在财神门禁之前读：财神读不出来只是"不给建议"，牌河事实照样要记进台账，
     # 而且 ``discards`` 必须在每一个返回分支里都在（上游按"有没有这个键"取数）。
     discards = _discard_reading(image, previous_discards, player_count=player_count,
@@ -343,7 +354,7 @@ def analyze_snapshot(
         # 画面读不出财字小牌，且操作者也没有手选本局财神时才弃权。
         # 手选等于操作者已在牌桌上核对过财神，是一等证据，不能被这条门禁废掉。
         return _abstain_with_vision_evidence(
-            data, image, source, output, mode=mode, player_count=player_count,
+            frame, source, output, mode=mode, player_count=player_count,
             logs=logs,
             reason="连续观察必须看清本局财字小牌；仅显示识牌证据，不给建议",
             on_recognized=on_recognized, caishen_selected=caishen_label,
@@ -364,7 +375,7 @@ def analyze_snapshot(
     caishen_id = TILE_IDS.get(caishen_label)
     if caishen_id not in TARGET_IDS:
         return _abstain_with_vision_evidence(
-            data, image, source, output, mode=mode, player_count=player_count,
+            frame, source, output, mode=mode, player_count=player_count,
             logs=logs,
             reason=_caishen_fail_reason(observed),
             on_recognized=on_recognized, caishen_selected=caishen_label,
@@ -377,7 +388,7 @@ def analyze_snapshot(
     try:
         try:
             try:
-                hand = bot.see(data)
+                hand = bot.see_frame(frame)
             finally:
                 if on_recognized is not None:
                     on_recognized()
