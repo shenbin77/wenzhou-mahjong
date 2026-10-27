@@ -3550,7 +3550,15 @@ class AutoPlayLoop:
             if (previous_signature is not None
                     and signature == previous_signature):
                 # 连续两帧签名一致 = 已落定；落定后仍不符是真未证实。
-                return False, reason, board, samples
+                # 例外（state-aware，GPT 交叉复核裁决）：「过」的复核
+                # 帧处于整手压暗态时，坏读本身是确定性的、签名必然
+                # 稳定，但行动圆盘精灵可能只是残留未消（实机
+                # 2026-10-27 18:31 残留 ≥2.7s）——稳定 ≠ 终局，不许
+                # 提前判负，继续有界轮询等真实状态迁移或轮询耗尽。
+                if not (action == ACTION_PASS
+                        and self._chi_dimmed_hand_evidence(image)["dimmed"]):
+                    return False, reason, board, samples
+                samples[-1]["settle_early_exit_suppressed"] = "pass_dimmed"
             previous_signature = signature
         return False, (f"点后状态 {CLAIM_SETTLE_ATTEMPTS} 帧内未落定，"
                        f"fail-closed：{reason}"), board, samples

@@ -4101,3 +4101,67 @@ def test_kong_dimmed_box_repair_requires_dim_direction(tmp_path):
         target_tile=64, kong_kind="ming")
     assert not ok
     assert "压暗方向证据不成立" in why
+
+
+# ----------------------------------------------------------------------
+# 2026-10-27 18:31 真帧：「过」后整手压暗 + 圆盘残留，落定轮询不得
+# 凭签名稳定提前判负（state-aware settle，GPT 交叉复核裁决 v1）
+# ----------------------------------------------------------------------
+PASS_DIMMED_ROOT = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261027_180652_emulator5556_烘熊瞎" / "frames"
+)
+
+
+def _pass_settle_loop(tmp_path, raw, boards):
+    loop, *_ = make_loop(tmp_path, enabled=True)
+    loop._shot = lambda: raw
+    loop._save_frame = lambda _raw, _tag: Path(tmp_path) / "settle.png"
+    loop._sleep = lambda _seconds: None
+    sequence = iter(boards)
+    loop._board_from_frame = lambda *_a, **_k: next(sequence)
+    return loop
+
+
+def test_pass_dimmed_settle_does_not_early_exit_on_stable_signature(tmp_path):
+    """压暗态下前三帧签名全同也不提前判负；第四帧圆盘消失即验证通过。"""
+    frames = sorted(PASS_DIMMED_ROOT.glob(
+        "20261027_183142_*_after_claim_*.png"))
+    if not frames:
+        pytest.skip("过后压暗真帧缺失")
+    raw = frames[0].read_bytes()
+    before = BoardState(
+        concealed_count=14, melds=((25, 26, 27),), claim_buttons=2,
+        settled=False, selection_panel=False, note="过前")
+    dimmed_disc = BoardState(
+        concealed_count=6, melds=((25, 26, 27),), claim_buttons=2,
+        settled=False, selection_panel=False, note="过后压暗+圆盘残留")
+    dimmed_gone = BoardState(
+        concealed_count=6, melds=((25, 26, 27),), claim_buttons=0,
+        settled=False, selection_panel=False, note="过后压暗+圆盘已消")
+    loop = _pass_settle_loop(
+        tmp_path, raw, [dimmed_disc, dimmed_disc, dimmed_disc, dimmed_gone])
+    verified, reason, _board, samples = loop._verify_claim_settled(
+        before, ACTION_PASS, tag="test", note="过后落定测试")
+    assert verified, reason
+    assert len(samples) == 4
+    assert samples[1].get("settle_early_exit_suppressed") == "pass_dimmed"
+
+
+def test_pass_bright_settle_still_early_exits_on_stable_signature(tmp_path):
+    """非压暗态不放宽：两帧签名一致照旧判已落定、立即未证实。"""
+    ok, encoded = cv2.imencode(
+        ".png", np.full((900, 1600, 3), 214, dtype=np.uint8))
+    assert ok
+    raw = encoded.tobytes()
+    before = BoardState(
+        concealed_count=14, melds=((25, 26, 27),), claim_buttons=2,
+        settled=False, selection_panel=False, note="过前")
+    stuck = BoardState(
+        concealed_count=6, melds=((25, 26, 27),), claim_buttons=2,
+        settled=False, selection_panel=False, note="过后未迁移")
+    loop = _pass_settle_loop(tmp_path, raw, [stuck, stuck, stuck, stuck])
+    verified, _reason, _board, samples = loop._verify_claim_settled(
+        before, ACTION_PASS, tag="test", note="过后落定测试")
+    assert not verified
+    assert len(samples) == 2
