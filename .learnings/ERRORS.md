@@ -27,6 +27,28 @@ OSError: [Errno 28] No space left on device
 
 ---
 
+## [ERR-20261027-003] 辅助器重启失败且 pythonw 未留下启动诊断
+
+**Priority**: high
+**Status**: pending
+**Area**: lifecycle
+
+### 摘要
+调用项目内置 `restart_assistant('emulator-5554')` 后，旧窗口接受退出，但新 PID 在窗口就绪前退出；`pythonw` 启动没有 stderr 日志，管理器只能报告 PID 退出，无法直接定位初始化异常。现场还观察到 PID 存活、Tk 顶层窗口为零而全自动日志继续增长的无头 worker。
+
+### 错误信息
+```
+RuntimeError: emulator-5554 辅助器 PID 16524 在窗口就绪前退出；已停止自动重试
+```
+
+### 建议修复
+启动器为每次 `pythonw` 启动保存有界诊断日志；restore ACK 必须复核主窗口真实可见，不能吞 `TclError` 后回成功；显式退出必须先确认全自动 Future 结束，再销毁 Tk，禁止无头 worker 持有 serial 租约。
+
+### 元数据
+- Reproducible: yes
+
+---
+
 ## [ERR-20261027-002] PowerShell 分号未阻断失败后的提交
 
 **Priority**: medium

@@ -42,4 +42,7 @@
 {"ts":"2026-10-27T01:18:00+08:00","action":"promote","type":"learning","id":"LRN-20261027-001","summary":"单设备雷电和辅助器启动语义固化","target":"AGENTS.md"}
 {"ts":"2026-10-27T01:32:00+08:00","action":"add","type":"error","id":"ERR-20261027-002","summary":"PowerShell分号未阻断diff-check失败后的本地提交"}
 {"ts":"2026-10-27T01:33:00+08:00","action":"resolve","type":"error","id":"ERR-20261027-002","summary":"拆分验证与提交门禁并清理新文件末尾空行"}
+{"ts":"2026-10-27T13:34:00+08:00","action":"add","type":"error","id":"ERR-20261027-003","summary":"辅助器重启新PID在窗口就绪前退出且无pythonw诊断，现场出现无头worker"}
+{"ts":"2026-10-27T14:49:00+08:00","action":"add","type":"learning","id":"LRN-20261027-002","summary":"打牌快一些只指端到端提速，不新增倒计时五秒门禁"}
+{"ts":"2026-10-27T14:49:00+08:00","action":"promote","type":"learning","id":"LRN-20261027-002","summary":"速度诉求按真实分段延迟优化","target":"AGENTS.md"}
 ```

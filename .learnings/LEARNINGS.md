@@ -1,5 +1,24 @@
 # Learnings
 
+## [LRN-20261027-002] “打牌快一些”不是新增倒计时五秒门禁
+
+**Priority**: high
+**Status**: promoted
+**Area**: gameplay-latency
+
+### 内容
+用户纠正：其诉求只是让辅助器整体更快完成打牌，不是要求点击时画面倒计时必须剩余5秒。把口语中的“压进倒计时、不能低于5秒”解释成新的安全保留线，会把性能优化错误扩成行为门禁。
+
+### 建议修复
+先用真实延迟台账分解抓帧、识牌、稳定帧、决策、点击与点后验证耗时，只压缩实测瓶颈；不新增5秒保留线，不降低识牌阈值，也不删除点击前后复核。
+
+### 元数据
+- Source: correction
+- Pattern-Key: gameplay-speed-not-countdown-gate
+- Promoted-To: AGENTS.md
+
+---
+
 ## [LRN-20261027-001] 多开管理器采用显式单设备启动而非周期刷新
 
 **Priority**: high
