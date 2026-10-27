@@ -1,0 +1,129 @@
+{
+  "schema": "tea2_cnn_dataset_policy/v1",
+  "scope": "tea_2p_no_zhong_fa_concealed_weak_only",
+  "native_size": [
+    1600,
+    900
+  ],
+  "labels": {
+    "w1": 1,
+    "w2": 2,
+    "w3": 3,
+    "w4": 4,
+    "w5": 5,
+    "w6": 6,
+    "w7": 7,
+    "w8": 8,
+    "w9": 9,
+    "t1": 21,
+    "t2": 22,
+    "t3": 23,
+    "t4": 24,
+    "t5": 25,
+    "t6": 26,
+    "t7": 27,
+    "t8": 28,
+    "t9": 29,
+    "s1": 41,
+    "s2": 42,
+    "s3": 43,
+    "s4": 44,
+    "s5": 45,
+    "s6": 46,
+    "s7": 47,
+    "s8": 48,
+    "s9": 49,
+    "dong": 61,
+    "nan": 62,
+    "xi": 63,
+    "bei": 64,
+    "bai": 67
+  },
+  "source": {
+    "allowed_family": "assist_sessions",
+    "forbidden_family": "dev_auto_play",
+    "audit_name": "recognition_audit.jsonl",
+    "required_source": "live",
+    "required_mode": "tea_2p",
+    "frame_subdir": [
+      "live",
+      "tea_2p"
+    ],
+    "session_pattern": "(?:ui_)?[0-9]{8}_[0-9]{6}(?:_.+)?",
+    "header_files": [
+      "actions.jsonl",
+      "session.json",
+      "metadata.json"
+    ],
+    "forbidden_note_fragments": [
+      "不进训练语料",
+      "开发局数据",
+      "do not train",
+      "not for training"
+    ],
+    "forbidden_path_parts": [
+      "_takeover",
+      "_backups",
+      "阿法复刻",
+      "dev_auto_play",
+      "preflight",
+      "offline_preflight"
+    ],
+    "audit_schemas": [
+      "recognition_audit/v1",
+      "recognition_audit/v2"
+    ]
+  },
+  "weak": {
+    "score_min": 0.86,
+    "margin_min": 0.1,
+    "region": "concealed",
+    "allowed_reasons": [
+      "accepted",
+      "accepted_narrow_bai_retry"
+    ],
+    "excluded_reasons": [
+      "caishen_marked",
+      "gold_tile_caishen"
+    ],
+    "require_screen_mode_evidence": true,
+    "mode_evidence_source": "screen_rule_text",
+    "tier": "weak_unreviewed_prediction"
+  },
+  "dedup": {
+    "frame_hash": "sha256_original_png_bytes",
+    "frame_pixel_hash": "sha256_RGB_size_prefixed_pixels",
+    "crop_hash": "sha256_RGB_size_prefixed_pixels",
+    "conflicting_labels": "quarantine_all",
+    "cross_group_identical_crops": "quarantine_all",
+    "frame_annotation_conflicts": "quarantine_entire_pixel_frame"
+  },
+  "split": {
+    "seed": 20261027,
+    "ratios": {
+      "train": 0.8,
+      "validation": 0.1,
+      "test": 0.1
+    },
+    "unit": "session_connected_component",
+    "union_keys": [
+      "declared_frame_sha256_conservative",
+      "verified_frame_sha256",
+      "verified_frame_pixel_sha256"
+    ],
+    "independent_match_split": false
+  },
+  "gold": {
+    "audit_predictions_are_never_gold": true,
+    "gold_import_enabled": false,
+    "independent_human_evaluation_ready": false,
+    "reason": "No independently reviewed, box-level tea2 gold importer is included. Historical frame hands and rule-engine agreement are not box gold."
+  },
+  "notes": [
+    "Only index explicitly listed canonical sources; never scan mirror/test trees recursively.",
+    "Unknown screen mode is quarantined, not inferred from folder names, hand counts or mode='tea_2p'.",
+    "Missing room/match provenance is retained as unknown. Session splitting cannot prove independent-game splitting.",
+    "No source images are copied or modified; no torch import, training or classifier replacement.",
+    "Exact image/crop equality is prevented across splits; near-duplicate and same-match independence remain unproven."
+  ]
+}
