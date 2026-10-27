@@ -4189,3 +4189,94 @@ def test_pass_bright_settle_still_early_exits_on_stable_signature(tmp_path):
         before, ACTION_PASS, tag="test", note="过后落定测试")
     assert not verified
     assert len(samples) == 2
+
+
+# ----------------------------------------------------------------------
+# 2026-10-27 21:00 真帧：「过」后整手压暗丢分割框，几何恢复 + 结算优先
+# ----------------------------------------------------------------------
+PASS_DIM_ROOT = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261027_203044_emulator5554_玉姐" / "frames"
+)
+PASS_DIM_MELDS = ((23, 24, 25), (31, 32, 33))
+PASS_DIM_BEFORE = BoardState(
+    concealed_count=10, melds=PASS_DIM_MELDS, claim_buttons=2,
+    settled=False,
+    concealed=(25, 7, 9, 42, 42, 43, 43, 48, 48, 49))
+PASS_DIM_AFTER = BoardState(
+    concealed_count=4, melds=PASS_DIM_MELDS, claim_buttons=0,
+    settled=False, selection_panel=False, concealed=(25, 7, 9, 64))
+
+
+def _pass_dim_frames():
+    after = PASS_DIM_ROOT / "20261027_210051_432031_after_claim_259a6e.png"
+    before = PASS_DIM_ROOT / "20261027_210047_756147_before_2d55f6.png"
+    img_after = _read_native_frame_or_skip(after, "过后压暗复核帧")
+    img_before = _read_native_frame_or_skip(before, "过前亮帧")
+    return after, img_after, img_before
+
+
+def test_pass_dimmed_geometry_repair_recovers_real_frame(tmp_path):
+    """标准读 10→4（分割丢框）；同帧归一化重读补全多重集后验证通过。"""
+    frame, image, _bright = _pass_dim_frames()
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[{"caishen": "t5"}])
+    ok, why = loop._verify_pass_dimmed_geometry_repair(
+        PASS_DIM_BEFORE, PASS_DIM_AFTER, frame.read_bytes(), frame, image)
+    assert ok, why
+    assert "pass_dim_geometry_repair" in why
+
+
+def test_pass_dimmed_geometry_repair_requires_dim_evidence(tmp_path):
+    """亮帧不许启用恢复：牌面带压暗证据不成立即拒绝。"""
+    frame, _image, bright = _pass_dim_frames()
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[{"caishen": "t5"}])
+    ok, why = loop._verify_pass_dimmed_geometry_repair(
+        PASS_DIM_BEFORE, PASS_DIM_AFTER, frame.read_bytes(), frame, bright)
+    assert not ok
+    assert "压暗证据不成立" in why
+
+
+def test_pass_dimmed_geometry_repair_rejects_wrong_before(tmp_path):
+    """重读牌面没错也不许过：与点击前多重集对不上照样否决。"""
+    frame, image, _bright = _pass_dim_frames()
+    wrong_before = BoardState(
+        concealed_count=10, melds=PASS_DIM_MELDS, claim_buttons=2,
+        settled=False,
+        concealed=(25, 7, 9, 42, 42, 43, 43, 48, 48, 29))
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[{"caishen": "t5"}])
+    ok, why = loop._verify_pass_dimmed_geometry_repair(
+        wrong_before, PASS_DIM_AFTER, frame.read_bytes(), frame, image)
+    assert not ok
+    assert "多重集缺" in why
+
+
+def test_pass_dimmed_geometry_repair_requires_discs_gone(tmp_path):
+    """圆盘还在就不能按压暗恢复放行。"""
+    frame, image, _bright = _pass_dim_frames()
+    after = BoardState(
+        concealed_count=4, melds=PASS_DIM_MELDS, claim_buttons=1,
+        settled=False, selection_panel=False, concealed=(25, 7, 9, 64))
+    loop, *_ = make_loop(tmp_path, enabled=True, analyses=[{"caishen": "t5"}])
+    ok, why = loop._verify_pass_dimmed_geometry_repair(
+        PASS_DIM_BEFORE, after, frame.read_bytes(), frame, image)
+    assert not ok
+    assert "圆盘未被实测为 0" in why
+
+
+def test_pass_settle_settlement_screen_takes_priority(tmp_path):
+    """过后进入结算画面 = 终局迁移：不再用盘面读数否决「过」。
+
+    GPT 交叉复核裁决：强结算证据优先于普通 pass 点后验证。
+    """
+    frame = PASS_DIM_ROOT / "20261027_210047_756147_before_2d55f6.png"
+    _read_native_frame_or_skip(frame, "结算优先测试帧")
+    raw = frame.read_bytes()
+    settled_board = BoardState(
+        concealed_count=2, melds=PASS_DIM_MELDS, claim_buttons=0,
+        settled=True, selection_panel=False)
+    loop = _pass_settle_loop(tmp_path, raw, [settled_board])
+    verified, reason, _board, samples = loop._verify_claim_settled(
+        PASS_DIM_BEFORE, ACTION_PASS, tag="after_claim", note="结算优先")
+    assert verified, reason
+    assert "结算优先" in reason
+    assert samples[0]["verified"] is True

@@ -205,6 +205,13 @@ CHI_DIMMED_HAND_ROI = (250, 760, 1590, 895)  # x0,y0,x1,y1
 CHI_DIMMED_P70_MAX = 125.0
 CHI_DIMMED_BRIGHT_V = 150
 CHI_DIMMED_BRIGHT_RATIO_MAX = 0.15
+# 「过」后整手压暗的几何恢复证据门（实机 2026-10-27 21:00，会话
+# 203044）：压暗帧牌面带 p70=100、亮像素 0.036；正常帧 214、0.794。
+# CHI_DIMMED 的 ROI 含大量非牌面像素，对该帧 bright_ratio 实测
+# 0.2126 > 0.15 漏检，故另设牌面带尺；只用于恢复激活，不改全局阈值。
+PASS_DIM_FACE_ROI = (500, 760, 1500, 895)  # x0,y0,x1,y1
+PASS_DIM_P70_MAX = 130.0
+PASS_DIM_BRIGHT_RATIO_MAX = 0.15
 # claim 点后验证的落定轮询（2026-10-25 实机 Bug 2）：首帧决定性读数
 # 直接采用；含糊则每隔 INTERVAL 重拍，直到验证通过、连续两帧签名
 # 一致（落定）或 ATTEMPTS 耗尽（fail-closed）。
@@ -3289,6 +3296,114 @@ class AutoPlayLoop:
             f"压暗态 p70={dim['p70']}, bright_ratio={dim['bright_ratio']}，"
             "按已知压暗坏读处理，不用该张数否决真实过牌）")
 
+    def _verify_pass_dimmed_geometry_repair(
+        self,
+        before: BoardState,
+        after: BoardState,
+        raw: bytes,
+        path: Path,
+        image: np.ndarray,
+    ) -> tuple[bool, str]:
+        """只救回「过」之后整手压暗把手牌分割框打没造成的少读。
+
+        实机 2026-10-27 21:00（会话 203044 第 6 局）：过点成功、圆盘
+        消失，但客户端随即把整手压暗，普通读只剩 4/10。离线复测定性：
+        不是分类被拒，而是分割阶段就丢了中段 6 个框（几何丢框）——
+        既有「压暗少读豁免」共用的 CHI 压暗尺 ROI 含大量非牌面像素，
+        对本帧 bright_ratio 实测 0.2126 > 上限 0.15 而漏检，豁免与落定
+        轮询的压暗抑制因此双双未触发。
+
+        只接受一组封闭正证据（GPT 交叉复核收紧版）：
+        * 失败必须是纯张数少读：副露逐组不变、圆盘实测 0、无候选
+          面板、未进结算，且标准读确实少于点击前；
+        * 压暗证据只量牌面带（``PASS_DIM_FACE_ROI``）：p70 与亮像素
+          比双双崩塌（实机压暗 100/0.036，正常 214/0.794）；
+        * 同一张 after 帧用亮度归一化识牌实例（``dim_gain_all``）
+          整手重读——仍走原 min_score/min_margin，候选只看本框
+          像素，绝不参考点击前手牌挑答案（恢复与验证单向）；
+        * 重读框数必须恰为点击前张数或 +1，且牌面多重集与点击前
+          完全一致，或严格 +1 超集且多出的一张位于最右摸牌位；
+        * 补全后的盘面重跑完整 L3「过」验证通过。
+        任一条不成立都维持未证实；全局识牌阈值一个字节不改。
+        """
+        if before.concealed is None or before.melds is None or after.melds is None:
+            return False, "过后压暗几何恢复：点击前手牌/副露不可测，不启用"
+        if after.melds != before.melds:
+            return False, "过后压暗几何恢复：副露发生变化，不启用"
+        if after.settled is True:
+            return False, "过后压暗几何恢复：已进入结算，不启用"
+        if after.selection_panel is True:
+            return False, "过后压暗几何恢复：候选面板仍在，不启用"
+        if after.claim_buttons != 0:
+            return False, "过后压暗几何恢复：行动圆盘未被实测为 0，不启用"
+        if (before.concealed_count is None or after.concealed_count is None
+                or after.concealed_count >= before.concealed_count):
+            return False, "过后压暗几何恢复：标准读不是少读，不启用"
+        x0, y0, x1, y1 = PASS_DIM_FACE_ROI
+        face = cv2.cvtColor(
+            image[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)[:, :, 2]
+        if face.size == 0:
+            return False, "过后压暗几何恢复：牌面带不可测，不启用"
+        p70 = float(np.percentile(face, 70))
+        bright_ratio = float((face >= CHI_DIMMED_BRIGHT_V).mean())
+        if p70 > PASS_DIM_P70_MAX or bright_ratio > PASS_DIM_BRIGHT_RATIO_MAX:
+            return False, (
+                f"过后压暗几何恢复：牌面带压暗证据不成立"
+                f"（p70={p70:.1f}，亮像素 {bright_ratio:.3f}），不启用")
+        result = self._analyze(raw, path)
+        caishen_label = (
+            result.get("caishen") if isinstance(result, dict) else None)
+        from tea_bot import _TEMPLATE_DIR, vision_to_engine
+        from tile_vision import TileVision
+
+        vision = TileVision(template_dir=_TEMPLATE_DIR)
+        vision.dim_gain_all = True
+        tiles = vision.recognize_hand(image, caishen_label=caishen_label)
+        n_before = len(before.concealed)
+        if len(tiles) not in (n_before, n_before + 1):
+            return False, (
+                f"过后压暗几何恢复：归一化重读框数 {len(tiles)} "
+                f"≠ {n_before}/+1，不启用")
+        from collections import Counter
+
+        engine_tiles = [vision_to_engine(int(t[0])) for t in tiles]
+        want = Counter(int(t) for t in before.concealed)
+        got = Counter(engine_tiles)
+        added = got - want
+        removed = want - got
+        if removed:
+            return False, (
+                f"过后压暗几何恢复：重读多重集缺 "
+                f"{sorted(removed.elements())}，不启用")
+        if added:
+            if sum(added.values()) != 1:
+                return False, "过后压暗几何恢复：重读多出不止一张，不启用"
+            extra_id = next(iter(added))
+            rightmost = max(tiles, key=lambda t: t[1])
+            if vision_to_engine(int(rightmost[0])) != extra_id:
+                return False, (
+                    "过后压暗几何恢复：多出的一张不在最右摸牌位，不启用")
+        completed = tuple(sorted(engine_tiles))
+        repaired = BoardState(
+            concealed_count=len(completed),
+            melds=after.melds,
+            claim_buttons=after.claim_buttons,
+            settled=after.settled,
+            turn_owner=after.turn_owner,
+            selection_panel=after.selection_panel,
+            note="过后压暗几何恢复重读",
+            concealed=completed,
+        )
+        ok, why = verify_after_click(before, repaired, ACTION_PASS)
+        if not ok:
+            return False, f"过后压暗几何恢复后完整验证仍不通过：{why}"
+        return True, (
+            f"过状态已验证（path=pass_dim_geometry_repair，激活：牌面带 "
+            f"p70={p70:.1f}、亮像素 {bright_ratio:.3f}；归一化重读 "
+            f"{len(tiles)} 框，多重集与点击前"
+            f"{'完全一致' if not added else '严格 +1 超集'}，"
+            f"完整 L3 复核通过）")
+
     @staticmethod
     def _verify_pass_new_window(
         before: BoardState,
@@ -3494,9 +3609,17 @@ class AutoPlayLoop:
                 image = cv2.imdecode(
                     np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
                 board = self._board_from_frame(raw, path, image, note=note)
-                verified, reason = verify_after_click(
-                    before, board, action,
-                    target_tile=target_tile, kong_kind=kong_kind)
+                if action == ACTION_PASS and board.settled is True:
+                    # 结算优先（GPT 交叉复核裁决）：「过」后已进入终局
+                    # 迁移，过必然已生效；不许再拿结算帧的盘面读数
+                    # （手牌区已被结算画面替换）否决它。
+                    verified, reason = True, (
+                        "过后进入结算画面（终局迁移），过已生效，"
+                        "按结算优先验证通过")
+                else:
+                    verified, reason = verify_after_click(
+                        before, board, action,
+                        target_tile=target_tile, kong_kind=kong_kind)
                 if action == ACTION_PASS and not verified:
                     recovered, recovery_reason = (
                         self._verify_pass_after_overlay_underread(before, board))
@@ -3506,6 +3629,14 @@ class AutoPlayLoop:
                         recovered, recovery_reason = (
                             self._verify_pass_dimmed_underread(
                                 before, board, image))
+                    if not recovered:
+                        # 几何恢复：整手压暗把分割框打没（分类之前
+                        # 就丢框，既有两条豁免都不覆盖），同帧用亮度
+                        # 归一化实例整手重读、多重集证明迁移（实机
+                        # 2026-10-27 21:00，10→4）。
+                        recovered, recovery_reason = (
+                            self._verify_pass_dimmed_geometry_repair(
+                                before, board, raw, path, image))
                     if not recovered and accept_new_window:
                         # 执行器已证明"旧窗口关闭 + 新窗口同槽位"：牌局推进了，
                         # 新窗口的圆盘本来就在同一槽位，不能再要求圆盘消失。
