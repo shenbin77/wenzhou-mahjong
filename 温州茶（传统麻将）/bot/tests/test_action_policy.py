@@ -1528,6 +1528,91 @@ def test_opponent_river_is_carried_from_analysis() -> None:
     assert hand.opponent_river == (7, 8)
 
 
+def test_newest_opponent_tile_blocked_when_newest_unaccepted() -> None:
+    """H0：本帧最新弃牌未 accepted 时，河头是上一张，禁止冒充来牌。"""
+    stale = HandState(concealed=(), opponent_river=(2, 61, 67),
+                      opponent_newest_accepted=False)
+    assert ap._newest_opponent_tile(stale) is None
+    fresh = HandState(concealed=(), opponent_river=(2, 61, 67),
+                      opponent_newest_accepted=True)
+    assert ap._newest_opponent_tile(fresh) == 2
+    unknown = HandState(concealed=(), opponent_river=(2, 61, 67))
+    assert ap._newest_opponent_tile(unknown) == 2
+
+
+def test_river_newest_accepted_three_states() -> None:
+    """H0 核对三态：accepted=True / 最新未接受=False / 证据缺失=None。"""
+
+    def analysis(tiles, valid=True):
+        return {"hand_ids": [1, 2, 3],
+                "discards": {
+                    "opponent_river": [t["tile_id"] for t in tiles
+                                       if t["accepted"]],
+                    "evidence": {"table": {"opponent": {
+                        "valid": valid, "tiles": tiles}}}}}
+
+    assert ap._river_newest_accepted(analysis(
+        [{"tile_id": 7, "accepted": True}])) is True
+    assert ap._river_newest_accepted(analysis(
+        [{"tile_id": None, "accepted": False},
+         {"tile_id": 2, "accepted": True}])) is False
+    assert ap._river_newest_accepted(analysis(
+        [{"tile_id": 7, "accepted": True}], valid=False)) is None
+    assert ap._river_newest_accepted({"hand_ids": [1]}) is None
+    assert ap._river_newest_accepted(
+        {"discards": {"opponent_river": (7, 8)}}) is None
+
+
+def test_newest_accepted_carried_from_analysis() -> None:
+    hand = HandState.from_analysis(
+        {"hand_ids": [1, 2, 3],
+         "discards": {"opponent_river": (2, 61, 67),
+                      "evidence": {"table": {"opponent": {
+                          "valid": True,
+                          "tiles": [{"tile_id": None, "accepted": False},
+                                    {"tile_id": 2, "accepted": True}]}}}}})
+    assert hand.opponent_newest_accepted is False
+    assert ap._newest_opponent_tile(hand) is None
+
+
+def test_arbitration_opponent_side_stale_river_head_not_recovered() -> None:
+    """H0：归属判 opponent 但河头陈旧 → 不得从牌河补回来牌。"""
+    hand = HandState(concealed=PENG_HAND.concealed, incoming_tile=None,
+                     incoming_source=None, opponent_river=(1, 9, 5),
+                     opponent_newest_accepted=False, player_count=2)
+    updated, evidence = ap.resolve_incoming(
+        _sparkle_frame("opponent"), hand,
+        ActionPolicyConfig(require_template_match=False))
+    assert evidence["arbitrated_source"] == ap.INCOMING_SOURCE_OPPONENT
+    assert evidence["recovered_tile"] is None
+    assert updated.incoming_tile is None
+
+
+_TN4_FRAME = (BOT_DIR.parent / "采集" / "dev_auto_play"
+              / "ui_20261027_180652_emulator5556_烘熊瞎" / "frames"
+              / "20261027_182729_648779_before_b7443a.png")
+
+
+@pytest.mark.skipif(not _TN4_FRAME.exists(),
+                    reason="T-N4 真帧不在本机采集目录")
+def test_tn4_stale_river_head_rejected_on_real_frame() -> None:
+    """2026-10-27 例2 真帧（T-N4）：最新弃牌未 accepted、河头=2 是上一张。
+
+    改前 ``_newest_opponent_tile`` 返回 2（陈旧读数曾写进台账当来牌），
+    改后必须返回 None——宁可来牌未知，也不许拿上一张冒充。
+    """
+    from discard_vision import read_discards
+
+    img = cv2.imdecode(np.fromfile(str(_TN4_FRAME), dtype=np.uint8),
+                       cv2.IMREAD_COLOR)
+    assert img is not None
+    discards = read_discards(img).as_dict()
+    assert discards["opponent_river"][0] == 2
+    hand = HandState.from_analysis({"hand_ids": [], "discards": discards})
+    assert hand.opponent_newest_accepted is False
+    assert ap._newest_opponent_tile(hand) is None
+
+
 def test_require_template_match_default_blocks_without_templates() -> None:
     """P0-2: default require_template_match=True blocks when no glyph templates."""
     decision = decide_action(state(gold_button(), pass_button()), PENG_HAND,

@@ -702,6 +702,57 @@ def _opponent_river_of(result: Mapping[str, Any]) -> tuple[int, ...]:
                  if not isinstance(tile, bool) and isinstance(tile, (int, np.integer)))
 
 
+def _river_newest_accepted(result: Mapping[str, Any]) -> bool | None:
+    """本帧对手河最新一张是否已被识牌接受（H0 三态核对）。
+
+    证据只取构造本 ``HandState`` 的同一份 snapshot，不新造证据源：
+
+    * 对象形态：``discards.table.opponent``（``RiverReading``）的 ``newest``；
+    * 字典形态：``discards["evidence"]["table"]["opponent"]["tiles"][0]``
+      ——对手河右端锚定、向左生长，最新一张恒为 ``tiles[0]``，与
+      ``RiverReading.newest`` 同口径。
+
+    Returns:
+        ``True`` 最新弃牌存在且 accepted；``False`` 最新弃牌存在但未
+        accepted（此时 ``opponent_river[0]`` 是上一张，冒充来牌即错牌，
+        2026-10-27 例2 target=2 之源）；``None`` 证据缺失或河读无效，
+        核对不可用——调用方维持原行为，不误伤既有链路。
+    """
+    if not isinstance(result, Mapping):
+        return None
+    discards = result.get("discards")
+    if discards is not None and not isinstance(discards, Mapping):
+        table = getattr(discards, "table", None)
+        opponent = getattr(table, "opponent", None) if table is not None else None
+        if opponent is None:
+            return None
+        try:
+            newest = opponent.newest
+        except Exception:  # noqa: BLE001 - 证据读不出来等于核对不可用
+            return None
+        if newest is None:
+            return None
+        return bool(newest.accepted and newest.tile_id is not None)
+    if isinstance(discards, Mapping):
+        evidence = discards.get("evidence")
+        if not isinstance(evidence, Mapping):
+            return None
+        table = evidence.get("table")
+        if not isinstance(table, Mapping):
+            return None
+        opponent = table.get("opponent")
+        if not isinstance(opponent, Mapping) or not opponent.get("valid"):
+            return None
+        tiles = opponent.get("tiles")
+        if not isinstance(tiles, (list, tuple)) or not tiles:
+            return None
+        head = tiles[0]
+        if not isinstance(head, Mapping):
+            return None
+        return bool(head.get("accepted")) and head.get("tile_id") is not None
+    return None
+
+
 def _newest_opponent_tile(hand: HandState) -> int | None:
     """对手牌河最新一张（视觉编码）→ 引擎编码；拿不准返回 ``None``。
 
@@ -709,6 +760,11 @@ def _newest_opponent_tile(hand: HandState) -> int | None:
     这个约定由 ``discard_vision.RiverReading.newest`` 定义（对手取
     ``tiles[0]``），测试里直接对着它钉死，不允许漂移。
     """
+    if hand.opponent_newest_accepted is False:
+        # H0：本帧最新弃牌未被 accepted —— opponent_river 只收 accepted 牌，
+        # [0] 实际是上一张；拿它当来牌会让下游按错牌判吃碰杠胡（例2）。
+        # 宁可来牌未知、安全弃权，也不许冒充。核对不可用（None）维持原行为。
+        return None
     if not hand.opponent_river:
         return None
     raw = hand.opponent_river[0]
@@ -830,6 +886,9 @@ class HandState:
         opponent_river: 对手牌河（视觉编码，从左到右）。只在归属仲裁判为
             ``"opponent"`` 且来牌缺失时用来补回来牌，取 ``[0]``（对手牌河右端
             锚定、向左生长，最新一张在最左）。
+        opponent_newest_accepted: 本帧对手河最新一张是否 accepted 的三态
+            核对（``True``/``False``/``None``=证据缺失）。``False`` 时
+            ``opponent_river[0]`` 是上一张，禁止当来牌采用（H0 硬化）。
         player_count: 局面人数（2 或 4）；``None`` 表示未确认。
         source: 证据来源，写进台账便于回溯。
     """
@@ -840,6 +899,7 @@ class HandState:
     incoming_tile: int | None = None
     incoming_source: str | None = None
     opponent_river: tuple[int, ...] = ()
+    opponent_newest_accepted: bool | None = None
     player_count: int | None = None
     source: str = ""
 
@@ -948,6 +1008,7 @@ class HandState:
                    incoming_tile=_incoming_of(result, vision_to_engine),
                    incoming_source=_incoming_source_of(result),
                    opponent_river=_opponent_river_of(result),
+                   opponent_newest_accepted=_river_newest_accepted(result),
                    player_count=count,
                    source="analyze_snapshot")
 
