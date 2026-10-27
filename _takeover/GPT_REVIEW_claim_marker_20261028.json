@@ -1,0 +1,100 @@
+{
+  "author": "/root/claim_fix_review",
+  "written_at": "2026-10-28T07:38:35.657458+08:00",
+  "verdict": "PASS_FOR_INTEGRATION_PENDING_FULL_SUITE_AND_LIVE",
+  "baseline_head": "083ab96d4b39a5e64310f609bb6dbc7c92985986",
+  "manifest": "D:\\wt\\gpt-tea2-closeout-20261027\\_backups\\claim-peng-013059-stage\\migration-manifest.json",
+  "manifest_sha256": "0560cd6aaaf9c26ce3819fc0475e0ed3496051fc1352ef4be9604216e0744808",
+  "frozen_files": [
+    {
+      "relative_path": "tile_vision.py",
+      "expected": "10fd6994043e791a2762b6511d85e98e7b354fe33d816ec4524881fd0b30ac2c",
+      "actual": "10fd6994043e791a2762b6511d85e98e7b354fe33d816ec4524881fd0b30ac2c"
+    },
+    {
+      "relative_path": "tests/test_claim_marker_native_boundary.py",
+      "expected": "6d252cd3f09e23e9377d11ac5ff4f64b12296a6c3b4724382e5a6b3b32c9042f",
+      "actual": "6d252cd3f09e23e9377d11ac5ff4f64b12296a6c3b4724382e5a6b3b32c9042f"
+    },
+    {
+      "relative_path": "tests/test_river_marker_context.py",
+      "expected": "cdb7bb281743a08521f8fd72106ab3fc9c160ba065998bab042dd6a0c51959f7",
+      "actual": "cdb7bb281743a08521f8fd72106ab3fc9c160ba065998bab042dd6a0c51959f7"
+    },
+    {
+      "relative_path": "tests/fixtures/claim_marker_013059/20261028_013054_449853_before_b77988.png",
+      "expected": "d0a343c2dd456564a0a4a9437d1014de28b3875b68bdefda39866c5774a179e9",
+      "actual": "d0a343c2dd456564a0a4a9437d1014de28b3875b68bdefda39866c5774a179e9"
+    },
+    {
+      "relative_path": "tests/fixtures/claim_marker_013059/20261028_013057_921839_after_claim_2eecee.png",
+      "expected": "1bf53cf2e85bad5089a18c469161ea62c734e56f3765ea11965ceb052236c482",
+      "actual": "1bf53cf2e85bad5089a18c469161ea62c734e56f3765ea11965ceb052236c482"
+    },
+    {
+      "relative_path": "tests/fixtures/claim_marker_013059/20261028_013058_912180_after_claim_da501a.png",
+      "expected": "c7a6a2687ba659e5c85de3e6e3468d34f00a63ad08366354d0b70d2edb19e0fe",
+      "actual": "c7a6a2687ba659e5c85de3e6e3468d34f00a63ad08366354d0b70d2edb19e0fe"
+    },
+    {
+      "relative_path": "tests/fixtures/claim_marker_013059/20261028_013052_441499_before_1924ce.png",
+      "expected": "b20d5a1bcbb1311698f7a5a5cd1143f747f914ee2eb16b85991bc5655e826573",
+      "actual": "b20d5a1bcbb1311698f7a5a5cd1143f747f914ee2eb16b85991bc5655e826573"
+    },
+    {
+      "relative_path": "tests/fixtures/claim_marker_013059/provenance.json",
+      "expected": "b66ac21dd8e3f402a43ebbfb5a189e6b952de8ebb97d4aaf1e2befd11a23090a",
+      "actual": "b66ac21dd8e3f402a43ebbfb5a189e6b952de8ebb97d4aaf1e2befd11a23090a"
+    }
+  ],
+  "scope": "Independent offline review of marker paint-mask root-cause fix and eight-file migration package. No production edits, git mutations, device interaction, lifecycle action, or full-suite run by reviewer.",
+  "findings": [],
+  "implementation_review": [
+    "Only two production assignments change the opaque yellow triangle paint mask from a dilated mask to observed yellow pixels; three explanatory docstring lines added.",
+    "Marker detection, confidence thresholds .82/.055, disc recovery, group completeness, L3 gate, retry boundaries and click logic unchanged.",
+    "No target-specific identity filling, neighbour inference, blind retry, score fallback, or threshold lowering.",
+    "River-context regression now checks true nine identity at unchanged threshold plus exact explicit-cleaned classification equivalence; marker separation/shared bank/no state leakage checks retained."
+  ],
+  "independent_tests": {
+    "native_tests": 10,
+    "passed": 10,
+    "duration_seconds": 3.42,
+    "xml": "D:\\wt\\gpt-tea2-closeout-20261027\\_tmp\\claim-marker-review-20261028-0736\\independent.xml",
+    "xml_sha256": "3594bd0527eea54fe1e31212ac02ceb8c0daa69c2424c0abe5b5cb19c6e15460"
+  },
+  "independent_six_frame_replay": {
+    "path": "D:\\wt\\gpt-tea2-closeout-20261027\\_tmp\\claim-marker-review-20261028-0736\\six-frame-independent.json",
+    "sha256": "08c4d21755241c5fa325f9162ddbc6fb76ec06f3d0d8434b96a74f7baa0764f5",
+    "results": [
+      "First post-click frame remains ambiguous and rejected at .824913442/.023235857.",
+      "Second post-click frame resolves w9 at .929221511/.144751132, with exact meld sequence [27,28,29,9,9,9] and 11 concealed tiles.",
+      "Both earlier 4/5/6 chi frames preserve complete correct identities.",
+      "Older west meld and ordinary one-dot peng frames preserve complete per-meld classifications and scores."
+    ]
+  },
+  "root_targeted_run_verified_from_disk": {
+    "suite": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "76",
+      "time": "7.107",
+      "timestamp": "2026-10-28T07:37:44.006074+08:00",
+      "hostname": "WIN-QJUNGEH8THF"
+    },
+    "xml": "D:\\wt\\gpt-tea2-closeout-20261027\\_backups\\claim-peng-013059-stage\\diagnostics\\pytest-candidate-final.xml",
+    "xml_sha256": "c3b83e4377c9ea2d7ce4133e0792e2ea960cc0bedb327f195fd30167254c7330",
+    "result_json": "D:\\wt\\gpt-tea2-closeout-20261027\\_backups\\claim-peng-013059-stage\\diagnostics\\pytest-candidate-final-result.json",
+    "result_sha256": "53dfe063294d74c65c9310c02b227b088a1226e7dc628c48c0820bfe6f34d0ca"
+  },
+  "fixture_provenance": "Four migration PNGs byte-equal to native original recording source and SHA manifests. Extra unused 013050 frame remains backup-only. Five existing river-context PNGs plus provenance copied to isolated test fixture directory match formal originals byte-for-byte; not included as new production changes.",
+  "failure_history": "Earlier baseline native tests: 6 pass / 4 fail. Earlier candidate: 75 pass / 1 fail due stale test requiring default classifier to keep rejecting this now-readable nine. Original failed evidence preserved; corrected tests do not remove safety assertions.",
+  "limitations": [
+    "Acceptance proves offline image classification and the real _verify_claim_settled board path first reject -> second pass, not complete live action dispatch or next discard.",
+    "Pre-click L3 baseline reconstructed from native 013052 frame; 013054 click-before frame separately retained with SHA provenance.",
+    "Formal integrated full suite and live reloading on a newly recorded SHA remain required; no N1/N2/N3 achievement transfers.",
+    "No Codex CLI review was run or claimed."
+  ],
+  "deviations_from_brief": []
+}
