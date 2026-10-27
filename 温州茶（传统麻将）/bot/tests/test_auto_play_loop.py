@@ -4280,3 +4280,55 @@ def test_pass_settle_settlement_screen_takes_priority(tmp_path):
     assert verified, reason
     assert "结算优先" in reason
     assert samples[0]["verified"] is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-27 21:46 实机：整场终局总结屏无房号/无财神/无手牌，tick 先落
+# 「不在牌桌」分支直接 idle，排在回合门禁之前的返回大厅通道永远走不到
+# （两端 16/16 打完只记 idle，卡在总结屏等倒计时消散）。tick 必须在
+# 该分支内先给返回大厅通道一次判定机会；不是总结屏时它返回 None，
+# 分支行为逐字不变（下方空白帧负例）。
+# ---------------------------------------------------------------------------
+FINAL_FRAMES_5556 = (
+    BOT_DIR.parent / "采集" / "dev_auto_play"
+    / "ui_20261027_211056_emulator5556_烘熊瞎" / "frames"
+)
+NO_HAND_ANALYSIS = {"caishen": None, "hand_ids": [], "mode": "tea_2p"}
+
+
+def _final_frame_bytes() -> bytes:
+    hits = sorted(FINAL_FRAMES_5556.glob("20261027_214600*.png"))
+    if not hits:
+        pytest.skip("实机终局帧不在本机（采集目录未入 Git）")
+    return hits[0].read_bytes()
+
+
+def test_tick_routes_final_summary_to_return_lobby(tmp_path):
+    """整场终局帧过 tick：落账 + 点返回大厅一次，不再记不在牌桌 idle。"""
+    from match_score import read_match_score
+
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, allow_return_lobby=True,
+        analyses=[NO_HAND_ANALYSIS], frames=[_final_frame_bytes()],
+        hud=[(None, None)], player_name="烘熊瞎",
+        match_score_fn=read_match_score)
+    event = loop.tick()
+    assert event["event"] == "left_table", event
+    assert event["match_end"]["present"] is True
+    assert event["player_score"] == 4
+    assert len(tap.execute_leave_calls) == 1
+    assert loop._left_table is True
+
+
+def test_tick_plain_frame_still_idles_without_leave(tmp_path):
+    """普通不在牌桌帧：照旧 idle，返回大厅零调用。"""
+    ok, raw = cv2.imencode(".png", np.zeros((900, 1600, 3), dtype=np.uint8))
+    assert ok
+    loop, _shot, _analyzer, tap, _ = make_loop(
+        tmp_path, enabled=True, allow_return_lobby=True,
+        analyses=[NO_HAND_ANALYSIS], frames=[raw.tobytes()],
+        hud=[(None, None)], player_name="烘熊瞎")
+    event = loop.tick()
+    assert event["event"] == "idle"
+    assert "不在牌桌" in event["reason"]
+    assert tap.execute_leave_calls == []

@@ -30,8 +30,11 @@ SCORE_CENTER_TOLERANCE = 48
 
 # 完整总结页左上角的“局数: 16/16”数值区。该 HUD 在总结遮罩下仍保留，
 # 但通用 room_round_vision 会因左侧头像遮挡主动弃权，因此这里仅为整场结算
-# 做更窄、更严格的固定版式读取。ROI 内 16/16 的“/”与后一个“1”相连，
-# 实测会形成四个连通域：1、6、/1、6。
+# 做更窄、更严格的固定版式读取。ROI 内 16/16 的“/”与后一个“1”的相对
+# 位置随抗锯齿浮动：标定帧里两者相连、形成四个连通域（1、6、/1、6）；
+# 2026-10-27 实机（991671 场，双端同几何）两者相距 1px、独立成五个
+# 连通域（1、6、/、1、6，斜杠域分类器判 None、填充率约 0.27）。两种形态
+# 都必须逐字通过各自的几何门 + 数字分类，见 read_full_match_round。
 FULL_MATCH_ROUND_ROI = (270, 55, 365, 100)
 
 _NORMALIZED_SHAPE = (40, 28)
@@ -150,7 +153,10 @@ _DIGIT_TEMPLATES = _decode_templates()
 
 
 # 总结页两侧昵称不是系统控件，仍只能走像素。模板来自当前三个已复核账号
-# 在 1600x900 原生总结页的橙色昵称字形；未知昵称必须拒绝落账/离桌，不能
+# 在 1600x900 原生总结页的橙色昵称字形；同一昵称可登记多个模板行（取
+# 最高分），「烘熊瞎」第二行来自 2026-10-27 实机终局帧——旧行与该帧字形
+# 不合（0.163），新行由双端同帧互证（observed 互 Dice=1.0）后登记；
+# 未知昵称必须拒绝落账/离桌，不能
 # 靠左右座次猜当前玩家。玉姐保留两张独立帧模板以覆盖抗锯齿差异。
 PLAYER_NAME_ROIS = {
     "left": (600, 205, 730, 250),
@@ -165,10 +171,11 @@ _PACKED_PLAYER_TEMPLATES: dict[str, tuple[str, ...]] = {
         "000000000000000000000000000000000000000000000000000000000000060000000000000000000000060000000000000007fffff80607ffc00000000007fffff80607ffc0000000000001c000060700c0000000000001c0000e0700c0000000000001c0003fe700c0000000000001c0007fe700c0000000000001c0003fe700c0000000000001c0000c67ffc0000000000001c0001c67ffc0000000000001c0001c6701c0000000000001c000186700c00000000003fffff018e700c00000000003fffff018e700c0000000000001c00038c700c0000000000001c00038c700c0000000000001c60039c7ffc0000000000001c7001fc7ffc0000000000001c3800f8701c0000000000001c1c0078700c0000000000001c0e003c700c0000000000001c07007e700c0000000000001c02007e700c0000000000001c0000e6700c0000000001ffffffc1c3ffff0000000001ffffffc383ffff8000000000ffffffc303ffff80000000000000000000000000000000000000000000000000000",
     ),
     "拾则": (
-        "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000001000000000000c00603003f01800000000000c0060780ff9980000000000040060780c199000000000000003f8cc09999800000000000003fdce0999900000000000030063870999900000000000008067ff899990000000000000c06600099990000000000000c0600019999000000000000040f90609999000000000000003f9fe09999000000000000003e1960999900000000000000061860999900000000000000061060141100000000000000061860360100000000000000061fe06781000000000000000e1fe1e38b000000000000001e1861809e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000e00200000000600000000000e0070003de00600000000000e00f801fff18600000000000e00f801fff1c600000000000e01fc01c071c600000000000e03ce018471c60000000000ffc38e018e71c60000000000ffe78f018e71c60000000000ffcf07818e71c600000000000e1f07c18e31c600000000000e3fffe18e71c600000000000e3fffe18e71c600000000000e3004018e71c600000000000c0000038e71c600000000000fe000038e71c600000000003fc407018e71c60000000000ff8fff818e71c60000000000fe0fff818e71c60000000000ee0e13818e71c600000000000e0e03818c71c600000000000e0c03801c11c600000000000e0c03801b018600000000000e0e03803b800600000000000e0e03807bc00600000000000e0fff80f1f00600000000002e0fff83e0f04e00000000007e0fff87c078fe00000000007c0f03878010fc00000000000000000000000000000000000000000000000000000",
     ),
     "烘熊瞎": (
         "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000001020880020000000020000001021c91c200000000200000010232e13fc000000020000001923f89324000000020000005ff1ef9efc000000c00000005023281220000000000000001023eb12f8000000000000003023ec1e200000000000000037fb2893fc0000000000000030036f92fc000000000000002920001e840000000000000062116910840000000000000046136c80fc0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000180c0800e018000000600000180c1800c038000000700000180c1801cc38f07f80700000180c18038e3ff07fdfffc000180c1807073f8061ffffc000180c180fffb80061f8004000198e1c0fffb80c61f83040019bffff8e01b80c61d87040019b7fff83ff1ffc7fcfffc0019f0e1c07ff1ff87fcfffc0019e0c180707000071c07000019e0c180707380061c07000031c0c1807ff383061cfffc003180c1807ff39f061c7ff8000180c1807073fc061c0700000380c1807ff3e007fc0700000380e1c07ff38007fdfffc00038ffffc707380c61dfffc00038ffffc707380c61c07000003c0000073f1ffc61c07000003e0000073e1ffc61cfffc000770e18000000007fcfffc000630e1c000000007fcc01c000e31c0e038c18607f8c01c000e03807038e1870600c01c001c07007070e1838600c01c00380f003870e1c1c000fffc00380e0018e060c1c000fffc0000000000000000000000000000000000000000000000000",
     ),
 }
 
@@ -256,16 +263,53 @@ def _read_side_player(image: np.ndarray, side: str) -> tuple[str | None, dict, s
     # 名称胶囊的上边框固定占前 8 行；只保留文字及其分离笔画。
     mask[:8, :] = 0
     count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
-    cleaned = np.zeros_like(mask)
+    components = []
     for index in range(1, count):
         width = int(stats[index][cv2.CC_STAT_WIDTH])
         height = int(stats[index][cv2.CC_STAT_HEIGHT])
         area = int(stats[index][cv2.CC_STAT_AREA])
         if area >= 8 and (height >= 4 or width >= 4):
-            cleaned[labels == index] = 1
+            components.append(
+                (index, int(stats[index][cv2.CC_STAT_LEFT]),
+                 int(stats[index][cv2.CC_STAT_TOP]), width, height, area))
+    # 归属选择：胶囊边框/装饰的零星橙墨会落在 ROI 边缘，若混进归一化
+    # 包围盒，包围盒被撑大、字形整体缩小错位，模板 Dice 全面塌方
+    # （2026-10-27 实机：玉姐本名只剩 0.13）。把连通域按「框扩张 6px
+    # 后相交」单链聚类，只保留墨量最大的一簇：字形笔画彼此贴近同属
+    # 一簇，边框碎片离得远、单独成簇被丢弃，结果记进证据。
+    # （首版按字形高+横向窗选簇，会误伤标定帧「拾则」边缘笔画使包围
+    # 盒收缩、分数由 1.0 掉到 0.534，故改为纯聚类，不设字形尺寸窗。）
+    roots = list(range(len(components)))
+
+    def find(a: int) -> int:
+        while roots[a] != a:
+            roots[a] = roots[roots[a]]
+            a = roots[a]
+        return a
+
+    for i, (_i1, x1, y1, w1, h1, _a1) in enumerate(components):
+        for j in range(i + 1, len(components)):
+            _i2, x2, y2, w2, h2, _a2 = components[j]
+            if (x1 - 6 < x2 + w2 and x2 - 6 < x1 + w1
+                    and y1 - 6 < y2 + h2 and y2 - 6 < y1 + h1):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    roots[ri] = rj
+    clusters: dict[int, list] = {}
+    for i, row in enumerate(components):
+        clusters.setdefault(find(i), []).append(row)
+    if clusters:
+        kept = max(clusters.values(),
+                   key=lambda rows: sum(r[5] for r in rows))
+    else:
+        kept = components
+    cleaned = np.zeros_like(mask)
+    for index, _x, _y, _w, _h, _a in kept:
+        cleaned[labels == index] = 1
     observed = _normalise_player_mask(cleaned)
     evidence = {"side": side, "roi": list(PLAYER_NAME_ROIS[side]),
-                "ink_pixels": int(cleaned.sum())}
+                "ink_pixels": int(cleaned.sum()),
+                "dropped_components": len(components) - len(kept)}
     if observed is None:
         return None, evidence, f"{side} 昵称字形为空"
     ranked = sorted(
@@ -354,6 +398,8 @@ def read_full_match_round(image: np.ndarray | None) -> FullMatchRoundState:
         "components": [list(row) for row in boxes],
         "mask_pixels": int(np.count_nonzero(mask)),
     }
+    if len(boxes) == 5:
+        return _verify_round_five_components(boxes, mask, evidence)
     if len(boxes) != 4:
         return FullMatchRoundState(
             False, reason=f"16/16 局数字形连通域为 {len(boxes)}/4",
@@ -419,6 +465,75 @@ def read_full_match_round(image: np.ndarray | None) -> FullMatchRoundState:
     return FullMatchRoundState(
         True, round_no=16, round_total=16,
         reason="同帧顶部局数字形严格确认为 16/16",
+        evidence=evidence)
+
+
+def _verify_round_five_components(boxes, mask, evidence) -> FullMatchRoundState:
+    """五连通域形态：``1``、``6``、``/``、``1``、``6`` 各自独立。
+
+    与四域形态同一安全口径：固定几何（起始 x、基线、字高、逐位宽、
+    逐个间距）+ 四个数字逐个模板分类必须恰为 1、6、1、6 + 中间域
+    必须是斜杠（分类器判不出数字、且填充率是细笔画的低值）。
+    任一不成立即拒绝——非 16/16 的局数（如 15/16）在数字分类处出局。
+    """
+    evidence = {**evidence, "form": "five_component"}
+    xs = [row[0] for row in boxes]
+    ys = [row[1] for row in boxes]
+    widths = [row[2] for row in boxes]
+    heights = [row[3] for row in boxes]
+    gaps = [boxes[i + 1][0] - (boxes[i][0] + boxes[i][2]) for i in range(4)]
+    geometry_ok = (
+        15 <= xs[0] <= 20
+        and max(ys) - min(ys) <= 2
+        and all(15 <= value <= 18 for value in heights)
+        and 5 <= widths[0] <= 8
+        and 9 <= widths[1] <= 13
+        and 7 <= widths[2] <= 11
+        and 5 <= widths[3] <= 8
+        and 10 <= widths[4] <= 13
+        and all(1 <= value <= 4 for value in gaps)
+    )
+    evidence.update({"gaps": gaps, "geometry_ok": geometry_ok})
+    if not geometry_ok:
+        return FullMatchRoundState(
+            False, reason="16/16 局数字形几何与实测固定版式不符（五域形态）",
+            evidence=evidence)
+    digit_rows = []
+    digits = []
+    for component_index in (0, 1, 3, 4):
+        x, y, w, h, _area = boxes[component_index]
+        digit, confidence, margin, ranked = _read_digit(mask[y:y + h, x:x + w])
+        digits.append(digit)
+        digit_rows.append({
+            "component_index": component_index,
+            "digit": digit,
+            "confidence": round(float(confidence), 3),
+            "margin": round(float(margin), 3),
+            "ranked": ranked,
+        })
+    evidence["digits"] = digit_rows
+    if digits != [1, 6, 1, 6]:
+        return FullMatchRoundState(
+            False, reason=f"局数字形不是 16/16（可判数字 {digits}）",
+            evidence=evidence)
+    x, y, w, h, area = boxes[2]
+    slash_digit, slash_confidence, slash_margin, slash_ranked = _read_digit(
+        mask[y:y + h, x:x + w])
+    fill_ratio = area / float(w * h)
+    evidence["slash"] = {
+        "digit": slash_digit,
+        "confidence": round(float(slash_confidence), 3),
+        "margin": round(float(slash_margin), 3),
+        "ranked": slash_ranked,
+        "fill_ratio": round(fill_ratio, 3),
+    }
+    if slash_digit is not None or fill_ratio > 0.45:
+        return FullMatchRoundState(
+            False, reason="16/16 分隔斜杠形态不成立（五域形态）",
+            evidence=evidence)
+    return FullMatchRoundState(
+        True, round_no=16, round_total=16,
+        reason="同帧顶部局数字形严格确认为 16/16（斜杠独立五域形态）",
         evidence=evidence)
 
 

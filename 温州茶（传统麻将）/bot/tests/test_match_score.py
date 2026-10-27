@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from match_score import (
     FULL_MATCH_ROUND_ROI,
@@ -151,3 +152,41 @@ def test_unknown_player_name_blocks_score_persistence_and_leave_gate():
     assert state.ok is False
     assert state.left_player is None
     assert "left 昵称" in state.reason
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-27 实机终局帧（房 991671，烘熊瞎 +4 / 玉姐 −4）：标定帧的
+# 「/ 与分母 1 相连成四连通域」在该帧不成立——两者相距 1px 独立成五域；
+# 且左侧昵称 ROI 混入的零星橙墨曾把玉姐本名压到 0.13。两处都已修复。
+# 帧在采集目录（未入 Git），缺席时 skip。
+# ---------------------------------------------------------------------------
+FINAL_SESSION_ROOT = BOT_DIR.parent / "采集" / "dev_auto_play"
+
+
+def _final_frame(session: str, stamp: str) -> np.ndarray:
+    frames = FINAL_SESSION_ROOT / session / "frames"
+    hits = sorted(frames.glob(f"20261027_{stamp}*.png")) if frames.exists() else []
+    if not hits:
+        pytest.skip("实机终局帧不在本机（采集目录未入 Git）")
+    return _read(hits[0])
+
+
+def test_full_match_round_five_component_form_is_accepted():
+    """斜杠独立成域的五连通域形态也必须严格认出 16/16。"""
+    frame = _final_frame("ui_20261027_211056_emulator5556_烘熊瞎", "214600")
+    state = read_full_match_round(frame)
+    assert state.ok, state.reason
+    assert (state.round_no, state.round_total) == (16, 16)
+    assert state.evidence.get("form") == "five_component"
+
+
+def test_real_final_summary_reads_scores_and_names():
+    """双端终局帧：昵称与带符号积分全过门，结果与实机结算一致。"""
+    for session, stamp in (
+        ("ui_20261027_211056_emulator5556_烘熊瞎", "214600"),
+        ("ui_20261027_210205_emulator5554_玉姐", "214602"),
+    ):
+        state = read_match_score(_final_frame(session, stamp))
+        assert state.ok, state.reason
+        assert (state.left_player, state.left_score) == ("烘熊瞎", 4)
+        assert (state.right_player, state.right_score) == ("玉姐", -4)

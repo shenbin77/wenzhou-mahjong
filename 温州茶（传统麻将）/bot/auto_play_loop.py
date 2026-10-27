@@ -1410,6 +1410,16 @@ class AutoPlayLoop:
                     "frame": str(frame_path), "round_signal": round_signal,
                 }
                 base["hand_ledger"] = self._hand_ledger.ledger()
+                # 牌局结束总结屏同样无房号/无财神/无手牌，会先落进这条
+                # 「不在牌桌」分支——返回大厅通道若只挂在回合门禁之前
+                # 就永远走不到（2026-10-27 21:46 实机：两端 16/16 打完
+                # 只记 idle，整场卡在总结屏等倒计时自行消散）。先给它
+                # 一次判定机会：不是总结屏时它原样返回 None，本分支
+                # 行为逐字不变。
+                match_end_event = self._match_end_event(
+                    image, frame_path, base, started)
+                if match_end_event is not None:
+                    return match_end_event
                 return self._event({
                     **base,
                     "reason": ("不在牌桌（无房号/无财神/无手牌）：不做任何决策，"
