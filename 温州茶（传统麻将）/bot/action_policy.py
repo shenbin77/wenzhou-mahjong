@@ -1213,6 +1213,8 @@ class ActionPolicyConfig:
     #   牌不在视觉词汇里）一律不补，按"来牌未知"弃权。
     use_sparkle_arbitration: bool = True
     sparkle_recover_tile: bool = True
+    # Evidence-only experiment; it never supplies a playable incoming tile.
+    incoming_shadow_enabled: bool = False
 
 
 def human_confirm_required(action: str, config: ActionPolicyConfig) -> bool:

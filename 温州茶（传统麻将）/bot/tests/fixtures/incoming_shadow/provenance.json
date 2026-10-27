@@ -1,0 +1,15 @@
+{
+  "frames": [
+    {
+      "file": "20261027_174850_853803_before_e60abb.png",
+      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_174410_emulator5556_烘熊瞎\\frames\\20261027_174850_853803_before_e60abb.png",
+      "sha256": "a5c1b7c0be0edf282c8954f24ee4e8c78450c8dc59b9696f47f59b560b59b8c0"
+    },
+    {
+      "file": "20261027_182723_607182_before_531165.png",
+      "source": "D:\\温州麻将\\温州茶（传统麻将）\\采集\\dev_auto_play\\ui_20261027_180652_emulator5556_烘熊瞎\\frames\\20261027_182723_607182_before_531165.png",
+      "sha256": "887d03b47de7cf16c02247c48ea96e9dcc052822b1217088ebfa90d8507b0e83"
+    }
+  ],
+  "ground_truth_status": "Only classifier regression inputs; historical C1 auto-pair labels are provisional."
+}

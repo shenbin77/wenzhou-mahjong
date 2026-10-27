@@ -924,11 +924,13 @@ class TileVision:
         groups.append(group)
         return [b for g in groups for b in g], list(boxes[cut:]), [len(g) for g in groups]
 
-    def classify_crop(self, crop, caishen_label=None):
+    def classify_crop(self, crop, caishen_label=None, *, include_candidates=False):
         """Classify one tile crop; a 财-marked tile may be settled by its badge.
 
         caishen_label is this round's caishen in vision vocabulary. When it is
         unknown the badge is reported but never used to invent a tile.
+        include_candidates exposes every loaded label's raw template score for
+        read-only diagnostics. It never changes acceptance or ranks by rules.
         """
         self.load_templates()
         marked = caishen_badge(crop)
@@ -951,6 +953,8 @@ class TileVision:
                               label=caishen_label, accepted=True,
                               reason='caishen_marked')
             result['caishen_marked'] = marked
+            if include_candidates:
+                result.update(candidates=[], candidates_complete=False)
             return result
         scores = self._matrix @ sig.ravel()
         by_label = {}
@@ -966,6 +970,12 @@ class TileVision:
                 'score': score, 'margin': margin, 'accepted': accepted,
                 'runner_up': ranked[1][0] if len(ranked)>1 else None,
                 'reason': 'accepted' if accepted else ('low_score' if score<self.min_score else 'ambiguous')}
+        if include_candidates:
+            result['candidates'] = [
+                {'label': name, 'tile_id': candidate_id, 'score': candidate_score}
+                for name, (candidate_score, candidate_id) in ranked
+            ]
+            result['candidates_complete'] = True
         # The red 财 banner is the game declaring "this tile is the caishen".
         # A known label therefore outranks an ambiguous glyph (九萬/八萬 land at
         # 0.845-0.854 here); the glyph reading is kept for audit.

@@ -73,6 +73,7 @@ Fail-closed 契约
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
@@ -394,17 +395,20 @@ def load_vision(template_dir: str | Path | None = None):
     return cached
 
 
-def _classify(crop: np.ndarray, vision) -> dict[str, Any]:
+def _classify(crop: np.ndarray, vision, *, include_candidates: bool = False) -> dict[str, Any]:
     """分类一张牌，任何异常都折成"没认出来"。"""
     if crop is None or crop.size == 0:
         return {"tile_id": None, "label": None, "score": 0.0, "margin": 0.0,
                 "accepted": False, "reason": "empty_crop"}
     try:
-        result = vision.classify_crop(crop, caishen_label=None)
+        if include_candidates:
+            result = vision.classify_crop(crop, caishen_label=None, include_candidates=True)
+        else:
+            result = vision.classify_crop(crop, caishen_label=None)
     except Exception as exc:  # noqa: BLE001 - 单张失败不能拖垮整帧
         return {"tile_id": None, "label": None, "score": 0.0, "margin": 0.0,
                 "accepted": False, "reason": f"classify_error:{type(exc).__name__}"}
-    return {
+    evidence = {
         "tile_id": result.get("tile_id"),
         "label": result.get("label"),
         "score": float(result.get("score") or 0.0),
@@ -412,6 +416,16 @@ def _classify(crop: np.ndarray, vision) -> dict[str, Any]:
         "accepted": bool(result.get("accepted")),
         "reason": str(result.get("reason") or ""),
     }
+    if include_candidates:
+        labels = sorted({name for name, _tid, _sig in vision.templates})
+        matrix = np.ascontiguousarray(vision._matrix)
+        fingerprint = hashlib.sha256(
+            ("tile-signature-v1:" + ",".join(labels)).encode("utf-8")
+            + matrix.tobytes()).hexdigest()
+        evidence.update(candidates=result.get("candidates", []),
+                        candidates_complete=result.get("candidates_complete") is True,
+                        candidate_labels=labels, template_fingerprint=fingerprint)
+    return evidence
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +511,7 @@ def read_opponent_sparkle_tile(
     sparkle_x: int | None = None,
     vision=None,
     template_dir: str | Path | None = None,
+    include_candidates: bool = False,
 ) -> dict[str, Any]:
     """严格读取对手闪光标正下方的新弃牌。
 
@@ -545,7 +560,17 @@ def read_opponent_sparkle_tile(
     evidence["slot"] = int(slot)
     evidence["box"] = [int(x0), int(y0), int(x1), int(y1)]
     classifier = vision or load_vision(template_dir)
-    result = _classify(image[y0:y1, x0:x1], classifier)
+    crop = image[y0:y1, x0:x1]
+    result = (_classify(crop, classifier, include_candidates=True)
+              if include_candidates else _classify(crop, classifier))
+    if include_candidates:
+        evidence.update({key: result.get(key) for key in
+                         ("candidates", "candidates_complete", "candidate_labels",
+                          "template_fingerprint")})
+        evidence["frame_sha256"] = hashlib.sha256(
+            np.ascontiguousarray(image).tobytes()).hexdigest()
+        evidence["crop_sha256"] = hashlib.sha256(
+            np.ascontiguousarray(crop).tobytes()).hexdigest()
     evidence.update({
         "tile_id": result.get("tile_id"),
         "label": result.get("label"),

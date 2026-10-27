@@ -237,3 +237,44 @@ def test_template_directories_and_thresholds_remain_independent(tmp_path):
     assert not np.array_equal(first._matrix[0], second._matrix[0])
     assert first.classify_crop(tile_image())["accepted"] is True
     assert strict.classify_crop(tile_image())["accepted"] is False
+
+
+def test_candidate_diagnostics_are_opt_in_complete_and_do_not_change_decision(tmp_path):
+    directory = make_bank(tmp_path / "tiles")
+    vision = load(directory)
+    ordinary = vision.classify_crop(tile_image())
+    detailed = vision.classify_crop(tile_image(), include_candidates=True)
+    candidates = detailed.pop("candidates")
+    assert detailed.pop("candidates_complete") is True
+    assert detailed == ordinary
+    assert "candidates" not in ordinary
+    assert "candidates_complete" not in ordinary
+    assert {row["label"] for row in candidates} == {"w1", "w2"}
+    assert len(candidates) == 2  # multiple templates aggregate by label
+    assert [row["score"] for row in candidates] == sorted(
+        (row["score"] for row in candidates), reverse=True)
+    assert all(set(row) == {"label", "tile_id", "score"} for row in candidates)
+    assert all(row["tile_id"] == tv.TILE_IDS[row["label"]] for row in candidates)
+
+
+def test_candidates_do_not_promote_a_below_threshold_result(tmp_path):
+    directory = make_bank(tmp_path / "tiles")
+    vision = tv.TileVision(template_dir=directory, min_score=1.1)
+    result = vision.classify_crop(tile_image(), include_candidates=True)
+    assert result["accepted"] is False
+    assert result["reason"] == "low_score"
+    assert result["tile_id"] is None
+    assert result["candidates_complete"] is True
+    assert result["candidates"][0]["tile_id"] == tv.TILE_IDS["w1"]
+
+
+def test_no_glyph_has_no_complete_candidate_distribution(tmp_path):
+    directory = make_bank(tmp_path / "tiles")
+    vision = load(directory)
+    blank = np.full((90, 70, 3), (215, 220, 225), np.uint8)
+    ordinary = vision.classify_crop(blank)
+    result = vision.classify_crop(blank, include_candidates=True)
+    assert result.pop("candidates") == []
+    assert result.pop("candidates_complete") is False
+    assert result == ordinary
+    assert ordinary["reason"] == "no_glyph"
