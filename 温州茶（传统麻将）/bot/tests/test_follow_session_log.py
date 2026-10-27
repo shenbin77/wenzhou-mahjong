@@ -27,6 +27,7 @@ def test_claim_channel_stays_false_for_log_ui():
     assert CLAIM_TAP_CHANNEL_READY is True
 
 
+@pytest.mark.real_tk
 def test_embedded_panel_shows_empty_state(tmp_path: Path):
     root = _tk_root()
     try:
@@ -45,6 +46,7 @@ def test_embedded_panel_shows_empty_state(tmp_path: Path):
         root.destroy()
 
 
+@pytest.mark.real_tk
 def test_embedded_panel_tails_jsonl(tmp_path: Path):
     root = _tk_root()
     try:
@@ -81,6 +83,7 @@ def test_embedded_panel_tails_jsonl(tmp_path: Path):
         root.destroy()
 
 
+@pytest.mark.real_tk
 def test_detached_toplevel_still_works(tmp_path: Path):
     root = _tk_root()
     try:
@@ -92,6 +95,7 @@ def test_detached_toplevel_still_works(tmp_path: Path):
     finally:
         root.destroy()
 
+@pytest.mark.real_tk
 def test_embedded_panel_is_permanently_visible(tmp_path: Path):
     """Operational log remains visible; the old collapse control is gone."""
     root = _tk_root()

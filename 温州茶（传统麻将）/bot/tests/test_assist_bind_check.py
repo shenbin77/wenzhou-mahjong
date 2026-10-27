@@ -9,6 +9,7 @@ from queue import Queue
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 BOT = Path(__file__).resolve().parent.parent
 if str(BOT) not in sys.path:
@@ -555,6 +556,7 @@ def test_idle_copy_is_not_duplicated():
 
 
 # ------------------------------------------------------------- real Tk window
+@pytest.mark.real_tk
 def test_real_window_binding_menu_and_idle_chrome(tmp_path, monkeypatch):
     import tkinter as tk
 

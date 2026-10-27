@@ -345,6 +345,7 @@ def test_picker_stays_visible_for_tea_during_badge_changes():
     assert calls == [True, True, True, True]
 
 
+@pytest.mark.real_tk
 def test_manual_picker_is_a_stable_button_not_a_refreshing_combobox():
     try:
         root = assist_window.tk.Tk()
@@ -741,6 +742,7 @@ def test_live_state_renders_ui_only_unknown_tiles_without_action_authority():
     assert state.actionable is False
 
 
+@pytest.mark.real_tk
 def test_saved_bright_frame_renders_in_real_hidden_tk_window(tea_raw, log_dir):
     import time
     import tkinter as tk
@@ -761,9 +763,12 @@ def test_saved_bright_frame_renders_in_real_hidden_tk_window(tea_raw, log_dir):
         assert {"hand", "advice", "candidates"} <= set(window.images)
         assert "财神" in window.caishen_title.get()
     finally:
-        root.destroy()
         if window is not None:
-            window.executor.shutdown(wait=False)
+            window.close()
+            assert window._quit_completed
+            assert not window._system_tray.running
+        else:
+            root.destroy()
 
 
 # -- 9. read-only command whitelist -------------------------------------

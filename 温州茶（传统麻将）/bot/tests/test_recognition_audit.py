@@ -215,6 +215,7 @@ def test_live_worker_records_each_analyzed_frame_and_errors(tmp_path, monkeypatc
     assert events[-1]["flags"] == ["analysis_error", "no_tile_evidence"]
 
 
+@pytest.mark.real_tk
 def test_review_window_displays_recorded_frame_without_changing_source(tmp_path):
     from PIL import Image
     from recognition_review import RecognitionReview
@@ -268,6 +269,7 @@ def test_existing_mp4_is_sampled_and_followable_without_mutating_video(tmp_path)
 
 
 @pytest.mark.parametrize("mode", ["温州茶 · 2人", "温州茶 · 4人", "温州熟 · 4人"])
+@pytest.mark.real_tk
 def test_primary_window_preflight_shows_real_frame_without_adb(tmp_path, monkeypatch, mode):
     """Offline preflight UI path; isolate worker from suite CPU contention.
 
@@ -335,6 +337,7 @@ def test_primary_window_preflight_shows_real_frame_without_adb(tmp_path, monkeyp
         window.close()
 
 
+@pytest.mark.real_tk
 def test_video_frames_feed_primary_view_without_opening_second_window(tmp_path, monkeypatch):
     import time
     from PIL import Image
@@ -376,6 +379,7 @@ def test_video_frames_feed_primary_view_without_opening_second_window(tmp_path, 
         window.close()
 
 
+@pytest.mark.real_tk
 def test_previous_compact_window_opens_as_primary_live_view(monkeypatch):
     import assist_window
 
