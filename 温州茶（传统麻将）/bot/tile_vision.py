@@ -270,7 +270,34 @@ def strip_claim_marker(crop):
         return crop, False
     disc = np.isin(labels, list(keep))
     if np.count_nonzero(disc & shade) < 20:
-        return crop, False
+        # A newly claimed meld can sit flush with the bottom edge.  In that
+        # layout the black source disc is above the detected tile box and only
+        # the centred yellow triangle is clipped into the crop.  Requiring the
+        # disc here leaves the triangle inside the glyph signature (the real
+        # 2026-10-27 4-5-6 chi then read its leading 4万 as a weak 9万).
+        #
+        # Recover only this clipped form: the compact triangle must enter from
+        # the crop's top edge and extend through almost the whole marker band.
+        # The earlier centre/span checks still exclude the top-left 财神 badge
+        # and the full-width gold selection cap.  We remove only the opaque
+        # triangle; no hidden glyph pixels or tile label are invented.
+        clipped_triangle = (
+            int(ys.min()) == 0
+            and int(ys.max()) >= band_h - 3
+            and int(np.count_nonzero(yellow[0])) >= max(6, int(round(w*.07)))
+        )
+        if not clipped_triangle:
+            return crop, False
+        out = crop.copy()
+        tri = np.zeros((h, w), bool)
+        tri[:band_h] = cv2.dilate(
+            yellow.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        lower = crop[band_h:]
+        face_pixels = lower[hsv[band_h:, :, 2] >= background*.95]
+        if not len(face_pixels):
+            return crop, False
+        out[tri] = np.median(face_pixels, axis=0).astype(np.uint8)
+        return out, True
     dys, dxs = np.nonzero(disc)
     (cx, cy), radius = cv2.minEnclosingCircle(
         np.stack([dxs, dys], 1).astype(np.float32))

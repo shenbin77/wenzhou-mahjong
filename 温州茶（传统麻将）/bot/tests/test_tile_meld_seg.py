@@ -36,6 +36,14 @@ ANKONG_FRAME = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261023_223759
                 / "live" / "tea_2p" / "20261023_223915_802417_ee3d70.png")
 TWO_RAISED_FRAME = (BOT_DIR.parent / "采集" / "assist_sessions" / "20261023_223759"
                     / "live" / "tea_2p" / "20261023_224750_469278_eec744.png")
+CHI_CLIPPED_MARKER_FRAMES = [
+    (BOT_DIR.parent / "采集" / "dev_auto_play"
+     / "ui_20261027_134956_emulator5554_玉姐" / "frames" / name)
+    for name in (
+        "20261027_135318_100503_after_chi_abd550.png",
+        "20261027_135319_559613_after_chi_8642cc.png",
+    )
+]
 
 
 def make_vision() -> TileVision:
@@ -212,6 +220,23 @@ def test_xigang_dev_frame_claim_markers_no_longer_force_abstain():
     assert weak == []
     assert all(d["accepted"] for d in vision.meld_diagnostics)
     assert any(d.get("claim_marker") for d in vision.meld_diagnostics)
+    assert vision.last_complete is True
+
+
+@pytest.mark.parametrize("frame", CHI_CLIPPED_MARKER_FRAMES)
+def test_new_chi_with_clipped_source_marker_reads_complete_run(frame):
+    """底边新吃组只露出黄三角时，仍须按原阈值读全 4万/5万/6万。"""
+    need(frame)
+    vision = TileVision(template_dir=TEA_TEMPLATES, caishen_label="t1")
+    img = cv2.imdecode(np.fromfile(str(frame), np.uint8), cv2.IMREAD_COLOR)
+
+    vision.recognize_hand(img, caishen_label="t1")
+
+    assert vision.detection_diagnostics["meld_groups"] == [3]
+    assert [d["label"] for d in vision.meld_diagnostics] == ["w4", "w5", "w6"]
+    assert all(d["accepted"] for d in vision.meld_diagnostics)
+    assert vision.meld_diagnostics[0].get("claim_marker") is True
+    assert [tile_id for tile_id, *_ in vision.last_melds] == [4, 5, 6]
     assert vision.last_complete is True
 
 
