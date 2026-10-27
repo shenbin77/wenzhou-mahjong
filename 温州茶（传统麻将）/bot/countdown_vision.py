@@ -1,26 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Countdown visual detector for the tea table (P0-3).
+"""Read reviewed seconds only from the native central tea-table timer.
 
-Reads a small set of verified ROIs on a 1600x900 BGR frame and reports whether
-a turn/claim countdown digit is visible. Exact OCR is best-effort against
-synthetic digit templates; when the digit cannot be read the status is
-``unreadable`` (fail-closed) rather than the old permanent ``unknown`` stub.
-
-Statuses
---------
-``absent``      no digit-like blob in the countdown ROIs
-``present``     digit blob seen and seconds parsed (>= 2)
-``low``         parsed seconds == 1 (opponent may click first)
-``expired``     parsed seconds == 0
-``unreadable``  blob-like evidence without a trusted digit parse, or bad frame
-
-This module is pure vision: no ADB, no clicks, no disk writes.
+The API is unchanged. This isolated slice first proves the panel at its fixed
+native position, then compares the ENTIRE digit slot with retained real crops.
+It never searches a broad area for a convenient digit. Only 1, 2 and 3 have
+independent-frame coverage in this slice; zero, other values, multiple digits,
+occlusion and uncertain source evidence return seconds=None. No click policy
+or deadline rule lives here.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -28,44 +22,34 @@ import numpy as np
 
 FRAME_HEIGHT = 900
 FRAME_WIDTH = 1600
-
-# Verified band just above the claim-row discs (y≈534..666). Digits, when shown
-# during a claim prompt, sit in the right half of this strip on tea_2p frames.
-COUNTDOWN_ROIS: tuple[tuple[int, int, int, int], ...] = (
-    (450, 540, 1000, 1520),  # y0,y1,x0,x1 — above claim discs
-    (300, 420, 720, 980),    # table-centre seat timer pocket
-)
-
-DIGIT_MATCH_MIN = 0.55
-BLOB_AREA_MIN = 40
-BLOB_AREA_MAX = 4000
-BLOB_H_MIN = 14
-BLOB_H_MAX = 90
-BLOB_W_MIN = 6
-BLOB_W_MAX = 70
-
+PANEL_ROI = (716, 315, 884, 486)  # x0, y0, x1, y1, native pixels
+DIGIT_SLOT_ROI = (767, 374, 833, 427)
+COUNTDOWN_ROIS = ((374, 427, 767, 833),)  # legacy y0,y1,x0,x1 format
+PANEL_ANCHORS = {
+    "top": (14, 3, 154, 13),
+    "bottom": (14, 157, 154, 169),
+    "left": (2, 14, 13, 157),
+    "right": (155, 14, 167, 157),
+}
+PANEL_MATCH_MIN = 0.97
+DIGIT_MATCH_MIN = 0.98
+DIGIT_MARGIN_MIN = 0.10
+REVIEWED_SECONDS = (1, 2, 3)
+TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "countdown"
 STATUS_ABSENT = "absent"
 STATUS_PRESENT = "present"
 STATUS_LOW = "low"
-STATUS_EXPIRED = "expired"
+STATUS_EXPIRED = "expired"  # API compatibility; zero is not reviewed here.
 STATUS_UNREADABLE = "unreadable"
 
 __all__ = [
-    "COUNTDOWN_ROIS",
-    "CountdownReading",
-    "STATUS_ABSENT",
-    "STATUS_EXPIRED",
-    "STATUS_LOW",
-    "STATUS_PRESENT",
-    "STATUS_UNREADABLE",
-    "detect_countdown",
+    "COUNTDOWN_ROIS", "CountdownReading", "STATUS_ABSENT", "STATUS_EXPIRED",
+    "STATUS_LOW", "STATUS_PRESENT", "STATUS_UNREADABLE", "detect_countdown",
 ]
 
 
 @dataclass(frozen=True)
 class CountdownReading:
-    """One-frame countdown verdict."""
-
     status: str
     seconds: int | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
@@ -78,128 +62,154 @@ class CountdownReading:
         }
 
 
-def _render_digit(digit: int, height: int = 48) -> np.ndarray:
-    """Synthetic white-on-black digit used as a weak template."""
-    canvas = np.zeros((height, max(20, height // 2 + 8)), np.uint8)
-    thickness = max(2, height // 12)
-    cv2.putText(
-        canvas, str(digit), (2, height - 6),
-        cv2.FONT_HERSHEY_SIMPLEX, height / 40.0, 255, thickness, cv2.LINE_AA,
+def _crop(image: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    x0, y0, x1, y1 = box
+    return image[y0:y1, x0:x1]
+
+
+@lru_cache(maxsize=8)
+def _decode_asset(raw: bytes) -> np.ndarray:
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("template PNG cannot be decoded")
+    # Bytes-backed storage cannot be made writable by another observation.
+    return np.frombuffer(image.tobytes(), np.uint8).reshape(image.shape)
+
+
+def _load_asset(record: dict, expected_shape: tuple[int, int, int]) -> np.ndarray:
+    name = str(record["file"])
+    if Path(name).name != name or "/" in name or "\\" in name:
+        raise ValueError("template file must be a local filename")
+    raw = (TEMPLATE_DIR / name).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != record["asset_sha256"]:
+        raise ValueError("template hash mismatch")
+    image = _decode_asset(raw)
+    if image.shape != expected_shape:
+        raise ValueError("template dimensions do not match native ROI")
+    return image
+
+
+def _load_templates() -> tuple[np.ndarray, dict[int, np.ndarray]]:
+    # Re-read and hash the few small assets. Cache only decoding by exact bytes:
+    # changed/missing/corrupt assets can never silently reuse an old template.
+    manifest = json.loads((TEMPLATE_DIR / "manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("countdown manifest must be an object")
+    if (manifest.get("schema") != "countdown_templates/v1"
+            or manifest.get("native_shape") != [900, 1600, 3]
+            or tuple(manifest.get("panel_roi_xyxy", ())) != PANEL_ROI
+            or tuple(manifest.get("slot_roi_xyxy", ())) != DIGIT_SLOT_ROI
+            or tuple(manifest.get("reviewed_seconds", ())) != REVIEWED_SECONDS):
+        raise ValueError("unreviewed countdown manifest")
+    panel = _load_asset(manifest["panel"], (171, 168, 3))
+    digits = {}
+    for record in manifest["digits"]:
+        seconds = int(record["seconds"])
+        if seconds not in REVIEWED_SECONDS or seconds in digits:
+            raise ValueError("duplicate or unreviewed countdown template")
+        digits[seconds] = _load_asset(record, (53, 66, 3))
+    if tuple(sorted(digits)) != REVIEWED_SECONDS:
+        raise ValueError("missing reviewed countdown template")
+    return panel, digits
+
+
+def _prove_timer_source(image: np.ndarray, reference: np.ndarray) -> dict:
+    current = cv2.cvtColor(_crop(image, PANEL_ROI), cv2.COLOR_BGR2GRAY)
+    expected = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY)
+    scores = {}
+    for name, box in PANEL_ANCHORS.items():
+        observed_edge = _crop(current, box)
+        reference_edge = _crop(expected, box)
+        score = float(cv2.matchTemplate(
+            observed_edge, reference_edge, cv2.TM_CCOEFF_NORMED)[0, 0])
+        scores[name] = score if np.isfinite(score) else -1.0
+    return {
+        "verified": all(value >= PANEL_MATCH_MIN for value in scores.values()),
+        "panel_roi_xyxy": list(PANEL_ROI),
+        "required_edges": list(PANEL_ANCHORS),
+        "edge_scores": {key: round(value, 6) for key, value in scores.items()},
+        "minimum_edge_score": PANEL_MATCH_MIN,
+    }
+
+
+def _gold_mask(slot: np.ndarray) -> np.ndarray:
+    hsv = cv2.cvtColor(slot, cv2.COLOR_BGR2HSV)
+    return ((hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 40)
+            & (hsv[:, :, 1] >= 55) & (hsv[:, :, 2] >= 110))
+
+
+def _read_complete_slot(image: np.ndarray, templates: dict[int, np.ndarray]) -> dict:
+    observed = _gold_mask(_crop(image, DIGIT_SLOT_ROI))
+    ys, xs = np.where(observed)
+    if not len(xs):
+        return {"seconds": None, "reason": "timer_slot_has_no_reviewed_glyph"}
+    box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    x0, y0, x1, y1 = box
+    # The entire slot is retained. Two digits or clipped/extra glyphs are never
+    # cropped down to the largest component and mistaken for a single second.
+    complete_single = (
+        11 <= x1 - x0 <= 28 and 29 <= y1 - y0 <= 38
+        and 30 <= (x0 + x1) / 2 <= 36
+        and 6 <= y0 and y1 <= 46
     )
-    return canvas
-
-
-@lru_cache(maxsize=1)
-def _digit_templates() -> tuple[tuple[int, np.ndarray], ...]:
-    return tuple((d, _render_digit(d)) for d in range(10))
-
-
-def _match_digit(gray_roi: np.ndarray) -> tuple[int | None, float]:
-    """Return (digit, score) for the best synthetic-template match."""
-    if gray_roi is None or gray_roi.size == 0:
-        return None, 0.0
-    roi = gray_roi
-    if roi.dtype != np.uint8:
-        roi = roi.astype(np.uint8)
-    best_digit: int | None = None
-    best_score = -1.0
-    rh, rw = roi.shape[:2]
-    for digit, tmpl in _digit_templates():
-        th, tw = tmpl.shape[:2]
-        # scale template to roi height
-        scale = rh / th
-        nw = max(4, int(tw * scale))
-        nh = max(8, int(th * scale))
-        if nw >= rw or nh >= rh:
-            resized = cv2.resize(tmpl, (min(rw - 1, nw), min(rh - 1, nh)),
-                                 interpolation=cv2.INTER_AREA)
-        else:
-            resized = cv2.resize(tmpl, (nw, nh), interpolation=cv2.INTER_AREA)
-        if resized.shape[0] >= rh or resized.shape[1] >= rw:
-            continue
-        result = cv2.matchTemplate(roi, resized, cv2.TM_CCOEFF_NORMED)
-        score = float(result.max()) if result.size else -1.0
-        if score > best_score:
-            best_score = score
-            best_digit = digit
-    if best_score < DIGIT_MATCH_MIN:
-        return None, best_score
-    return best_digit, best_score
-
-
-def _digit_blobs(gray: np.ndarray) -> list[tuple[int, int, int, int, int]]:
-    """Return (x, y, w, h, area) for bright digit-like connected components."""
-    # Prefer bright glyphs on darker felt.
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # Also keep a high fixed threshold path for white digits.
-    _, th_hi = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
-    mask = cv2.bitwise_or(th, th_hi)
-    n, _labels, stats, _cents = cv2.connectedComponentsWithStats(mask)
-    out: list[tuple[int, int, int, int, int]] = []
-    for i in range(1, n):
-        x, y, w, h, area = (int(stats[i, c]) for c in range(5))
-        if area < BLOB_AREA_MIN or area > BLOB_AREA_MAX:
-            continue
-        if h < BLOB_H_MIN or h > BLOB_H_MAX or w < BLOB_W_MIN or w > BLOB_W_MAX:
-            continue
-        aspect = w / max(h, 1)
-        if aspect > 1.6 or aspect < 0.12:
-            continue
-        out.append((x, y, w, h, area))
-    out.sort(key=lambda item: item[4], reverse=True)
-    return out[:6]
+    evidence = {"slot_roi_xyxy": list(DIGIT_SLOT_ROI),
+                "whole_slot_mask_pixels": int(observed.sum()),
+                "mask_box_in_slot": list(box), "complete_single": complete_single}
+    if not complete_single:
+        return {**evidence, "seconds": None,
+                "reason": "unsupported_or_incomplete_timer_number"}
+    ranked = []
+    for seconds, template in templates.items():
+        expected = _gold_mask(template)
+        denominator = int(observed.sum()) + int(expected.sum())
+        dice = 2.0 * int((observed & expected).sum()) / max(1, denominator)
+        ranked.append((dice, seconds))
+    ranked.sort(reverse=True)
+    best, seconds = ranked[0]
+    margin = best - ranked[1][0]
+    evidence.update({
+        "score_metric": "whole_slot_gold_mask_dice", "score_min": DIGIT_MATCH_MIN,
+        "margin_min": DIGIT_MARGIN_MIN,
+        "candidates": [{"seconds": value, "score": round(score, 6)}
+                       for score, value in ranked],
+        "margin": round(margin, 6),
+    })
+    if best < DIGIT_MATCH_MIN or margin < DIGIT_MARGIN_MIN:
+        return {**evidence, "seconds": None, "reason": "unreviewed_or_ambiguous_timer_glyph"}
+    absolute_box = [DIGIT_SLOT_ROI[0] + x0, DIGIT_SLOT_ROI[1] + y0,
+                    DIGIT_SLOT_ROI[0] + x1, DIGIT_SLOT_ROI[1] + y1]
+    return {**evidence, "seconds": seconds, "best": {
+        "seconds": seconds, "score": round(best, 6), "box": absolute_box},
+        "reason": "verified_central_timer_and_complete_reviewed_glyph"}
 
 
 def detect_countdown(image: Any) -> CountdownReading:
-    """Detect claim/turn countdown on one 1600x900 BGR frame."""
-    evidence: dict[str, Any] = {
-        "rois": [list(r) for r in COUNTDOWN_ROIS],
-        "digit_match_min": DIGIT_MATCH_MIN,
-        "candidates": [],
-    }
-    if image is None or not isinstance(image, np.ndarray) or image.ndim != 3:
+    evidence = {"source": "central_timer_native", "rois": [list(r) for r in COUNTDOWN_ROIS],
+                "source_verified": False, "reviewed_seconds": list(REVIEWED_SECONDS)}
+    if (not isinstance(image, np.ndarray) or image.dtype != np.uint8
+            or image.shape != (FRAME_HEIGHT, FRAME_WIDTH, 3)):
+        evidence["reason"] = "invalid_native_bgr_frame"
         return CountdownReading(STATUS_UNREADABLE, None, evidence)
-    if image.shape[0] != FRAME_HEIGHT or image.shape[1] != FRAME_WIDTH:
-        evidence["frame_shape"] = list(image.shape[:2])
+    if not bool(np.any(_crop(image, PANEL_ROI))):
+        evidence["reason"] = "no_timer_panel_pixels"
+        return CountdownReading(STATUS_ABSENT, None, evidence)
+    try:
+        panel, templates = _load_templates()
+        source = _prove_timer_source(image, panel)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, cv2.error) as exc:
+        evidence["reason"] = "countdown_template_error:" + type(exc).__name__
         return CountdownReading(STATUS_UNREADABLE, None, evidence)
-
-    best: tuple[int, float, tuple[int, int, int, int]] | None = None
-    any_blob = False
-    for y0, y1, x0, x1 in COUNTDOWN_ROIS:
-        roi = image[y0:y1, x0:x1]
-        if roi.size == 0:
-            continue
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        blobs = _digit_blobs(gray)
-        if blobs:
-            any_blob = True
-        for x, y, w, h, area in blobs:
-            crop = gray[y:y + h, x:x + w]
-            digit, score = _match_digit(crop)
-            evidence["candidates"].append({
-                "roi": [y0, y1, x0, x1],
-                "box": [x0 + x, y0 + y, x0 + x + w, y0 + y + h],
-                "area": area,
-                "digit": digit,
-                "score": round(score, 4),
-            })
-            if digit is None:
-                continue
-            if best is None or score > best[1]:
-                best = (digit, score, (x0 + x, y0 + y, w, h))
-
-    if best is None:
-        status = STATUS_UNREADABLE if any_blob else STATUS_ABSENT
-        evidence["reason"] = ("digit blob without trusted parse" if any_blob
-                              else "no digit-like blob in countdown ROIs")
-        return CountdownReading(status, None, evidence)
-
-    seconds, score, box = best[0], best[1], best[2]
-    evidence["best"] = {"seconds": seconds, "score": round(score, 4),
-                        "box": [box[0], box[1], box[0] + box[2], box[1] + box[3]]}
-    if seconds <= 0:
-        return CountdownReading(STATUS_EXPIRED, 0, evidence)
-    if seconds == 1:
-        return CountdownReading(STATUS_LOW, 1, evidence)
-    return CountdownReading(STATUS_PRESENT, seconds, evidence)
+    evidence["timer_source"] = source
+    if not source["verified"]:
+        evidence["reason"] = "central_timer_source_unproven_or_occluded"
+        return CountdownReading(STATUS_UNREADABLE, None, evidence)
+    evidence["source_verified"] = True
+    slot = _read_complete_slot(image, templates)
+    evidence["digit_slot"] = slot
+    evidence["reason"] = slot["reason"]
+    seconds = slot.get("seconds")
+    if seconds is None:
+        return CountdownReading(STATUS_UNREADABLE, None, evidence)
+    evidence["best"] = slot["best"]
+    return CountdownReading(STATUS_LOW if seconds == 1 else STATUS_PRESENT,
+                            seconds, evidence)

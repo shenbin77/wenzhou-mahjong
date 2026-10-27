@@ -1,0 +1,104 @@
+{
+  "schema": "countdown_templates/v1",
+  "native_shape": [
+    900,
+    1600,
+    3
+  ],
+  "panel_roi_xyxy": [
+    716,
+    315,
+    884,
+    486
+  ],
+  "slot_roi_xyxy": [
+    767,
+    374,
+    833,
+    427
+  ],
+  "reviewed_seconds": [
+    1,
+    2,
+    3
+  ],
+  "panel": {
+    "file": "timer_panel.png",
+    "asset_sha256": "d07cb7d07fdf37e20cde9113299a4906abf1579dedc37717d1325cfac370bd3b",
+    "source_relative": "温州茶（传统麻将）/采集/dev_auto_play/ui_20261027_211056_emulator5556_烘熊瞎/frames/20261027_211117_787220_before_687e48.png",
+    "source_sha256": "e93281bca2407a71af590f491511d1e8494fa6c2b2979ee7640576d9d61f57a9",
+    "crop_xyxy": [
+      716,
+      315,
+      884,
+      486
+    ],
+    "shape": [
+      171,
+      168,
+      3
+    ],
+    "derivation": "literal crop from retained native frame; no pixel edits"
+  },
+  "digits": [
+    {
+      "seconds": 1,
+      "file": "seconds_1.png",
+      "asset_sha256": "025fe46c33da7108a19df0d79ba5d27302a52074230e039af3e1266be63c8b0b",
+      "source_relative": "温州茶（传统麻将）/采集/dev_auto_play/ui_20261027_211056_emulator5556_烘熊瞎/tap_probe/20261027_211121_761608/selected.png",
+      "source_sha256": "5c377b3546cb5a920c7a47629704d635122f285cee1e02902fc1d642cfe31d8d",
+      "crop_xyxy": [
+        767,
+        374,
+        833,
+        427
+      ],
+      "shape": [
+        53,
+        66,
+        3
+      ],
+      "derivation": "literal crop from retained native frame; no pixel edits"
+    },
+    {
+      "seconds": 2,
+      "file": "seconds_2.png",
+      "asset_sha256": "381f78e56e4ba5b16d799fab817b8e041b7042bd368e366953f7d34e3c7198fa",
+      "source_relative": "温州茶（传统麻将）/采集/dev_auto_play/ui_20261027_211056_emulator5556_烘熊瞎/tap_probe/20261027_211121_761608/before.png",
+      "source_sha256": "500653dcbd164e071d802b9ff5925057a13c261038f3208f8be38f923221d9e5",
+      "crop_xyxy": [
+        767,
+        374,
+        833,
+        427
+      ],
+      "shape": [
+        53,
+        66,
+        3
+      ],
+      "derivation": "literal crop from retained native frame; no pixel edits"
+    },
+    {
+      "seconds": 3,
+      "file": "seconds_3.png",
+      "asset_sha256": "92847e600400fd609508109cf4defc62139f46790545ca339eebb83a573f1ac9",
+      "source_relative": "温州茶（传统麻将）/采集/dev_auto_play/ui_20261027_211056_emulator5556_烘熊瞎/frames/20261027_211117_787220_before_687e48.png",
+      "source_sha256": "e93281bca2407a71af590f491511d1e8494fa6c2b2979ee7640576d9d61f57a9",
+      "crop_xyxy": [
+        767,
+        374,
+        833,
+        427
+      ],
+      "shape": [
+        53,
+        66,
+        3
+      ],
+      "derivation": "literal crop from retained native frame; no pixel edits"
+    }
+  ],
+  "scope": "isolated tea2 source-proof study; zero and all other numbers remain unreviewed",
+  "threshold_policy": "four panel edges NCC >=0.97; full-slot gold mask Dice >=0.98 and margin >=0.10; fixed native geometry"
+}
