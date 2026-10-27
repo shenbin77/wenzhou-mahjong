@@ -1043,6 +1043,9 @@ class AutoPlayLoop:
 
     def _adb_screenshot(self) -> bytes:
         raw = self._run_adb("exec-out", "screencap", "-p")
+        observer = getattr(self, "_incoming_shadow_observer", None)
+        if observer is not None:
+            observer.call("byte_received", raw)
         image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError("模拟器截图不是有效 PNG")
@@ -1105,6 +1108,11 @@ class AutoPlayLoop:
 
     def _write_event(self, event: dict) -> None:
         """Append one dev-tagged ledger line; header line marks the corpus."""
+        observer = getattr(self, "_incoming_shadow_observer", None)
+        if observer is not None:
+            evidence = observer.call("runtime_event", event)
+            if evidence is not None:
+                event["incoming_shadow_observer"] = evidence
         self._ensure_dirs()
         # 双端共用同一套代码时，每一行都必须能独立追溯到设备、玩法、局和帧；
         # 不依赖读者先找到文件头，方便把两端同一局配对复盘。
@@ -1230,7 +1238,53 @@ class AutoPlayLoop:
     # ------------------------------------------------------------------
     # 单帧一周期
     # ------------------------------------------------------------------
+    def _ensure_incoming_shadow_observer(self):
+        if not self._claim_policy.incoming_shadow_enabled:
+            return None
+        observer = getattr(self, "_incoming_shadow_observer", None)
+        if observer is not None:
+            return observer
+        try:
+            from incoming_shadow_context import IncomingShadowObserver, ShadowObserverBinding
+            observer = IncomingShadowObserver(
+                serial=self.serial, session_id=str(self.session_dir))
+            binding = ShadowObserverBinding(self, observer)
+            self._incoming_shadow_observer = observer
+            self._incoming_shadow_binding = binding
+            return observer
+        except Exception as exc:
+            self._incoming_shadow_context_error = type(exc).__name__
+            return None
+
     def tick(self) -> dict:
+        """Observe explicit shadow runs without changing the gameplay path."""
+        if not self._claim_policy.incoming_shadow_enabled:
+            binding = getattr(self, "_incoming_shadow_binding", None)
+            if binding is not None:
+                binding.detach(self)
+                observer = getattr(self, "_incoming_shadow_observer", None)
+                if observer is not None:
+                    observer.call("break_chain", "shadow_disabled")
+                self._incoming_shadow_binding = None
+                self._incoming_shadow_observer = None
+            return self._tick_without_shadow()
+        observer = self._ensure_incoming_shadow_observer()
+        if observer is None:
+            return self._tick_without_shadow()
+        observer.call("begin_cycle", serial=self.serial, session_id=str(self.session_dir))
+        result, error = None, None
+        try:
+            result = self._tick_without_shadow()
+            return result
+        except Exception as exc:
+            error = type(exc).__name__
+            raise
+        finally:
+            # All exits, including capture/foreground errors and unknown scenes.
+            # Only a complete normal wait/claim observation may retain a chain.
+            observer.call("end_cycle", result, error=error)
+
+    def _tick_without_shadow(self) -> dict:
         """跑一个周期并返回本周期的事件记录。任何异常都不重试本帧。"""
         started = self._clock()
         if self.stopped:
@@ -1257,6 +1311,9 @@ class AutoPlayLoop:
         from lobby_preflight import classify_session_scene
         scene = classify_session_scene(
             image, round_probe=self._round_transition.probe)
+        observer = getattr(self, "_incoming_shadow_observer", None)
+        if observer is not None:
+            observer.call("scene", image, scene.ledger(), frame_path)
         scene_base = {
             "ts": datetime.now().astimezone().isoformat(),
             "round_seq": self.round.seq, "frame": str(frame_path),
@@ -1369,6 +1426,10 @@ class AutoPlayLoop:
         # 换局没确认过的帧，本帧读出的"来牌"是跨局差分的结果，标记不可信：
         # 基线照样作废，且本帧的读数不许进 L2（见 _claim_policy_event）。
         self._discard_trusted = self.round.same_round(hud_key, key_caishen)
+        observer = getattr(self, "_incoming_shadow_observer", None)
+        if observer is not None:
+            observer.call("runtime_scope", round_seq=self.round.seq, hud_key=hud_key,
+                          caishen=key_caishen, discards_trusted=self._discard_trusted)
         if not self._discard_trusted:
             self._forget_discards()
         # 每帧喂一次牌河：来牌要前后两帧才认得出，缺了它行动决策只能出"过"。
@@ -3157,6 +3218,9 @@ class AutoPlayLoop:
 
     def _forget_discards(self) -> None:
         """换局时作废牌河基线（``discard_vision`` 的登记处按 key 隔离）。"""
+        observer = getattr(self, "_incoming_shadow_observer", None)
+        if observer is not None:
+            observer.call("break_chain", "runtime_discard_reset")
         self._discard_state = None
         if not self.read_discards:
             return
@@ -3970,11 +4034,28 @@ class AutoPlayLoop:
                 claim_state, resolved_hand,
                 replace(self._claim_policy, chi_enabled=False), image=image)
         if self._claim_policy.incoming_shadow_enabled:
-            from incoming_shadow import ShadowConfig, observe_incoming_shadow
-            incoming_resolution["shadow"] = observe_incoming_shadow(
-                image, hand, incoming_resolution, config=ShadowConfig(enabled=True),
-                context=None,
-                actual_runtime_decision=decision.action if decision is not None else None)
+            try:
+                from incoming_shadow import ShadowConfig, observe_incoming_shadow
+                observer = self._ensure_incoming_shadow_observer()
+                producer = (observer.call("prepare_claim", hand_recovery=hand_recovery)
+                            if observer is not None else None)
+                # Shadow must see THIS frame's raw hand, never the ledger repair.
+                shadow_hand = HandState.from_analysis(analysis)
+                shadow = observe_incoming_shadow(
+                    image, shadow_hand, incoming_resolution, config=ShadowConfig(enabled=True),
+                    context=producer.get("context") if isinstance(producer, dict) else None,
+                    actual_runtime_decision=decision.action if decision is not None else None)
+                if isinstance(shadow, dict):
+                    shadow["producer_evidence"] = producer or {
+                        "producer_blockers": ["context_producer_unavailable"],
+                        "strict_four_gates": False, "execution_eligible": False}
+                incoming_resolution["shadow"] = shadow
+            except Exception as exc:
+                incoming_resolution["shadow"] = {
+                    "shadow_only": True, "would_accept": False, "identity_confirmed": False,
+                    "execution_eligible": False, "strict_four_gates": False,
+                    "blockers": ["shadow_context_error:" + type(exc).__name__],
+                    "actual_runtime_decision": decision.action if decision is not None else None}
         if decision is None:
             return {"claim": {
                 "status": "abstain",
